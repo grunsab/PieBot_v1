@@ -18,7 +18,7 @@ import time
 import threading
 from queue import Queue
 import AlphaZeroNetwork
-from MCTS_cuda import MCTSEngineCUDA, AsyncRootCUDA
+from MCTS_ultra_performance import UltraPerformanceMCTSEngine
 from device_utils import get_optimal_device, optimize_for_device
 
 
@@ -216,11 +216,11 @@ class UCIEngineCUDA:
             self.model.load_state_dict(weights)
             self.model.eval()
             
-            # Initialize CUDA-optimized MCTS engine
-            self.mcts_engine = MCTSEngineCUDA(
+            # Initialize Ultra-Performance MCTS engine
+            self.mcts_engine = UltraPerformanceMCTSEngine(
                 self.model,
                 device=self.device,
-                max_batch_size=self.max_batch_size,
+                batch_size=self.max_batch_size,
                 num_workers=self.threads,
                 verbose=self.verbose
             )
@@ -304,11 +304,10 @@ class UCIEngineCUDA:
             update_interval = max(1000, rollouts // 20)
             last_update = 0
             
-            # Get root node
-            root = self.mcts_engine.search(
+            # Run search
+            best_move = self.mcts_engine.search(
                 self.board, 
-                rollouts, 
-                return_root=True
+                rollouts
             )
             
             elapsed_time = time.time() - start_time
@@ -317,41 +316,21 @@ class UCIEngineCUDA:
             if elapsed_time > 0:
                 self.time_manager.update_performance(rollouts, elapsed_time)
                 
-            # Select best move avoiding repetition
-            if root:
-                sorted_edges = sorted(root.edges, key=lambda e: e.getN(), reverse=True)
+            # Set best move
+            if best_move:
+                # Check for repetition
+                test_board = self.board.copy()
+                test_board.push(best_move)
                 
-                self.best_move = None
-                for edge in sorted_edges:
-                    if edge.getN() == 0:
-                        continue
-                        
-                    move = edge.getMove()
-                    test_board = self.board.copy()
-                    test_board.push(move)
-                    
-                    if not test_board.can_claim_threefold_repetition():
-                        self.best_move = move
-                        break
-                
-                if self.best_move is None and sorted_edges:
-                    self.best_move = sorted_edges[0].getMove()
+                if test_board.can_claim_threefold_repetition():
                     if self.verbose:
-                        print(f"info string Warning: All moves lead to repetition")
+                        print(f"info string Warning: Best move leads to repetition")
+                
+                self.best_move = best_move
                 
                 # Output final info
-                if self.best_move:
-                    best_edge = None
-                    for edge in root.edges:
-                        if edge.getMove() == self.best_move:
-                            best_edge = edge
-                            break
-                    
-                    if best_edge:
-                        score = int(best_edge.getQ() * 1000 - 500)
-                        nps = int(rollouts / elapsed_time) if elapsed_time > 0 else 0
-                        print(f"info depth {rollouts} score cp {score} "
-                              f"nodes {rollouts} nps {nps} pv {self.best_move}")
+                nps = int(rollouts / elapsed_time) if elapsed_time > 0 else 0
+                print(f"info depth {rollouts} nodes {rollouts} nps {nps} pv {self.best_move}")
                         sys.stdout.flush()
                         
                 if self.verbose:

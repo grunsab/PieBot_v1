@@ -19,7 +19,7 @@ import time
 import threading
 from queue import Queue
 import AlphaZeroNetwork
-import MCTS
+from MCTS_ultra_performance import UltraPerformanceMCTSEngine
 from device_utils import get_optimal_device, optimize_for_device
 
 
@@ -147,6 +147,7 @@ class UCIEngine:
         self.verbose = verbose
         self.board = chess.Board()
         self.model = None
+        self.mcts_engine = None
         self.device = None
         self.time_manager = TimeManager(threads=threads)
         self.search_thread = None
@@ -198,9 +199,20 @@ class UCIEngine:
             # Disable gradients for inference
             for param in self.model.parameters():
                 param.requires_grad = False
+            
+            # Initialize Ultra-Performance MCTS engine
+            self.mcts_engine = UltraPerformanceMCTSEngine(
+                self.model,
+                device=self.device,
+                batch_size=512,
+                num_workers=self.threads,
+                verbose=self.verbose
+            )
+            self.mcts_engine.start()
                 
             if self.verbose:
                 print(f"info string Model loaded successfully")
+                print(f"info string Ultra-Performance MCTS engine initialized")
                 sys.stdout.flush()
             return True
             
@@ -279,83 +291,43 @@ class UCIEngine:
                 sys.stdout.flush()
                 return
                 
-            with torch.no_grad():
-                root = MCTS.Root(self.board, self.model)
+            if self.mcts_engine is None:
+                print(f"info string ERROR: No MCTS engine loaded")
+                sys.stdout.flush()
+                return
+            
+            start_time = time.time()
+            
+            # Run search
+            best_move = self.mcts_engine.search(self.board, rollouts)
+            
+            elapsed_time = time.time() - start_time
+            
+            # Update time manager with actual performance
+            if elapsed_time > 0:
+                self.time_manager.update_performance(rollouts, elapsed_time)
+            
+            # Set best move
+            if best_move:
+                # Check for repetition
+                test_board = self.board.copy()
+                test_board.push(best_move)
                 
-                # Perform rollouts
-                # parallelRollouts performs 'threads' rollouts per call
-                # So we need to call it rollouts/threads times
-                num_iterations = max(1, rollouts // self.threads)
-                remainder = rollouts % self.threads
-                
-                start_time = time.time()
-                
-                for i in range(num_iterations):
-                    if self.stop_search.is_set():
-                        break
-                    root.parallelRollouts(self.board.copy(), self.model, self.threads)
-                    
-                    # Output progress periodically
-                    if (i + 1) % max(1, num_iterations // 10) == 0 or i == num_iterations - 1:
-                        current_rollouts = (i + 1) * self.threads
-                        current_edge = root.maxNSelect()
-                        if current_edge:
-                            move = current_edge.getMove()
-                            score = int(current_edge.getQ() * 1000 - 500)
-                            elapsed = time.time() - start_time
-                            nps = int(current_rollouts / elapsed) if elapsed > 0 else 0
-                            print(f"info depth {current_rollouts} score cp {score} nodes {current_rollouts} nps {nps} pv {move}")
-                            sys.stdout.flush()
-                
-                # Handle remainder rollouts if any
-                if remainder > 0 and not self.stop_search.is_set():
-                    root.parallelRollouts(self.board.copy(), self.model, remainder)
-                
-                elapsed_time = time.time() - start_time
-                actual_rollouts = num_iterations * self.threads + (remainder if remainder > 0 else 0)
-                
-                # Update time manager with actual performance
-                if elapsed_time > 0:
-                    self.time_manager.update_performance(actual_rollouts, elapsed_time)
-                                
-                # Get final best move, avoiding threefold repetition
-                # Sort edges by visit count (N) in descending order
-                sorted_edges = sorted(root.edges, key=lambda e: e.getN(), reverse=True)
-                
-                self.best_move = None
-                for edge in sorted_edges:
-                    if edge.getN() == 0:
-                        # Skip edges that were never visited
-                        continue
-                        
-                    move = edge.getMove()
-                    # Create a copy of the board and make the move
-                    test_board = self.board.copy()
-                    test_board.push(move)
-                    
-                    # Check if this move would allow threefold repetition claim
-                    if not test_board.can_claim_threefold_repetition():
-                        # This move doesn't lead to threefold repetition, use it
-                        self.best_move = move
-                        if self.verbose:
-                            if edge != sorted_edges[0]:
-                                print(f"info string Avoided threefold repetition, selected alternative move: {move}")
-                        break
-                
-                # If all moves lead to threefold repetition, use the best one anyway
-                if self.best_move is None and sorted_edges:
-                    self.best_move = sorted_edges[0].getMove()
+                if test_board.can_claim_threefold_repetition():
                     if self.verbose:
-                        print(f"info string Warning: All moves lead to threefold repetition, using best move anyway")
-                    
-                if self.verbose and self.best_move:
-                    print(f"info string Completed {actual_rollouts} rollouts in {elapsed_time:.2f}s")
-                    print(f"info string Rollouts per second: {actual_rollouts/elapsed_time:.1f}")
-                    print(root.getStatisticsString())
+                        print(f"info string Warning: Best move leads to repetition")
+                
+                self.best_move = best_move
+                
+                # Output final info
+                nps = int(rollouts / elapsed_time) if elapsed_time > 0 else 0
+                print(f"info depth {rollouts} nodes {rollouts} nps {nps} pv {self.best_move}")
+                sys.stdout.flush()
+                
+                if self.verbose:
+                    print(f"info string Completed {rollouts} rollouts in {elapsed_time:.2f}s")
+                    print(f"info string Nodes per second: {nps}")
                     sys.stdout.flush()
-                        
-                # Clean up
-                root.cleanup()
                 
         except Exception as e:
             print(f"info string Error during search: {e}")

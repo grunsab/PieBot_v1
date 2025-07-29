@@ -139,6 +139,9 @@ def main():
         device = torch.device(f'cuda:{args.device}')
         print(f"Using GPU: {torch.cuda.get_device_name(args.device)}")
         print(f"GPU Memory: {torch.cuda.get_device_properties(args.device).total_memory / 1e9:.1f}GB")
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        device = torch.device('mps')
+        print("Using Apple Silicon GPU (MPS)")
     else:
         device = torch.device('cpu')
         print("Using CPU")

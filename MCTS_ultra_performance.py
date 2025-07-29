@@ -77,6 +77,12 @@ class UltraPerformanceMCTSEngine:
                                             dtype=torch.float32, pin_memory=True)
             self.cpu_masks = torch.zeros((batch_size, 72 * 8 * 8), 
                                         dtype=torch.float32, pin_memory=True)
+        elif device.type == 'mps':
+            # MPS doesn't support pinned memory, use regular tensors
+            self.cpu_positions = torch.zeros((batch_size, 16, 8, 8), 
+                                            dtype=torch.float32)
+            self.cpu_masks = torch.zeros((batch_size, 72 * 8 * 8), 
+                                        dtype=torch.float32)
         
         # Worker synchronization
         self.running = False
@@ -135,20 +141,24 @@ class UltraPerformanceMCTSEngine:
                 eval_buffer['boards'].clear()
                 eval_buffer['node_indices'].clear()
                 eval_buffer['paths'].clear()
+                
+            # Limit batch size to available buffer size
+            batch_size = min(batch_size, self.batch_size)
             
             # Prepare batch on CPU with pinned memory
-            if self.device.type == 'cuda':
+            if self.device.type in ['cuda', 'mps']:
                 for i, board in enumerate(boards):
                     pos, mask = encoder.encodePositionForInference(board)
                     self.cpu_positions[i].copy_(torch.from_numpy(pos))
                     self.cpu_masks[i].copy_(torch.from_numpy(mask).flatten())
                 
-                # Async copy to GPU
+                # Copy to GPU (async for CUDA, sync for MPS)
                 self.position_tensor[:batch_size].copy_(
-                    self.cpu_positions[:batch_size], non_blocking=True)
+                    self.cpu_positions[:batch_size], non_blocking=(self.device.type == 'cuda'))
                 self.mask_tensor[:batch_size].copy_(
-                    self.cpu_masks[:batch_size], non_blocking=True)
+                    self.cpu_masks[:batch_size], non_blocking=(self.device.type == 'cuda'))
             else:
+                # CPU path
                 for i, board in enumerate(boards):
                     pos, mask = encoder.encodePositionForInference(board)
                     self.position_tensor[i].copy_(torch.from_numpy(pos))
@@ -156,7 +166,14 @@ class UltraPerformanceMCTSEngine:
             
             # GPU evaluation
             with torch.no_grad():
-                with torch.amp.autocast('cuda', dtype=torch.float16):
+                # Use autocast only for CUDA, MPS doesn't support it yet
+                if self.device.type == 'cuda':
+                    with torch.amp.autocast('cuda', dtype=torch.float16):
+                        values, policies = self.neural_network(
+                            self.position_tensor[:batch_size],
+                            policyMask=self.mask_tensor[:batch_size]
+                        )
+                else:
                     values, policies = self.neural_network(
                         self.position_tensor[:batch_size],
                         policyMask=self.mask_tensor[:batch_size]
@@ -191,7 +208,12 @@ class UltraPerformanceMCTSEngine:
             board: chess.Board position
             num_simulations: total number of simulations to run
         """
-        # Initialize root if needed
+        # Clear tree for new search (avoid stale moves)
+        self.nodes.clear()
+        self.children.clear()
+        self.node_lookup.clear()
+        
+        # Initialize root
         root_hash = board.fen()
         if root_hash not in self.node_lookup:
             # Get initial evaluation
