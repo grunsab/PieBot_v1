@@ -112,11 +112,11 @@ def get_batch_size_for_device(base_batch_size=256):
             return base_batch_size
             
     elif device.type == 'mps':
-        # MPS typically has unified memory, but start conservative
-        return base_batch_size // 2
+        # MPS typically has unified memory
+        return base_batch_size
     
     else:  # CPU
-        return base_batch_size // 4
+        return base_batch_size
 
 def get_num_workers_for_device():
     """

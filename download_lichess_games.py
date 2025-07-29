@@ -30,7 +30,7 @@ try:
 except ImportError:
     TQDM_AVAILABLE = False
 
-MIN_RATING = 2600
+MIN_RATING = 3000
 
 import uuid
 import zstandard as zstd
@@ -134,7 +134,7 @@ def extract_and_verify_time_controls(pgn_headers, min_seconds=180):
     return int(initial_time) >= 180
 
 
-def filter_games_by_rating_and_time_control(input_file, output_file, min_rating=2600, min_seconds=180):
+def filter_games_by_rating_and_time_control(input_file, output_file, min_rating=3000, min_seconds=180):
     """Filter games where both players have rating >= min_rating."""
     
     games_processed = 0
@@ -209,138 +209,13 @@ def filter_games_by_rating_and_time_control(input_file, output_file, min_rating=
     return games_kept, games_processed
 
 
-
-# def process_pgn_chunk(args):
-#     """
-#     Process a chunk of games from a PGN file.
-    
-#     Args:
-#         args: Tuple of (input_file, output_dir, start_idx, end_idx, offset, counter, lock)
-#     """
-#     input_file, output_dir, start_idx, end_idx, offset, counter, lock = args
-    
-#     with zstd.open(input_file, 'r') as pgn_fh:
-#         # Skip to the starting position
-#         for _ in range(start_idx):
-#             game = chess.pgn.skip_game(pgn_fh)
-#             if not game:
-#                 return 0
-        
-#         # Process games in this chunk
-#         games_written = 0
-#         for i in range(start_idx, end_idx):
-#             game = chess.pgn.read_game(pgn_fh)
-#             if not game:
-#                 break
-            
-#             if extract_and_verify_rating(game) and verify_time_controls(game) and verify_game_termination(game):
-#                 unique_filename = str(uuid.uuid4())
-#                 output_file = os.path.join(output_dir, f'{unique_filename}.pgn')
-#                 with open(output_file, 'w') as game_fh:
-#                     print(game, file=game_fh, end='\n\n')
-#                 games_written += 1
-            
-#             # Update shared counter
-#             if counter is not None and lock is not None:
-#                 with lock:
-#                     counter.value += 1
-#                     if counter.value % 1000 == 0 and not TQDM_AVAILABLE:
-#                         print(f'Processed {counter.value} games')
-    
-#     return games_written
-
-
-# def process_single_huge_pgn(input_file, output_dir, num_processes=100):
-#     """
-#     Reformat a single large PGN file into individual game files using multiprocessing.
-    
-#     Args:
-#         input_file: Path to the input PGN file
-#         output_dir: Directory to write individual game files
-#         num_processes: Number of processes to use (default: CPU count)
-#         approx_games: Approximate number of games (to skip counting)
-#     """
-#     os.makedirs(output_dir, exist_ok=True)
-    
-#     if num_processes is None:
-#         num_processes = max(mp.cpu_count(), 100)
-    
-#     print(f"Reformatting {input_file} to {output_dir} using {num_processes} processes")
-    
-#     # Count games
-#     print("Counting games in file...")
-#     start_count = time.time()
-#     total_games = count_games_in_pgn_fast(input_file)
-#     count_time = time.time() - start_count
-#     print(f"Found {total_games} games to process (counting took {count_time:.2f}s)")
-    
-#     if total_games == 0:
-#         print("No games found in file")
-#         return
-        
-#     # Setup shared counter for progress tracking
-#     manager = Manager()
-#     counter = manager.Value('i', 0)
-#     lock = manager.Lock()
-    
-#     # Divide work among processes
-#     games_per_process = total_games // num_processes
-#     chunks = []
-    
-#     for i in range(num_processes):
-#         start_idx = i * games_per_process
-#         if i == num_processes - 1:
-#             end_idx = total_games
-#         else:
-#             end_idx = (i + 1) * games_per_process
-        
-#         chunks.append((input_file, output_dir, start_idx, end_idx, 0, counter, lock))
-    
-#     # Process chunks in parallel
-#     start_time = time.time()
-    
-#     if TQDM_AVAILABLE:
-#         with Pool(num_processes) as pool:
-#             with tqdm(total=total_games, desc="Processing games") as pbar:
-#                 results = []
-#                 for chunk in chunks:
-#                     result = pool.apply_async(process_pgn_chunk, (chunk,))
-#                     results.append(result)
-                
-#                 # Monitor progress
-#                 last_count = 0
-#                 while any(not r.ready() for r in results):
-#                     current_count = counter.value
-#                     pbar.update(current_count - last_count)
-#                     last_count = current_count
-#                     time.sleep(0.1)
-                
-#                 # Final update
-#                 pbar.update(counter.value - last_count)
-                
-#                 # Get results
-#                 results = [r.get() for r in results]
-#     else:
-#         with Pool(num_processes) as pool:
-#             results = pool.map(process_pgn_chunk, chunks)
-    
-#     total_written = sum(results)
-#     elapsed_time = time.time() - start_time
-    
-#     print(f'Completed processing and reformatting: {total_written} total games in {elapsed_time:.2f} seconds')
-#     print(f'Processing speed: {total_written/elapsed_time:.2f} games/second')
-
-#     return total_written, total_games
-
-
-
 def main():
     parser = argparse.ArgumentParser(description="Download and filter grandmaster-level games from Lichess")
     parser.add_argument('--months', type=int, default=1, help='Number of months to download (default: 1)')
-    parser.add_argument('--min-rating', type=int, default=2600, help='Minimum rating for both players (default: 2600)')
-    parser.add_argument('--output-dir', default='games_training_data/unprocessed', help='Output directory (default: games_training_data/reformatted)')
+    parser.add_argument('--min-rating', type=int, default=3000, help='Minimum rating for both players (default: 3000)')
+    parser.add_argument('--output-dir', default='games_training_data/reformatted', help='Output directory (default: games_training_data/reformatted)')
     parser.add_argument('--skip-download', action='store_true', help='Skip download and only filter existing files')
-    parser.add_argument('--output-dir-downloads', default='games_training_data/', help='Output directory to store LiChess Databases (default: games_training_data)')
+    parser.add_argument('--output-dir-downloads', default='games_training_data/LiChessData/', help='Output directory to store LiChess Databases (default: games_training_data)')
 
     args = parser.parse_args()
     
@@ -384,7 +259,7 @@ def main():
     total_kept = 0
     total_processed = 0
     
-    MIN_RATING = args.min_rating or 2750
+    MIN_RATING = args.min_rating or 3000
 
     # Process all .pgn.zst files in the output directory
 

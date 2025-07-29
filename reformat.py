@@ -14,6 +14,10 @@ try:
 except ImportError:
     TQDM_AVAILABLE = False
 
+# The default offset to use to determine a unique PGN filename. Important when processing multiple
+# large sets of PGNs from disparate sources.
+STARTING_OFFSET_FOR_FILENAME = 0
+
 def count_games_in_pgn_fast(input_file):
     """
     Count games by scanning for Result tags, which is much faster than parsing.
@@ -68,7 +72,7 @@ def process_pgn_chunk(args):
             if not game:
                 break
             
-            output_file = os.path.join(output_dir, f'{offset + i}.pgn')
+            output_file = os.path.join(output_dir, f'{offset + i + STARTING_OFFSET_FOR_FILENAME}.pgn')
             with open(output_file, 'w') as game_fh:
                 print(game, file=game_fh, end='\n\n')
             
@@ -282,8 +286,8 @@ def reformat_directory(input_dir, output_dir, num_processes=None):
     lock = manager.Lock()
     
     # Add counter and lock to file info
-    file_info_with_progress = [(path, out_dir, offset, counter, lock) 
-                               for path, out_dir, offset in file_info]
+    file_info_with_progress = [(path, out_dir, total_games, counter, lock) 
+                               for path, out_dir, total_games in file_info]
     
     # Process files in parallel
     start_time = time.time()
@@ -322,13 +326,14 @@ def reformat_directory(input_dir, output_dir, num_processes=None):
 def main():
     parser = argparse.ArgumentParser(description='Reformat PGN files for AlphaZero training')
     parser.add_argument('input', help='Input PGN file or directory')
-    parser.add_argument('output', help='Output directory for reformatted files')
+    parser.add_argument('output', help='Output directory for reformatted files', default='games_training_data/reformatted/')
     parser.add_argument('--processes', '-p', type=int, default=None,
                         help='Number of processes to use (default: CPU count)')
     parser.add_argument('--approx-games', '-a', type=int, default=8000,
                         help='Approximate number of games per file (default: 8000, use 0 to force counting)')
     parser.add_argument('--fast-count', '-f', action='store_true',
                         help='Use fast game counting by scanning Result tags')
+    parser.add_argument("--starting-offset", type=int, default=0, help="Set starting index for PGN file number")
     
     args = parser.parse_args()
     
@@ -339,6 +344,10 @@ def main():
         print(f"Error: Input path {input_path} does not exist")
         sys.exit(1)
     
+    if args.starting_offset:
+        STARTING_OFFSET_FOR_FILENAME = args.starting_offset
+
+
     if input_path.is_file():
         approx = args.approx_games if args.approx_games > 0 else None
         reformat_single_pgn(str(input_path), str(output_path), args.processes, approx)

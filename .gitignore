@@ -1,2 +1,5 @@
 venv/
 games_training_data/
+*.pgn
+*.7z
+*.bz2
