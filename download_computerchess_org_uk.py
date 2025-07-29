@@ -110,7 +110,7 @@ def filter_games_by_rating_and_time_control(input_file, output_directory, min_ra
                 i += 1
 
             if games_kept % 1000 == 0:
-                print("Kept {game_kept} games out of {games_processed} games")
+                print(f"Kept {games_kept} games out of {games_processed} games")
     
     print(f"\nFiltering complete!")
     print(f"Total games processed: {games_processed:,}")
