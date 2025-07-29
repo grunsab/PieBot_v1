@@ -18,7 +18,7 @@ import re
 default_epochs = 40
 default_blocks = 20
 default_filters = 256
-default_lr = 0.001
+default_lr = 0.0005
 default_policy_weight = 1.0
 ccrl_dir = os.path.expanduser('games_training_data/reformatted')
 rl_dir = os.path.expanduser('games_training_data/selfplay')

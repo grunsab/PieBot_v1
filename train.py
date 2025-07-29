@@ -15,7 +15,7 @@ import re
 default_epochs = 40
 default_blocks = 20
 default_filters = 256
-default_lr = 0.001
+default_lr = 0.0005
 default_policy_weight = 1.0
 ccrl_dir = os.path.abspath('games_training_data/reformatted/')
 rl_dir = os.path.abspath('games_training_data/selfplay/')
@@ -49,8 +49,8 @@ def parse_args():
                         help='Temperature for label smoothing in mixed mode (default: 0.1)')
     parser.add_argument('--rl-weight-recent', action='store_true',
                         help='Weight recent games more heavily in RL mode (Leela approach)')
-    parser.add_argument('--rl-weight-decay', type=float, default=0.1,
-                        help='Weight decay factor for older games (default: 0.1)')
+    parser.add_argument('--rl-weight-decay', type=float, default=0.05,
+                        help='Weight decay factor for older games (default: 0.05)')
     return parser.parse_args()
 
 def train():
