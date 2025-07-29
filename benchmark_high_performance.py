@@ -44,7 +44,7 @@ def benchmark_mcts(model_path, device_id=0, num_searches=100, rollouts_per_searc
     positions = [
         chess.Board(),  # Starting position
         chess.Board("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1"),  # e4
-        chess.Board("r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK1R b KQkq - 3 3"),  # Italian
+        chess.Board("r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3"),  # Italian
         chess.Board("r1bq1rk1/ppp2ppp/2np1n2/2b1p3/2B1P3/3P1N2/PPP2PPP/RNBQ1RK1 w - - 0 8"),  # Middlegame
         chess.Board("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1"),  # Endgame
     ]
