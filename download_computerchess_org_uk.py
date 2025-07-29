@@ -89,7 +89,6 @@ def filter_games_by_rating_and_time_control(input_file, output_directory, min_ra
     games_processed = 0
     games_kept = 0
     
-    # Open compressed input file
     with open(input_file, 'r') as fh:
         current_game = ""
         in_game = False
@@ -103,7 +102,7 @@ def filter_games_by_rating_and_time_control(input_file, output_directory, min_ra
             if not game:
                 break
             games_processed += 1
-            if game.headers['WhiteElo'] >= min_rating and game.headers['BlackElo'] >= min_rating:
+            if int(game.headers['WhiteElo']) >= min_rating and int(game.headers['BlackElo']) >= min_rating:
                 output_file = os.path.join(output_directory, f'{3000000 + i}.pgn')
                 with open(output_file, 'w') as game_fh:
                     print(game, file=game_fh, end='\n\n')
@@ -160,7 +159,7 @@ def main():
     total_kept = 0
     total_processed = 0
     
-    MIN_RATING = args.min_rating or 2850
+    MIN_RATING = args.min_rating or 3000
 
     # Process all .pgn files in the output directory
 

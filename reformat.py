@@ -129,7 +129,7 @@ def reformat_single_pgn(input_file, output_dir, num_processes=None, approx_games
                 if not game:
                     break
                 
-                output_file = os.path.join(output_dir, f'{game_idx}.pgn')
+                output_file = os.path.join(output_dir, f'{game_idx + STARTING_OFFSET_FOR_FILENAME}.pgn')
                 with open(output_file, 'w') as game_fh:
                     print(game, file=game_fh, end='\n\n')
                 
@@ -205,7 +205,7 @@ def process_pgn_file(args):
             if not game:
                 break
             
-            output_file = os.path.join(output_dir, f'{start_offset + games_written}.pgn')
+            output_file = os.path.join(output_dir, f'{start_offset + games_written + STARTING_OFFSET_FOR_FILENAME}.pgn')
             with open(output_file, 'w') as game_fh:
                 print(game, file=game_fh, end='\n\n')
             
