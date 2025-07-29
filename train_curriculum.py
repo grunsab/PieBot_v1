@@ -141,7 +141,7 @@ def main():
     
     # Phase 1: Supervised learning
     parser.add_argument('--supervised-epochs', type=int, default=20, help='Epochs for supervised learning')
-    parser.add_argument('--supervised-lr', type=float, default=0.001, help='Learning rate for supervised')
+    parser.add_argument('--supervised-lr', type=float, default=0.0005, help='Learning rate for supervised')
     parser.add_argument('--resume-supervised', type=str, help='Resume supervised training from checkpoint')
     parser.add_argument('--skip-supervised', action='store_true', help='Skip supervised phase')
     
@@ -153,7 +153,7 @@ def main():
     
     # Phase 3: Reinforcement learning
     parser.add_argument('--rl-epochs', type=int, default=20, help='Epochs per RL iteration')
-    parser.add_argument('--rl-lr', type=float, default=0.00005, help='Learning rate for RL')
+    parser.add_argument('--rl-lr', type=float, default=0.0005, help='Learning rate for RL')
     parser.add_argument('--iterations', type=int, default=80, help='Number of RL iterations')
     
     # Training configuration
