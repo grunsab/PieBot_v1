@@ -55,7 +55,7 @@ python3 train.py --mode supervised --epochs 20 --lr 0.0005
  python3 train_curriculum.py
  ```
 
-Check the bottom of train_curriculum.py to change the settings.
+Check the bottom of train_curriculum.py to see how to change the settings.
 
 
 ## About the algorithm

@@ -122,10 +122,10 @@ class TimeManager:
         rollouts = int(rps * time_per_move)
         
         # Ensure minimum rollouts for quality
-        rollouts = max(11, rollouts)
+        rollouts = max(100, rollouts)
         
         # Cap maximum rollouts to prevent excessive thinking
-        rollouts = min(10000, rollouts)
+        rollouts = min(100000, rollouts)
         
         return rollouts
 
@@ -407,7 +407,7 @@ class UCIEngine:
                 
         # Calculate rollouts based on time
         if infinite:
-            rollouts = 10000  # High number for analysis
+            rollouts = 100000  # High number for analysis
         elif movetime:
             # Fixed time per move
             time_sec = movetime / 1000.0
