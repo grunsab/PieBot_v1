@@ -1,0 +1,602 @@
+#!/usr/bin/env python3
+"""
+UCI Protocol Implementation for AlphaZero Chess Engine - CUDA/Windows Optimized
+
+High-performance UCI engine optimized for Windows systems with NVIDIA GPUs.
+Specifically tuned for RTX 4080 and similar high-end consumer GPUs.
+
+Time management: Dynamically adjusts rollouts based on available time,
+accounting for the much higher throughput of CUDA-optimized implementation.
+"""
+
+import sys
+import os
+import chess
+import torch
+import argparse
+import time
+import threading
+from queue import Queue
+import AlphaZeroNetwork
+from MCTS_cuda import MCTSEngineCUDA, AsyncRootCUDA
+from device_utils import get_optimal_device, optimize_for_device
+
+
+class TimeManagerCUDA:
+    """Time management optimized for high-performance CUDA systems."""
+    
+    def __init__(self, base_rollouts=50000, base_time=1.0, threads=64):
+        """
+        Initialize time manager for CUDA systems.
+        
+        Args:
+            base_rollouts: Expected rollouts in base_time (50k for RTX 4080)
+            base_time: Time in seconds for base_rollouts
+            threads: Number of worker threads
+        """
+        self.base_rollouts = base_rollouts
+        self.base_time = base_time
+        self.threads = threads
+        self.rollouts_per_second = base_rollouts / base_time
+        
+        # Track actual performance
+        self.measured_rollouts_per_second = None
+        self.measurement_count = 0
+        
+    def update_performance(self, rollouts, elapsed_time):
+        """Update measured performance based on actual timing."""
+        if elapsed_time > 0.05:  # Only update for meaningful measurements
+            new_rps = rollouts / elapsed_time
+            if self.measured_rollouts_per_second is None:
+                self.measured_rollouts_per_second = new_rps
+            else:
+                # Exponential moving average
+                alpha = 0.3
+                self.measured_rollouts_per_second = alpha * new_rps + (1 - alpha) * self.measured_rollouts_per_second
+            self.measurement_count += 1
+            
+    def get_rollouts_per_second(self):
+        """Get the best estimate of rollouts per second."""
+        if self.measured_rollouts_per_second and self.measurement_count >= 2:
+            return self.measured_rollouts_per_second
+        return self.rollouts_per_second
+        
+    def calculate_rollouts(self, wtime, btime, winc, binc, movestogo, turn):
+        """
+        Calculate optimal number of rollouts based on time constraints.
+        
+        Args:
+            wtime: White time in milliseconds
+            btime: Black time in milliseconds
+            winc: White increment in milliseconds
+            binc: Black increment in milliseconds
+            movestogo: Moves to go until time control (0 if sudden death)
+            turn: True if white to move, False if black
+            
+        Returns:
+            Number of rollouts to perform
+        """
+        # Get time for current player
+        time_left = wtime if turn else btime
+        increment = winc if turn else binc
+        
+        if time_left is None:
+            # No time limit, use high quality search
+            return min(100000, self.base_rollouts * 2)
+            
+        # Convert to seconds
+        time_left_sec = time_left / 1000.0
+        increment_sec = increment / 1000.0 if increment else 0
+        
+        # Calculate time to allocate for this move
+        if movestogo and movestogo > 0:
+            # Time control with moves to go
+            time_per_move = time_left_sec / movestogo + increment_sec * 0.9
+        else:
+            # Sudden death or unknown moves to go
+            if time_left_sec > 300:  # 5+ minutes
+                time_fraction = 0.025  # Use 2.5% when lots of time
+            elif time_left_sec > 60:
+                time_fraction = 0.04   # Use 4% with moderate time
+            elif time_left_sec > 10:
+                time_fraction = 0.08   # Use 8% when time is lower
+            else:
+                time_fraction = 0.15   # Use 15% when very low on time
+                
+            time_per_move = time_left_sec * time_fraction + increment_sec * 0.9
+        
+        # Reserve time for overhead (less needed with CUDA)
+        time_per_move = time_per_move * 0.95 - 0.05
+        
+        # Ensure minimum thinking time
+        time_per_move = max(0.05, time_per_move)
+        
+        # Cap at 30% of remaining time
+        time_per_move = min(time_per_move, time_left_sec * 0.3)
+        
+        # Calculate rollouts based on performance
+        rps = self.get_rollouts_per_second()
+        rollouts = int(rps * time_per_move)
+        
+        # Quality thresholds for CUDA systems
+        rollouts = max(5000, rollouts)    # Minimum 5k for quality
+        rollouts = min(500000, rollouts)  # Cap at 500k
+        
+        return rollouts
+
+
+class UCIEngineCUDA:
+    """High-performance UCI engine for Windows/CUDA systems."""
+    
+    def __init__(self, model_path=None, threads=64, verbose=False, 
+                 max_batch_size=512, device_id=0):
+        """
+        Initialize UCI engine for CUDA.
+        
+        Args:
+            model_path: Path to the neural network model file
+            threads: Number of threads for MCTS (64 optimal for high-end CPUs)
+            verbose: Whether to output debug information
+            max_batch_size: Maximum batch size (512 optimal for RTX 4080)
+            device_id: CUDA device ID to use
+        """
+        self.model_path = model_path
+        self.threads = threads
+        self.verbose = verbose
+        self.max_batch_size = max_batch_size
+        self.device_id = device_id
+        self.board = chess.Board()
+        self.model = None
+        self.mcts_engine = None
+        self.device = None
+        self.time_manager = TimeManagerCUDA(base_rollouts=50000, threads=threads)
+        self.search_thread = None
+        self.stop_search = threading.Event()
+        self.best_move = None
+        self.move_overhead = 20  # Lower overhead for CUDA
+        
+        # Windows-specific optimizations
+        if sys.platform == 'win32':
+            # Set process priority to high
+            try:
+                import psutil
+                p = psutil.Process()
+                p.nice(psutil.HIGH_PRIORITY_CLASS)
+            except:
+                pass
+                
+    def load_model(self):
+        """Load the neural network model and initialize CUDA engine."""
+        try:
+            if not self.model_path:
+                self.model_path = "AlphaZeroNet_20x256_distributed.pt"
+            
+            # Handle path resolution for Windows
+            if not os.path.isabs(self.model_path):
+                if os.path.exists(self.model_path):
+                    full_path = os.path.abspath(self.model_path)
+                else:
+                    script_dir = os.path.dirname(os.path.abspath(__file__))
+                    full_path = os.path.join(script_dir, self.model_path)
+                    if not os.path.exists(full_path):
+                        print(f"info string ERROR: Model file not found: {self.model_path}")
+                        sys.stdout.flush()
+                        return False
+            else:
+                full_path = self.model_path
+                if not os.path.exists(full_path):
+                    print(f"info string ERROR: Model file not found: {full_path}")
+                    sys.stdout.flush()
+                    return False
+                
+            # Set CUDA device
+            if torch.cuda.is_available():
+                if self.device_id < torch.cuda.device_count():
+                    self.device = torch.device(f'cuda:{self.device_id}')
+                    device_name = torch.cuda.get_device_name(self.device_id)
+                    device_memory = torch.cuda.get_device_properties(self.device_id).total_memory / 1024**3
+                else:
+                    print(f"info string ERROR: CUDA device {self.device_id} not available")
+                    sys.stdout.flush()
+                    return False
+            else:
+                print("info string ERROR: CUDA not available. This version requires an NVIDIA GPU.")
+                sys.stdout.flush()
+                return False
+                
+            if self.verbose:
+                print(f"info string Loading model from: {full_path}")
+                print(f"info string Using CUDA device {self.device_id}: {device_name}")
+                print(f"info string GPU Memory: {device_memory:.1f}GB")
+                sys.stdout.flush()
+                
+            # Load model
+            self.model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
+            weights = torch.load(full_path, map_location=self.device)
+            self.model.load_state_dict(weights)
+            self.model.eval()
+            
+            # Initialize CUDA-optimized MCTS engine
+            self.mcts_engine = MCTSEngineCUDA(
+                self.model,
+                device=self.device,
+                max_batch_size=self.max_batch_size,
+                num_workers=self.threads,
+                verbose=self.verbose
+            )
+            self.mcts_engine.start()
+                
+            if self.verbose:
+                print(f"info string Model loaded successfully")
+                print(f"info string CUDA MCTS engine initialized")
+                print(f"info string Workers: {self.threads}, Batch size: {self.max_batch_size}")
+                sys.stdout.flush()
+            return True
+            
+        except Exception as e:
+            print(f"info string ERROR loading model: {str(e)}")
+            sys.stdout.flush()
+            return False
+            
+    def uci(self):
+        """Handle 'uci' command."""
+        print("id name AlphaZero UCI Engine (CUDA/Windows)")
+        print("id author AlphaZero Bot")
+        print("option name Threads type spin default 64 min 1 max 256")
+        print("option name Model type string default AlphaZeroNet_20x256_distributed.pt")
+        print("option name Verbose type check default false")
+        print("option name Move Overhead type spin default 20 min 0 max 5000")
+        print("option name Max Batch Size type spin default 512 min 32 max 2048")
+        print("option name Device ID type spin default 0 min 0 max 7")
+        print("uciok")
+        sys.stdout.flush()
+        
+    def isready(self):
+        """Handle 'isready' command."""
+        if self.model is None or self.mcts_engine is None:
+            if not self.load_model():
+                pass
+        print("readyok")
+        sys.stdout.flush()
+        
+    def position(self, args):
+        """Handle 'position' command."""
+        if len(args) < 1:
+            return
+            
+        if args[0] == "startpos":
+            self.board = chess.Board()
+            moves_start = 1
+        elif args[0] == "fen":
+            if len(args) < 7:
+                return
+            fen = " ".join(args[1:7])
+            self.board = chess.Board(fen)
+            moves_start = 7
+        else:
+            return
+            
+        # Apply moves if provided
+        if len(args) > moves_start and args[moves_start] == "moves":
+            for move_str in args[moves_start + 1:]:
+                try:
+                    move = chess.Move.from_uci(move_str)
+                    if move in self.board.legal_moves:
+                        self.board.push(move)
+                except:
+                    if self.verbose:
+                        print(f"info string Invalid move: {move_str}")
+                        
+    def search_position(self, rollouts):
+        """Search current position using CUDA-optimized MCTS."""
+        self.stop_search.clear()
+        self.best_move = None
+        
+        try:
+            if self.mcts_engine is None:
+                print(f"info string ERROR: No MCTS engine loaded")
+                sys.stdout.flush()
+                return
+                
+            start_time = time.time()
+            
+            # Periodic progress updates
+            update_interval = max(1000, rollouts // 20)
+            last_update = 0
+            
+            # Get root node
+            root = self.mcts_engine.search(
+                self.board, 
+                rollouts, 
+                return_root=True
+            )
+            
+            elapsed_time = time.time() - start_time
+            
+            # Update time manager
+            if elapsed_time > 0:
+                self.time_manager.update_performance(rollouts, elapsed_time)
+                
+            # Select best move avoiding repetition
+            if root:
+                sorted_edges = sorted(root.edges, key=lambda e: e.getN(), reverse=True)
+                
+                self.best_move = None
+                for edge in sorted_edges:
+                    if edge.getN() == 0:
+                        continue
+                        
+                    move = edge.getMove()
+                    test_board = self.board.copy()
+                    test_board.push(move)
+                    
+                    if not test_board.can_claim_threefold_repetition():
+                        self.best_move = move
+                        break
+                
+                if self.best_move is None and sorted_edges:
+                    self.best_move = sorted_edges[0].getMove()
+                    if self.verbose:
+                        print(f"info string Warning: All moves lead to repetition")
+                
+                # Output final info
+                if self.best_move:
+                    best_edge = None
+                    for edge in root.edges:
+                        if edge.getMove() == self.best_move:
+                            best_edge = edge
+                            break
+                    
+                    if best_edge:
+                        score = int(best_edge.getQ() * 1000 - 500)
+                        nps = int(rollouts / elapsed_time) if elapsed_time > 0 else 0
+                        print(f"info depth {rollouts} score cp {score} "
+                              f"nodes {rollouts} nps {nps} pv {self.best_move}")
+                        sys.stdout.flush()
+                        
+                if self.verbose:
+                    print(f"info string Completed {rollouts} rollouts in {elapsed_time:.2f}s")
+                    print(f"info string Nodes per second: {rollouts/elapsed_time:.0f}")
+                    
+                # Clean up
+                root.cleanup()
+                
+        except Exception as e:
+            print(f"info string Error during search: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.stdout.flush()
+                
+    def go(self, args):
+        """Handle 'go' command."""
+        # Parse time control parameters
+        wtime = None
+        btime = None
+        winc = 0
+        binc = 0
+        movestogo = 0
+        movetime = None
+        infinite = False
+        
+        i = 0
+        while i < len(args):
+            if args[i] == "wtime" and i + 1 < len(args):
+                wtime = int(args[i + 1])
+                i += 2
+            elif args[i] == "btime" and i + 1 < len(args):
+                btime = int(args[i + 1])
+                i += 2
+            elif args[i] == "winc" and i + 1 < len(args):
+                winc = int(args[i + 1])
+                i += 2
+            elif args[i] == "binc" and i + 1 < len(args):
+                binc = int(args[i + 1])
+                i += 2
+            elif args[i] == "movestogo" and i + 1 < len(args):
+                movestogo = int(args[i + 1])
+                i += 2
+            elif args[i] == "movetime" and i + 1 < len(args):
+                movetime = int(args[i + 1])
+                i += 2
+            elif args[i] == "infinite":
+                infinite = True
+                i += 1
+            else:
+                i += 1
+                
+        # Calculate rollouts
+        if infinite:
+            rollouts = 1000000  # 1M for analysis
+        elif movetime:
+            time_sec = movetime / 1000.0
+            time_sec = max(0.1, time_sec - self.move_overhead / 1000.0)
+            rollouts = int(self.time_manager.get_rollouts_per_second() * time_sec * 0.95)
+        else:
+            # Adjust for overhead
+            if wtime is not None:
+                wtime = max(100, wtime - self.move_overhead)
+            if btime is not None:
+                btime = max(100, btime - self.move_overhead)
+            rollouts = self.time_manager.calculate_rollouts(
+                wtime, btime, winc, binc, movestogo, self.board.turn
+            )
+            
+        if self.verbose:
+            print(f"info string Calculating with {rollouts} rollouts")
+            
+        # Start search in separate thread
+        self.search_thread = threading.Thread(
+            target=self.search_position, args=(rollouts,)
+        )
+        self.search_thread.start()
+        
+        # Wait for search to complete
+        self.search_thread.join()
+        
+        # Output best move
+        if self.best_move:
+            print(f"bestmove {self.best_move}")
+        else:
+            # Fallback
+            legal_moves = list(self.board.legal_moves)
+            if legal_moves:
+                print(f"bestmove {legal_moves[0]}")
+        sys.stdout.flush()
+                
+    def stop(self):
+        """Handle 'stop' command."""
+        self.stop_search.set()
+        if self.search_thread and self.search_thread.is_alive():
+            self.search_thread.join()
+        if self.best_move:
+            print(f"bestmove {self.best_move}")
+            sys.stdout.flush()
+            
+    def quit(self):
+        """Handle 'quit' command."""
+        self.stop_search.set()
+        if self.mcts_engine:
+            self.mcts_engine.stop()
+        sys.exit(0)
+        
+    def setoption(self, args):
+        """Handle 'setoption' command."""
+        if len(args) < 4 or args[0] != "name":
+            return
+            
+        # Find value position
+        value_idx = -1
+        for i, arg in enumerate(args):
+            if arg == "value":
+                value_idx = i
+                break
+                
+        if value_idx == -1 or value_idx < 2:
+            return
+            
+        name = " ".join(args[1:value_idx]).lower()
+        value = " ".join(args[value_idx + 1:])
+        
+        if name == "threads":
+            try:
+                self.threads = int(value)
+                self.time_manager.threads = self.threads
+                if self.mcts_engine:
+                    self.mcts_engine.stop()
+                    self.mcts_engine = None
+            except:
+                pass
+        elif name == "model":
+            self.model_path = value
+            self.model = None
+            if self.mcts_engine:
+                self.mcts_engine.stop()
+                self.mcts_engine = None
+        elif name == "verbose":
+            self.verbose = value.lower() in ["true", "yes", "1"]
+        elif name == "move overhead":
+            try:
+                self.move_overhead = int(value)
+            except:
+                pass
+        elif name == "max batch size":
+            try:
+                self.max_batch_size = int(value)
+                if self.mcts_engine:
+                    self.mcts_engine.stop()
+                    self.mcts_engine = None
+            except:
+                pass
+        elif name == "device id":
+            try:
+                self.device_id = int(value)
+                if self.mcts_engine:
+                    self.mcts_engine.stop()
+                    self.mcts_engine = None
+            except:
+                pass
+            
+    def run(self):
+        """Main UCI protocol loop."""
+        # Windows line buffering
+        if sys.platform == 'win32':
+            import msvcrt
+            msvcrt.setmode(sys.stdout.fileno(), os.O_BINARY)
+            
+        while True:
+            try:
+                line = input().strip()
+                if not line:
+                    continue
+                    
+                parts = line.split()
+                command = parts[0].lower()
+                
+                if command == "uci":
+                    self.uci()
+                elif command == "isready":
+                    self.isready()
+                elif command == "position":
+                    self.position(parts[1:])
+                elif command == "go":
+                    self.go(parts[1:])
+                elif command == "stop":
+                    self.stop()
+                elif command == "quit":
+                    self.quit()
+                elif command == "setoption":
+                    self.setoption(parts[1:])
+                elif command == "ucinewgame":
+                    self.board = chess.Board()
+                elif self.verbose:
+                    print(f"info string Unknown command: {command}")
+                    sys.stdout.flush()
+                    
+            except EOFError:
+                break
+            except Exception as e:
+                print(f"info string Error: {e}")
+                import traceback
+                traceback.print_exc()
+                sys.stdout.flush()
+
+
+def main():
+    """Main entry point."""
+    parser = argparse.ArgumentParser(
+        description="High-performance UCI engine for Windows/CUDA systems"
+    )
+    parser.add_argument("--model", help="Path to model file", 
+                       default="AlphaZeroNet_20x256_distributed.pt")
+    parser.add_argument("--threads", type=int, help="Number of threads", 
+                       default=64)
+    parser.add_argument("--verbose", action="store_true", 
+                       help="Enable verbose output")
+    parser.add_argument("--batch-size", type=int, help="Max batch size",
+                       default=512)
+    parser.add_argument("--device", type=int, help="CUDA device ID",
+                       default=0)
+    
+    args = parser.parse_args()
+    
+    engine = UCIEngineCUDA(
+        model_path=args.model,
+        threads=args.threads,
+        verbose=args.verbose,
+        max_batch_size=args.batch_size,
+        device_id=args.device
+    )
+    
+    try:
+        engine.run()
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        print(f"info string Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
