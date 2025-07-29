@@ -128,6 +128,7 @@ class BenchmarkRunner:
         self.model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
         weights = torch.load(self.model_path, map_location=self.device)
         self.model.load_state_dict(weights)
+        self.model = self.model.to(self.device)  # Move model to GPU
         self.model.eval()
         
         # Print model info
