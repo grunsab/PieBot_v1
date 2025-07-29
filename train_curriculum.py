@@ -147,12 +147,12 @@ def main():
     
     # Phase 2: Self-play
     parser.add_argument('--games-per-iter', type=int, default=25000, help='Games per iteration')
-    parser.add_argument('--rollouts', type=int, default=30, help='MCTS rollouts per thread')
+    parser.add_argument('--rollouts', type=int, default=50, help='MCTS rollouts per thread')
     parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for move selection')
     parser.add_argument('--threads', type=int, default=20, help='Threads for MCTS')
     
     # Phase 3: Reinforcement learning
-    parser.add_argument('--rl-epochs', type=int, default=50, help='Epochs per RL iteration')
+    parser.add_argument('--rl-epochs', type=int, default=10, help='Epochs per RL iteration')
     parser.add_argument('--rl-lr', type=float, default=0.0001, help='Learning rate for RL')
     parser.add_argument('--iterations', type=int, default=50, help='Number of RL iterations')
     
