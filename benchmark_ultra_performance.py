@@ -131,8 +131,13 @@ def main():
         device = torch.device('cpu')
         print("Using CPU")
     
-    # Configure device
-    device_utils.set_device_options(device)
+    # Configure device optimizations
+    if device.type == 'cuda':
+        torch.backends.cudnn.benchmark = True
+        if hasattr(torch.backends.cudnn, 'allow_tf32'):
+            torch.backends.cudnn.allow_tf32 = True
+        if hasattr(torch, 'backends') and hasattr(torch.backends.cuda, 'matmul'):
+            torch.backends.cuda.matmul.allow_tf32 = True
     
     print("="*60)
     print("Ultra-Performance MCTS Benchmark")
