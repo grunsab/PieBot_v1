@@ -9,7 +9,7 @@ import time
 import torch
 import chess
 from MCTS_ultra_performance import UltraPerformanceMCTSEngine
-from AlphaZeroNetwork import AlphaZeroNetwork
+from AlphaZeroNetwork import AlphaZeroNet
 import device_utils
 
 def benchmark_ultra_mcts(model_path, device, num_searches=20):
@@ -17,7 +17,7 @@ def benchmark_ultra_mcts(model_path, device, num_searches=20):
     
     # Load model
     print(f"Loading model: {model_path}")
-    model = AlphaZeroNetwork()
+    model = AlphaZeroNet()
     checkpoint = torch.load(model_path, map_location=device)
     
     if 'model_state_dict' in checkpoint:
