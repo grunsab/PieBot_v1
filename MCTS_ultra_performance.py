@@ -148,6 +148,8 @@ class UltraPerformanceMCTSEngine:
             # Prepare batch on CPU with pinned memory
             if self.device.type in ['cuda', 'mps']:
                 for i, board in enumerate(boards):
+                    if i >= self.batch_size:  # Safety check
+                        break
                     pos, mask = encoder.encodePositionForInference(board)
                     self.cpu_positions[i].copy_(torch.from_numpy(pos))
                     self.cpu_masks[i].copy_(torch.from_numpy(mask).flatten())
@@ -194,11 +196,12 @@ class UltraPerformanceMCTSEngine:
                 # Decode policy
                 move_probs = encoder.decodePolicyOutput(board, policy)
                 
-                # Expand node
-                self._expand_node(node_idx, board, move_probs)
-                
-                # Remove virtual loss and backup real value
-                self._backup(path, value, remove_virtual_loss=True)
+                # Expand node (check if node still exists)
+                if node_idx < len(self.nodes):
+                    self._expand_node(node_idx, board, move_probs)
+                    
+                    # Remove virtual loss and backup real value
+                    self._backup(path, value, remove_virtual_loss=True)
     
     def search(self, board, num_simulations):
         """
@@ -208,6 +211,15 @@ class UltraPerformanceMCTSEngine:
             board: chess.Board position
             num_simulations: total number of simulations to run
         """
+        # Wait for any pending GPU operations to complete
+        with self.buffer_lock:
+            # Clear all buffers
+            for buffer in self.leaf_buffers:
+                buffer['count'] = 0
+                buffer['boards'].clear()
+                buffer['node_indices'].clear()
+                buffer['paths'].clear()
+        
         # Clear tree for new search (avoid stale moves)
         self.nodes.clear()
         self.children.clear()
@@ -260,7 +272,7 @@ class UltraPerformanceMCTSEngine:
                     self.buffer_ready.notify()
         
         # Give GPU thread time to process final batch
-        time.sleep(0.05)
+        time.sleep(0.1)
         
         elapsed = time.time() - start_time
         if self.verbose:
@@ -282,8 +294,14 @@ class UltraPerformanceMCTSEngine:
             
             # Traverse to leaf
             path = []
-            node_idx = self.node_lookup[board.fen()]
             sim_board = board.copy()
+            root_fen = sim_board.fen()
+            
+            # Get root node index
+            if root_fen not in self.node_lookup:
+                # Race condition - tree was cleared, skip this simulation
+                continue
+            node_idx = self.node_lookup[root_fen]
             
             # Selection phase with virtual loss
             while True:
@@ -311,15 +329,20 @@ class UltraPerformanceMCTSEngine:
                     # Add to leaf buffer
                     with self.buffer_lock:
                         buffer = self.leaf_buffers[self.current_buffer]
-                        buffer['boards'].append(sim_board.copy())
-                        buffer['node_indices'].append(node_idx)
-                        buffer['paths'].append(path.copy())
-                        buffer['count'] += 1
                         
-                        # Switch buffers if full
+                        # Check if buffer is full
                         if buffer['count'] >= self.batch_size:
+                            # Switch to other buffer
                             self.current_buffer = 1 - self.current_buffer
                             self.buffer_ready.notify()
+                            buffer = self.leaf_buffers[self.current_buffer]
+                        
+                        # Add to buffer if there's space
+                        if buffer['count'] < self.batch_size:
+                            buffer['boards'].append(sim_board.copy())
+                            buffer['node_indices'].append(node_idx)
+                            buffer['paths'].append(path.copy())
+                            buffer['count'] += 1
                     break
                 
                 # Select child
@@ -328,6 +351,9 @@ class UltraPerformanceMCTSEngine:
                     break
                 
                 best_child_idx = self._select_child_with_virtual_loss(children)
+                if best_child_idx < 0 or best_child_idx >= len(self.nodes):
+                    # Invalid child index
+                    break
                 best_child = self.nodes[best_child_idx]
                 
                 # Make move
@@ -335,7 +361,8 @@ class UltraPerformanceMCTSEngine:
                     sim_board.push(best_child.move)
                     node_idx = best_child_idx
                 else:
-                    print(f"Warning: Invalid move {best_child.move}")
+                    # Move is invalid - this can happen during tree transitions
+                    # or when the tree is being rebuilt
                     break
         
         # Flush any remaining leaves
@@ -345,16 +372,20 @@ class UltraPerformanceMCTSEngine:
     
     def _select_child_with_virtual_loss(self, children_indices):
         """Select best child using PUCT formula with virtual loss"""
+        valid_children = [idx for idx in children_indices if 0 <= idx < len(self.nodes)]
+        if not valid_children:
+            return -1
+            
         parent_visits = sum(
             self.nodes[idx].visits + self.nodes[idx].virtual_loss 
-            for idx in children_indices
+            for idx in valid_children
         )
-        sqrt_parent = math.sqrt(parent_visits)
+        sqrt_parent = math.sqrt(parent_visits) if parent_visits > 0 else 1.0
         
         best_idx = -1
         best_puct = -float('inf')
         
-        for child_idx in children_indices:
+        for child_idx in valid_children:
             child = self.nodes[child_idx]
             
             # Calculate PUCT with virtual loss
@@ -403,25 +434,34 @@ class UltraPerformanceMCTSEngine:
     def _backup(self, path, value, remove_virtual_loss=False):
         """Backup value through path"""
         for i, node_idx in enumerate(path):
+            # Check if node index is still valid
+            if node_idx < 0 or node_idx >= len(self.nodes):
+                # Node was removed or index is invalid, skip
+                continue
+                
             # Flip value for alternating players
             backup_value = value if i % 2 == 0 else -value
             
             # Update node
-            node = self.nodes[node_idx]
-            if remove_virtual_loss:
-                new_vl = max(0, node.virtual_loss - 1)
-            else:
-                new_vl = node.virtual_loss
-            
-            self.nodes[node_idx] = MCTSNode(
-                node.board_hash,
-                node.visits + 1,
-                node.total_value + backup_value,
-                node.prior,
-                node.move,
-                node.parent_idx,
-                new_vl
-            )
+            try:
+                node = self.nodes[node_idx]
+                if remove_virtual_loss:
+                    new_vl = max(0, node.virtual_loss - 1)
+                else:
+                    new_vl = node.virtual_loss
+                
+                self.nodes[node_idx] = MCTSNode(
+                    node.board_hash,
+                    node.visits + 1,
+                    node.total_value + backup_value,
+                    node.prior,
+                    node.move,
+                    node.parent_idx,
+                    new_vl
+                )
+            except IndexError:
+                # Race condition - node was removed, skip
+                continue
     
     def _select_best_move(self, root_idx):
         """Select best move based on visit count"""
