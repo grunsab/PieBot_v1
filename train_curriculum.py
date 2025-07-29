@@ -146,22 +146,22 @@ def main():
     parser.add_argument('--skip-supervised', action='store_true', help='Skip supervised phase')
     
     # Phase 2: Self-play
-    parser.add_argument('--games-per-iter', type=int, default=25000, help='Games per iteration')
+    parser.add_argument('--games-per-iter', type=int, default=15000, help='Games per iteration')
     parser.add_argument('--rollouts', type=int, default=50, help='MCTS rollouts per thread')
     parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for move selection')
     parser.add_argument('--threads', type=int, default=20, help='Threads for MCTS')
     
     # Phase 3: Reinforcement learning
-    parser.add_argument('--rl-epochs', type=int, default=10, help='Epochs per RL iteration')
-    parser.add_argument('--rl-lr', type=float, default=0.0001, help='Learning rate for RL')
-    parser.add_argument('--iterations', type=int, default=50, help='Number of RL iterations')
+    parser.add_argument('--rl-epochs', type=int, default=20, help='Epochs per RL iteration')
+    parser.add_argument('--rl-lr', type=float, default=0.00005, help='Learning rate for RL')
+    parser.add_argument('--iterations', type=int, default=80, help='Number of RL iterations')
     
     # Training configuration
     parser.add_argument('--distributed', action='store_true', help='Use distributed training')
     parser.add_argument('--gpus', type=int, default=4, help='Number of GPUs for distributed training')
     parser.add_argument('--output-dir', type=str, default='curriculum_training', help='Output directory')
     parser.add_argument('--selfplay-dir', type=str, default='games_training_data/selfplay', help='Self-play data directory')
-    parser.add_argument('--weight-decay', type=float, default=0.3, help='Weight decay for recent games (lambda in exp(-lambda * age))')
+    parser.add_argument('--weight-decay', type=float, default=0.05, help='Weight decay for recent games (lambda in exp(-lambda * age))')
     
     # Resume training
     parser.add_argument('--resume-state', type=str, help='Resume from saved training state')
