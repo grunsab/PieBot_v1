@@ -21,7 +21,7 @@ class AsyncNeuralNetworkServerCUDA:
     """
     
     def __init__(self, neural_network, device=None, max_batch_size=512, 
-                 max_wait_time=0.001, verbose=False):
+                 max_wait_time=0.005, verbose=False):
         """
         Initialize the async neural network server for CUDA.
         
@@ -29,7 +29,7 @@ class AsyncNeuralNetworkServerCUDA:
             neural_network: The neural network model
             device: Device to run on (auto-detect if None)
             max_batch_size: Maximum batch size for GPU processing (512 optimal for RTX 4080)
-            max_wait_time: Maximum time to wait for batch to fill (1ms for low latency)
+            max_wait_time: Maximum time to wait for batch to fill (5ms for better batching)
             verbose: Whether to print performance statistics
         """
         self.neural_network = neural_network
@@ -90,7 +90,7 @@ class AsyncNeuralNetworkServerCUDA:
         # Pre-allocate tensors for batching to reduce allocation overhead
         self.position_buffer = torch.zeros((max_batch_size, 16, 8, 8), 
                                          dtype=torch.float32, device=self.device)
-        self.mask_buffer = torch.zeros((max_batch_size, 72, 8, 8), 
+        self.mask_buffer = torch.zeros((max_batch_size, 72 * 8 * 8), 
                                      dtype=torch.float32, device=self.device)
         
         # Performance monitoring
@@ -208,7 +208,8 @@ class AsyncNeuralNetworkServerCUDA:
                     for i, request in enumerate(batch):
                         position, mask = encoder.encodePositionForInference(request.board)
                         self.position_buffer[i] = torch.from_numpy(position)
-                        self.mask_buffer[i] = torch.from_numpy(mask)
+                        # Flatten mask to match expected shape
+                        self.mask_buffer[i] = torch.from_numpy(mask).flatten()
                     
                     # Slice buffers to actual batch size
                     positions = self.position_buffer[:batch_size]

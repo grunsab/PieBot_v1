@@ -251,7 +251,7 @@ class AsyncRootCUDA(Node):
                 priority, board, node_path, edge_path, future = item
                 
                 # Wait for result
-                value, move_probabilities = future.result(timeout=1.0)
+                value, move_probabilities = future.result(timeout=5.0)
                 new_Q = value / 2. + 0.5
                 
                 edge = edge_path[-1]
@@ -400,7 +400,7 @@ class MCTSEngineCUDA:
             neural_network, 
             device=device,
             max_batch_size=max_batch_size,
-            max_wait_time=0.001,  # 1ms for low latency
+            max_wait_time=0.005,  # 5ms for better batching
             verbose=verbose
         )
         
