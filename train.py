@@ -67,7 +67,7 @@ def train():
     # Create dataset based on training mode
     if args.mode == 'supervised':
         print(f'Training mode: Supervised learning on CCRL dataset')
-        train_ds = CCRLDataset(ccrl_dir, soft_targets=False)
+        train_ds = CCRLDataset(ccrl_dir, soft_targets=True)
     elif args.mode == 'rl':
         print(f'Training mode: Reinforcement learning on self-play data')
         if args.rl_weight_recent:
