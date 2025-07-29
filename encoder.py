@@ -343,8 +343,10 @@ def callNeuralNetwork( board, neuralNetwork ):
 
     position = position.to(DEVICE)
     mask = mask.to(DEVICE)
-
-    value, policy = neuralNetwork( position, policyMask=mask )
+    
+    # Flatten mask to match expected shape
+    mask_flat = mask.view(mask.shape[0], -1)
+    value, policy = neuralNetwork( position, policyMask=mask_flat )
     
     value = value.cpu().numpy()[ 0, 0 ]
 
@@ -384,7 +386,9 @@ def callNeuralNetworkBatched( boards, neuralNetwork ):
     inputs = inputs.to(DEVICE)
     masks = masks.to(DEVICE)
 
-    value, policy = neuralNetwork( inputs, policyMask=masks )
+    # Flatten masks to match expected shape
+    masks_flat = masks.view(masks.shape[0], -1)
+    value, policy = neuralNetwork( inputs, policyMask=masks_flat )
  
     move_probabilities = np.zeros( ( num_inputs, 200 ), dtype=np.float32 )
 

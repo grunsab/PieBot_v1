@@ -146,12 +146,12 @@ class BenchmarkRunner:
         for batch_size in batch_sizes:
             # Create dummy input
             positions = torch.randn(batch_size, 16, 8, 8).to(self.device)
-            masks = torch.ones(batch_size, 72, 8, 8).to(self.device)
+            masks = torch.ones(batch_size, 72 * 8 * 8).to(self.device)  # Flattened mask
             
             # Warmup
             for _ in range(10):
                 with torch.no_grad():
-                    _ = self.model(positions, masks)
+                    _ = self.model(positions, policyMask=masks)
             
             # Synchronize before timing
             torch.cuda.synchronize(self.device)
@@ -161,7 +161,7 @@ class BenchmarkRunner:
             
             for _ in range(num_iterations):
                 with torch.no_grad():
-                    values, policies = self.model(positions, masks)
+                    values, policies = self.model(positions, policyMask=masks)
             
             torch.cuda.synchronize(self.device)
             end_time = time.perf_counter()
