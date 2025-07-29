@@ -146,7 +146,7 @@ def main():
     parser.add_argument('--skip-supervised', action='store_true', help='Skip supervised phase')
     
     # Phase 2: Self-play
-    parser.add_argument('--games-per-iter', type=int, default=15000, help='Games per iteration')
+    parser.add_argument('--games-per-iter', type=int, default=25000, help='Games per iteration')
     parser.add_argument('--rollouts', type=int, default=50, help='MCTS rollouts per thread')
     parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for move selection')
     parser.add_argument('--threads', type=int, default=20, help='Threads for MCTS')

@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-UCI Protocol Implementation for AlphaZero Chess Engine
+UCI Protocol Implementation for AlphaZero Chess Engine with Async Neural Network
 
 This module implements the Universal Chess Interface (UCI) protocol for the AlphaZero
-chess engine, enabling it to communicate with chess GUI applications and online
-chess platforms like Lichess.
+chess engine with asynchronous neural network evaluation for much higher performance.
 
 Time management: Dynamically adjusts the number of MCTS rollouts based on available
-time, using the baseline that 500 rollouts take approximately 1 second on 8 threads.
+time, using measured performance from the async engine.
 """
 
 import sys
@@ -19,14 +18,14 @@ import time
 import threading
 from queue import Queue
 import AlphaZeroNetwork
-import MCTS
+from MCTS_async import MCTSEngine, AsyncRoot
 from device_utils import get_optimal_device, optimize_for_device
 
 
 class TimeManager:
     """Manages time allocation for moves based on game time constraints."""
     
-    def __init__(self, base_rollouts=500, base_time=1.0, threads=8):
+    def __init__(self, base_rollouts=5000, base_time=1.0, threads=32):
         """
         Initialize time manager.
         
@@ -38,8 +37,6 @@ class TimeManager:
         self.base_rollouts = base_rollouts
         self.base_time = base_time
         self.threads = threads
-        # Adjust for the fact that parallelRollouts does 'threads' rollouts per call
-        # So actual time per rollout is different
         self.rollouts_per_second = base_rollouts / base_time
         
         # Track actual performance
@@ -122,18 +119,18 @@ class TimeManager:
         rollouts = int(rps * time_per_move)
         
         # Ensure minimum rollouts for quality
-        rollouts = max(100, rollouts)
+        rollouts = max(1000, rollouts)  # Higher minimum for async engine
         
         # Cap maximum rollouts to prevent excessive thinking
-        rollouts = min(100000, rollouts)
+        rollouts = min(1000000, rollouts)  # Higher cap for async engine
         
         return rollouts
 
 
-class UCIEngine:
-    """UCI Protocol handler for AlphaZero chess engine."""
+class UCIEngineAsync:
+    """UCI Protocol handler for AlphaZero chess engine with async neural network."""
     
-    def __init__(self, model_path=None, threads=8, verbose=False):
+    def __init__(self, model_path=None, threads=32, verbose=False, max_batch_size=256):
         """
         Initialize UCI engine.
         
@@ -141,21 +138,24 @@ class UCIEngine:
             model_path: Path to the neural network model file
             threads: Number of threads to use for MCTS
             verbose: Whether to output debug information
+            max_batch_size: Maximum batch size for neural network
         """
         self.model_path = model_path
         self.threads = threads
         self.verbose = verbose
+        self.max_batch_size = max_batch_size
         self.board = chess.Board()
         self.model = None
+        self.mcts_engine = None
         self.device = None
-        self.time_manager = TimeManager(threads=threads)
+        self.time_manager = TimeManager(base_rollouts=5000, threads=threads)
         self.search_thread = None
         self.stop_search = threading.Event()
         self.best_move = None
         self.move_overhead = 30  # Default move overhead in milliseconds
         
     def load_model(self):
-        """Load the neural network model."""
+        """Load the neural network model and initialize MCTS engine."""
         try:
             if not self.model_path:
                 # Use default model if none specified
@@ -199,8 +199,20 @@ class UCIEngine:
             for param in self.model.parameters():
                 param.requires_grad = False
                 
+            # Initialize MCTS engine with async neural network
+            self.mcts_engine = MCTSEngine(
+                self.model,
+                device=self.device,
+                max_batch_size=self.max_batch_size,
+                num_workers=self.threads,
+                verbose=self.verbose
+            )
+            self.mcts_engine.start()
+                
             if self.verbose:
                 print(f"info string Model loaded successfully")
+                print(f"info string Async MCTS engine initialized with {self.threads} workers")
+                print(f"info string Max batch size: {self.max_batch_size}")
                 sys.stdout.flush()
             return True
             
@@ -211,18 +223,19 @@ class UCIEngine:
             
     def uci(self):
         """Handle 'uci' command."""
-        print("id name AlphaZero UCI Engine")
+        print("id name AlphaZero UCI Engine (Async)")
         print("id author AlphaZero Bot")
-        print("option name Threads type spin default 8 min 1 max 128")
+        print("option name Threads type spin default 32 min 1 max 256")
         print("option name Model type string default AlphaZeroNet_20x256_distributed.pt")
         print("option name Verbose type check default false")
         print("option name Move Overhead type spin default 30 min 0 max 5000")
+        print("option name Max Batch Size type spin default 256 min 8 max 1024")
         print("uciok")
         sys.stdout.flush()
         
     def isready(self):
         """Handle 'isready' command."""
-        if self.model is None:
+        if self.model is None or self.mcts_engine is None:
             if not self.load_model():
                 # Model loading failed, but we still need to respond
                 pass
@@ -264,7 +277,7 @@ class UCIEngine:
                         
     def search_position(self, rollouts):
         """
-        Search current position using MCTS.
+        Search current position using async MCTS.
         
         Args:
             rollouts: Number of rollouts to perform
@@ -274,68 +287,41 @@ class UCIEngine:
         
         try:
             # Check if we have a model
-            if self.model is None:
-                print(f"info string ERROR: No model loaded")
+            if self.mcts_engine is None:
+                print(f"info string ERROR: No MCTS engine loaded")
                 sys.stdout.flush()
                 return
                 
-            with torch.no_grad():
-                root = MCTS.Root(self.board, self.model)
+            start_time = time.time()
+            
+            # Get root node for progressive output
+            root = self.mcts_engine.search(
+                self.board, 
+                rollouts, 
+                return_root=True
+            )
+            
+            elapsed_time = time.time() - start_time
+            
+            # Update time manager with actual performance
+            if elapsed_time > 0:
+                self.time_manager.update_performance(rollouts, elapsed_time)
                 
-                # Perform rollouts
-                # parallelRollouts performs 'threads' rollouts per call
-                # So we need to call it rollouts/threads times
-                num_iterations = max(1, rollouts // self.threads)
-                remainder = rollouts % self.threads
-                
-                start_time = time.time()
-                
-                for i in range(num_iterations):
-                    if self.stop_search.is_set():
-                        break
-                    root.parallelRollouts(self.board.copy(), self.model, self.threads)
-                    
-                    # Output progress periodically
-                    if (i + 1) % max(1, num_iterations // 10) == 0 or i == num_iterations - 1:
-                        current_rollouts = (i + 1) * self.threads
-                        current_edge = root.maxNSelect()
-                        if current_edge:
-                            move = current_edge.getMove()
-                            score = int(current_edge.getQ() * 1000 - 500)
-                            elapsed = time.time() - start_time
-                            nps = int(current_rollouts / elapsed) if elapsed > 0 else 0
-                            print(f"info depth {current_rollouts} score cp {score} nodes {current_rollouts} nps {nps} pv {move}")
-                            sys.stdout.flush()
-                
-                # Handle remainder rollouts if any
-                if remainder > 0 and not self.stop_search.is_set():
-                    root.parallelRollouts(self.board.copy(), self.model, remainder)
-                
-                elapsed_time = time.time() - start_time
-                actual_rollouts = num_iterations * self.threads + (remainder if remainder > 0 else 0)
-                
-                # Update time manager with actual performance
-                if elapsed_time > 0:
-                    self.time_manager.update_performance(actual_rollouts, elapsed_time)
-                                
+            # Output final statistics
+            if root:
                 # Get final best move, avoiding threefold repetition
-                # Sort edges by visit count (N) in descending order
                 sorted_edges = sorted(root.edges, key=lambda e: e.getN(), reverse=True)
                 
                 self.best_move = None
                 for edge in sorted_edges:
                     if edge.getN() == 0:
-                        # Skip edges that were never visited
                         continue
                         
                     move = edge.getMove()
-                    # Create a copy of the board and make the move
                     test_board = self.board.copy()
                     test_board.push(move)
                     
-                    # Check if this move would allow threefold repetition claim
                     if not test_board.can_claim_threefold_repetition():
-                        # This move doesn't lead to threefold repetition, use it
                         self.best_move = move
                         if self.verbose:
                             if edge != sorted_edges[0]:
@@ -347,10 +333,24 @@ class UCIEngine:
                     self.best_move = sorted_edges[0].getMove()
                     if self.verbose:
                         print(f"info string Warning: All moves lead to threefold repetition, using best move anyway")
+                
+                # Output final info
+                if self.best_move:
+                    best_edge = None
+                    for edge in root.edges:
+                        if edge.getMove() == self.best_move:
+                            best_edge = edge
+                            break
                     
-                if self.verbose and self.best_move:
-                    print(f"info string Completed {actual_rollouts} rollouts in {elapsed_time:.2f}s")
-                    print(f"info string Rollouts per second: {actual_rollouts/elapsed_time:.1f}")
+                    if best_edge:
+                        score = int(best_edge.getQ() * 1000 - 500)
+                        nps = int(rollouts / elapsed_time) if elapsed_time > 0 else 0
+                        print(f"info depth {rollouts} score cp {score} nodes {rollouts} nps {nps} pv {self.best_move}")
+                        sys.stdout.flush()
+                        
+                if self.verbose:
+                    print(f"info string Completed {rollouts} rollouts in {elapsed_time:.2f}s")
+                    print(f"info string Nodes per second: {rollouts/elapsed_time:.1f}")
                     print(root.getStatisticsString())
                     sys.stdout.flush()
                         
@@ -407,7 +407,7 @@ class UCIEngine:
                 
         # Calculate rollouts based on time
         if infinite:
-            rollouts = 100000  # High number for analysis
+            rollouts = 1000000  # High number for analysis
         elif movetime:
             # Fixed time per move
             time_sec = movetime / 1000.0
@@ -472,6 +472,8 @@ class UCIEngine:
     def quit(self):
         """Handle 'quit' command."""
         self.stop_search.set()
+        if self.mcts_engine:
+            self.mcts_engine.stop()
         sys.exit(0)
         
     def setoption(self, args):
@@ -502,16 +504,32 @@ class UCIEngine:
             try:
                 self.threads = int(value)
                 self.time_manager.threads = self.threads
+                # Recreate MCTS engine with new thread count
+                if self.mcts_engine:
+                    self.mcts_engine.stop()
+                    self.mcts_engine = None
             except:
                 pass
         elif name == "model":
             self.model_path = value
             self.model = None  # Force reload on next isready
+            if self.mcts_engine:
+                self.mcts_engine.stop()
+                self.mcts_engine = None
         elif name == "verbose":
             self.verbose = value.lower() in ["true", "yes", "1"]
         elif name == "move overhead":
             try:
                 self.move_overhead = int(value)
+            except:
+                pass
+        elif name == "max batch size":
+            try:
+                self.max_batch_size = int(value)
+                # Recreate MCTS engine with new batch size
+                if self.mcts_engine:
+                    self.mcts_engine.stop()
+                    self.mcts_engine = None
             except:
                 pass
             
@@ -563,21 +581,24 @@ def main():
         sys.stdout.reconfigure(line_buffering=True)
     
     parser = argparse.ArgumentParser(
-        description="UCI Protocol wrapper for AlphaZero chess engine"
+        description="UCI Protocol wrapper for AlphaZero chess engine with async neural network"
     )
     parser.add_argument("--model", help="Path to model file", 
                        default="AlphaZeroNet_20x256_distributed.pt")
     parser.add_argument("--threads", type=int, help="Number of threads", 
-                       default=8)
+                       default=32)
     parser.add_argument("--verbose", action="store_true", 
                        help="Enable verbose output")
+    parser.add_argument("--batch-size", type=int, help="Max batch size for neural network",
+                       default=256)
     
     args = parser.parse_args()
     
-    engine = UCIEngine(
+    engine = UCIEngineAsync(
         model_path=args.model,
         threads=args.threads,
-        verbose=args.verbose
+        verbose=args.verbose,
+        max_batch_size=args.batch_size
     )
     
     try:

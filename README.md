@@ -55,7 +55,7 @@ python3 train.py --mode supervised --epochs 20 --lr 0.0005
  python3 train_curriculum.py
  ```
 
-Check the bottom of train_curriculum.py to change the settings.
+Check the bottom of train_curriculum.py to see how to change the settings.
 
 
 ## About the algorithm
@@ -69,3 +69,5 @@ Note that there are multiple models included in the repository. AlphaZeroNet_20x
 The current best model performs at around 2500 ELO on LiChess (available to test on AlphaZeroNet_20x256_distributed.pt), on a Macbook Mini M4 at 400-500 nodes per second evaluated. It performs at a higher ELO of around 2750 on a Macbook Pro M4 Pro.
 
 I'm training a new model using a larger dataset including the ones from ComputerChess.org.uk, which should play much stronger once it's completed. That will train on approximately 3MM-3.5MM games in total.
+
+Note also that I'm working on significantly improving the number of nodes evaluated per second, as AlphaZero evaluated 80k nodes per second on a 4 TPU system. I suspect that with some improvements to the codebase we should be able to reach 2k to 4k nodes per second on a RTX 4080 GPU. If I can significantly improve the number of nodes evaluated per second, I will switch the LiChess Bot (PieBot) to run on the Windows computer with the RTX 4080 GPU.
