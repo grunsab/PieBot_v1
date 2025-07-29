@@ -42,12 +42,19 @@ class HighPerformanceMCTS:
         self.children = {}  # node_idx -> list of child indices
         self.node_lookup = {}  # board_hash -> node_idx
         
-        # Pre-allocate GPU buffers
-        self.position_buffer = torch.zeros((batch_size, 16, 8, 8), device=device, dtype=torch.float32)
-        self.mask_buffer = torch.zeros((batch_size, 72 * 8 * 8), device=device, dtype=torch.float32)
+        # Pre-allocate GPU buffers with pinned memory for faster transfers
+        if device.type == 'cuda':
+            self.position_buffer = torch.zeros((batch_size, 16, 8, 8), device=device, dtype=torch.float32)
+            self.mask_buffer = torch.zeros((batch_size, 72 * 8 * 8), device=device, dtype=torch.float32)
+            # CPU staging buffers with pinned memory
+            self.cpu_position_buffer = torch.zeros((batch_size, 16, 8, 8), dtype=torch.float32, pin_memory=True)
+            self.cpu_mask_buffer = torch.zeros((batch_size, 72 * 8 * 8), dtype=torch.float32, pin_memory=True)
+        else:
+            self.position_buffer = torch.zeros((batch_size, 16, 8, 8), device=device, dtype=torch.float32)
+            self.mask_buffer = torch.zeros((batch_size, 72 * 8 * 8), device=device, dtype=torch.float32)
         
-        # Batch processing
-        self.eval_queue = queue.Queue(maxsize=batch_size * 10)
+        # Batch processing - larger queue for better throughput
+        self.eval_queue = queue.Queue(maxsize=batch_size * 50)
         self.running = False
         self.server_thread = None
         
@@ -69,16 +76,23 @@ class HighPerformanceMCTS:
             batch = []
             batch_boards = []
             
-            # Collect batch with minimal wait
-            deadline = time.time() + 0.002  # 2ms max wait
-            while len(batch) < self.batch_size and time.time() < deadline:
+            # Collect batch more aggressively for better GPU utilization
+            deadline = time.time() + 0.001  # 1ms max wait (reduced latency)
+            while len(batch) < self.batch_size:
                 try:
-                    timeout = max(0.0001, deadline - time.time())
+                    # First item can wait longer, subsequent items check quickly
+                    if not batch:
+                        timeout = 0.001
+                    else:
+                        timeout = max(0.00001, deadline - time.time())
+                        if timeout <= 0:
+                            break
                     item = self.eval_queue.get(timeout=timeout)
                     batch.append(item)
                     batch_boards.append(item[0])
                 except queue.Empty:
-                    break
+                    if batch:  # If we have at least one item, process it
+                        break
                     
             if not batch:
                 continue
@@ -86,18 +100,31 @@ class HighPerformanceMCTS:
             # Process batch on GPU
             batch_size = len(batch)
             
-            # Fill buffers efficiently
-            for i, (board, _) in enumerate(batch):
-                pos, mask = encoder.encodePositionForInference(board)
-                self.position_buffer[i] = torch.from_numpy(pos)
-                self.mask_buffer[i] = torch.from_numpy(mask).flatten()
+            # Fill buffers efficiently - use in-place operations
+            if self.device.type == 'cuda':
+                # Fill CPU buffers first (with pinned memory)
+                for i, (board, _) in enumerate(batch):
+                    pos, mask = encoder.encodePositionForInference(board)
+                    self.cpu_position_buffer[i].copy_(torch.from_numpy(pos))
+                    self.cpu_mask_buffer[i].copy_(torch.from_numpy(mask).flatten())
+                # Single async copy to GPU
+                self.position_buffer[:batch_size].copy_(self.cpu_position_buffer[:batch_size], non_blocking=True)
+                self.mask_buffer[:batch_size].copy_(self.cpu_mask_buffer[:batch_size], non_blocking=True)
+            else:
+                for i, (board, _) in enumerate(batch):
+                    pos, mask = encoder.encodePositionForInference(board)
+                    self.position_buffer[i].copy_(torch.from_numpy(pos))
+                    self.mask_buffer[i].copy_(torch.from_numpy(mask).flatten())
                 
-            # Single GPU evaluation
+            # Single GPU evaluation - optimized
             with torch.no_grad():
-                with torch.amp.autocast('cuda'):
+                with torch.amp.autocast('cuda', dtype=torch.float16):
+                    # Use contiguous views for better performance
+                    pos_batch = self.position_buffer[:batch_size].contiguous()
+                    mask_batch = self.mask_buffer[:batch_size].contiguous()
                     values, policies = self.neural_network(
-                        self.position_buffer[:batch_size],
-                        policyMask=self.mask_buffer[:batch_size]
+                        pos_batch,
+                        policyMask=mask_batch
                     )
                     
             # Process results
@@ -165,8 +192,9 @@ class HighPerformanceMCTS:
                     
                 self._simulate(board.copy())
                 
-        # Use thread pool for simulations
-        num_threads = min(32, num_simulations // 10)  # Fewer threads, more work per thread
+        # Use thread pool for simulations - optimize thread count
+        # More threads for better GPU utilization, but not too many to avoid contention
+        num_threads = min(64, max(8, num_simulations // 20))
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             futures = [executor.submit(run_simulation) for _ in range(num_threads)]
             for f in futures:
@@ -236,9 +264,14 @@ class HighPerformanceMCTS:
             best_child_idx = self._select_child(children)
             best_child = self.nodes[best_child_idx]
             
-            # Make move
-            board.push(best_child.move)
-            node_idx = best_child_idx
+            # Make move - validate it's legal first
+            if best_child.move in board.legal_moves:
+                board.push(best_child.move)
+                node_idx = best_child_idx
+            else:
+                # Invalid move - this shouldn't happen but let's handle it
+                print(f"Warning: Invalid move {best_child.move} in position {board.fen()}")
+                return
             
     def _select_child(self, children_indices):
         """Select best child using PUCT formula"""
@@ -270,8 +303,10 @@ class HighPerformanceMCTS:
         """Expand a node with its children"""
         children_indices = []
         
-        for i, move in enumerate(board.legal_moves):
-            if i < len(move_probs) and move_probs[i] > 0:
+        # move_probs is an array where index i corresponds to the i-th legal move
+        legal_moves = list(board.legal_moves)
+        for i, move in enumerate(legal_moves):
+            if i < len(move_probs) and move_probs[i] > 1e-8:  # Small threshold to avoid tiny probs
                 # Create child node
                 board.push(move)
                 child_hash = board.fen()
