@@ -24,6 +24,7 @@ import queue
 import psutil
 import AlphaZeroNetwork
 from MCTS_cuda import MCTSEngineCUDA
+from MCTS_high_performance import HighPerformanceMCTSEngine
 import encoder
 
 # Windows-specific imports
@@ -198,15 +199,15 @@ class BenchmarkRunner:
             
             print(f"\nConfiguration: {rollouts} rollouts, {threads} threads, batch size {batch_size}")
             
-            # Create MCTS engine
+            # Create MCTS engine - use high-performance implementation
             if self.mcts_engine:
                 self.mcts_engine.stop()
             
-            self.mcts_engine = MCTSEngineCUDA(
+            # Use HighPerformanceMCTSEngine for better throughput
+            self.mcts_engine = HighPerformanceMCTSEngine(
                 self.model,
                 device=self.device,
-                max_batch_size=batch_size,
-                num_workers=threads,
+                batch_size=batch_size,
                 verbose=False
             )
             self.mcts_engine.start()
