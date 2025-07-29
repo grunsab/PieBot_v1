@@ -84,7 +84,7 @@ def optimize_for_device(model, device):
         
     return model
 
-def get_batch_size_for_device(base_batch_size=256):
+def get_batch_size_for_device(base_batch_size=768):
     """
     Adjust batch size based on available device memory.
     
@@ -135,7 +135,7 @@ def get_num_workers_for_device():
         return min(cpu_count, 16)
     elif device.type == 'mps':
         # MPS benefits from fewer workers due to unified memory
-        return min(cpu_count // 2, 8)
+        return cpu_count
     else:  # CPU
         # For CPU training, use fewer workers to avoid overhead
         return min(cpu_count // 2, 4)

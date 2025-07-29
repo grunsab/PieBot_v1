@@ -502,6 +502,38 @@ class Root( Node ):
         """
         return self.parallelRolloutsOptimized(board, neuralNetwork, num_parallel_rollouts)
 
+    def getVisitCounts(self, board):
+        """
+        Get visit counts for all possible moves as a 4608-dimensional vector.
+        This is used for training the policy network in reinforcement learning.
+        
+        Args:
+            board (chess.Board): Current board position (needed for move encoding)
+            
+        Returns:
+            numpy.array (4608,): Visit counts indexed by move encoding
+        """
+        import numpy as np
+        visit_counts = np.zeros(4608, dtype=np.float32)
+        
+        for edge in self.edges:
+            move = edge.getMove()
+            
+            # Use encoder to get the move index
+            # Need to mirror if it's black's turn since encoder mirrors positions
+            if not board.turn:
+                # For black, we need to mirror the move
+                from encoder import mirrorMove
+                mirrored_move = mirrorMove(move)
+                planeIdx, rankIdx, fileIdx = encoder.moveToIdx(mirrored_move)
+            else:
+                planeIdx, rankIdx, fileIdx = encoder.moveToIdx(move)
+            
+            moveIdx = planeIdx * 64 + rankIdx * 8 + fileIdx
+            visit_counts[moveIdx] = edge.getN()
+        
+        return visit_counts
+    
     def cleanup(self):
         """Clean up thread pool when done"""
         if self.thread_pool is not None:

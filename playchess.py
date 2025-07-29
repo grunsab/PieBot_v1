@@ -44,7 +44,6 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
             gpu_ids = []
     
     if not gpu_ids or available_gpus == 0:
-        # CPU fallback
         device, device_str = get_optimal_device()
         print(f'Using device: {device_str}')
         

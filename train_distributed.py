@@ -5,18 +5,23 @@ import torch.nn as nn
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset, Subset
 from torch.utils.data.distributed import DistributedSampler
 from CCRLDataset import CCRLDataset
+from RLDataset import RLDataset, WeightedRLSampler
 from AlphaZeroNetwork import AlphaZeroNet
 from device_utils import optimize_for_device, get_batch_size_for_device, get_num_workers_for_device
 import argparse
+import re
 
-# Training params
-num_epochs = 500
-num_blocks = 20
-num_filters = 256
+# Training params (defaults)
+default_epochs = 40
+default_blocks = 20
+default_filters = 256
+default_lr = 0.001
+default_policy_weight = 1.0
 ccrl_dir = os.path.expanduser('games_training_data/reformatted')
+rl_dir = os.path.expanduser('games_training_data/selfplay')
 logmode = True
 
 def setup(rank, world_size, backend='nccl', init_method='env://'):
@@ -75,14 +80,110 @@ def train_distributed(rank, world_size, args):
     if rank == 0:
         print(f'Batch size per GPU: {batch_size}, Total batch size: {batch_size * world_size}, Workers: {num_workers}')
     
-    # Create dataset and distributed sampler
-    train_ds = CCRLDataset(ccrl_dir)
-    train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True)
+    # Create dataset based on training mode
+    if args.mode == 'supervised':
+        if rank == 0:
+            print(f'Training mode: Supervised learning on CCRL dataset')
+        train_ds = CCRLDataset(ccrl_dir, soft_targets=False)
+    elif args.mode == 'rl':
+        if rank == 0:
+            print(f'Training mode: Reinforcement learning on self-play data')
+            if args.rl_weight_recent:
+                print(f'Using weighted sampling with decay factor {args.rl_weight_decay}')
+        train_ds = RLDataset(args.rl_dir, weight_recent=args.rl_weight_recent,
+                           weight_decay=args.rl_weight_decay)
+    else:  # mixed mode
+        if rank == 0:
+            print(f'Training mode: Mixed (RL ratio: {args.mixed_ratio})')
+            print(f'Using soft targets for CCRL data with temperature {args.label_smoothing_temp}')
+        ccrl_ds = CCRLDataset(ccrl_dir, soft_targets=True, temperature=args.label_smoothing_temp)
+        rl_ds = RLDataset(args.rl_dir)
+        
+        # Calculate sizes for balanced sampling
+        ccrl_size = int(len(ccrl_ds) * (1 - args.mixed_ratio))
+        rl_size = int(len(rl_ds) * args.mixed_ratio)
+        
+        # Create subset indices
+        import random
+        # Use same seed across all ranks for consistency
+        random.seed(42)
+        ccrl_indices = random.sample(range(len(ccrl_ds)), min(ccrl_size, len(ccrl_ds)))
+        rl_indices = random.sample(range(len(rl_ds)), min(rl_size, len(rl_ds)))
+        
+        # Create subsets
+        ccrl_subset = Subset(ccrl_ds, ccrl_indices)
+        rl_subset = Subset(rl_ds, rl_indices)
+        
+        # Concatenate datasets
+        train_ds = ConcatDataset([ccrl_subset, rl_subset])
+        if rank == 0:
+            print(f'Dataset sizes - CCRL: {len(ccrl_subset)}, RL: {len(rl_subset)}')
+    
+    # Create distributed sampler
+    if args.mode == 'rl' and args.rl_weight_recent:
+        # For weighted RL sampling, we need a different approach in distributed setting
+        # Use regular distributed sampler but with replacement to approximate weighting
+        train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank, 
+                                         shuffle=True, drop_last=True)
+        if rank == 0:
+            print("Note: Weighted sampling approximated in distributed mode")
+    else:
+        train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True)
+    
     train_loader = DataLoader(train_ds, batch_size=batch_size, sampler=train_sampler, 
                              num_workers=num_workers, pin_memory=True)
     
+    # Determine model architecture
+    num_blocks = args.num_blocks
+    num_filters = args.num_filters
+    
+    # If resuming, try to extract architecture from filename
+    if args.resume and rank == 0:
+        match = re.search(r'AlphaZeroNet_(\d+)x(\d+)', args.resume)
+        if match:
+            file_blocks = int(match.group(1))
+            file_filters = int(match.group(2))
+            if num_blocks != file_blocks or num_filters != file_filters:
+                print(f'Warning: Architecture mismatch! File suggests {file_blocks}x{file_filters}, '
+                      f'but using {num_blocks}x{num_filters}')
+    
     # Create model and move to device
-    alphaZeroNet = AlphaZeroNet(num_blocks, num_filters)
+    alphaZeroNet = AlphaZeroNet(num_blocks, num_filters, policy_weight=args.policy_weight)
+    
+    # Load checkpoint if resuming
+    start_epoch = 0
+    if args.resume:
+        if rank == 0:  # Only rank 0 checks file existence
+            if not os.path.exists(args.resume):
+                raise FileNotFoundError(f'Checkpoint file not found: {args.resume}')
+        
+        # Synchronize all processes before loading
+        if world_size > 1:
+            dist.barrier()
+        
+        if rank == 0:
+            print(f'Loading checkpoint from {args.resume}')
+        
+        # Load checkpoint
+        checkpoint = torch.load(args.resume, map_location=device)
+        
+        # Handle both DDP and non-DDP checkpoints
+        # DDP saves with 'module.' prefix, so we need to handle both cases
+        state_dict = checkpoint
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            # Remove 'module.' prefix if it exists
+            if k.startswith('module.'):
+                new_state_dict[k[7:]] = v
+            else:
+                new_state_dict[k] = v
+        
+        # Handle loading old checkpoints that don't have policy_weight in state_dict
+        alphaZeroNet.load_state_dict(new_state_dict, strict=False)
+        
+        if rank == 0:
+            print(f'Checkpoint loaded successfully (policy_weight={args.policy_weight})')
+    
     alphaZeroNet = optimize_for_device(alphaZeroNet, device)
     
     # Wrap model with DDP
@@ -93,7 +194,7 @@ def train_distributed(rank, world_size, args):
         alphaZeroNet = DDP(alphaZeroNet)
     
     # Create optimizer and loss function
-    optimizer = optim.Adam(alphaZeroNet.parameters(), lr=args.learning_rate)
+    optimizer = optim.Adam(alphaZeroNet.parameters(), lr=args.lr)
     
     # Optional: Use mixed precision training for better performance
     scaler = torch.amp.GradScaler() if args.mixed_precision and torch.cuda.is_available() else None
@@ -101,7 +202,7 @@ def train_distributed(rank, world_size, args):
     if rank == 0:
         print('Starting distributed training')
     
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, args.epochs):
         # Set epoch for distributed sampler to ensure proper shuffling
         train_sampler.set_epoch(epoch)
         
@@ -120,9 +221,8 @@ def train_distributed(rank, world_size, args):
             # Forward pass with optional mixed precision
             if scaler is not None:
                 with torch.cuda.amp.autocast():
-                    valueLoss, policyLoss = alphaZeroNet(position, valueTarget=valueTarget,
-                                                         policyTarget=policyTarget)
-                    loss = valueLoss + policyLoss
+                    loss, valueLoss, policyLoss = alphaZeroNet(position, valueTarget=valueTarget,
+                                                               policyTarget=policyTarget)
                 
                 # Backward pass with gradient scaling
                 scaler.scale(loss).backward()
@@ -130,9 +230,8 @@ def train_distributed(rank, world_size, args):
                 scaler.update()
             else:
                 # Regular forward and backward pass
-                valueLoss, policyLoss = alphaZeroNet(position, valueTarget=valueTarget,
-                                                     policyTarget=policyTarget)
-                loss = valueLoss + policyLoss
+                loss, valueLoss, policyLoss = alphaZeroNet(position, valueTarget=valueTarget,
+                                                          policyTarget=policyTarget)
                 loss.backward()
                 optimizer.step()
             
@@ -141,8 +240,8 @@ def train_distributed(rank, world_size, args):
             
             # Only rank 0 prints progress
             if rank == 0:
-                message = 'Epoch {:03} | Step {:05} / {:05} | Value loss {:0.5f} | Policy loss {:0.5f}'.format(
-                         epoch, iter_num, len(train_loader), float(valueLoss), float(policyLoss))
+                message = 'Epoch {:03} | Step {:05} / {:05} | Total loss {:0.5f} | Value loss {:0.5f} | Policy loss {:0.5f}'.format(
+                         epoch, iter_num, len(train_loader), float(loss), float(valueLoss), float(policyLoss))
                 
                 if iter_num != 0 and not logmode:
                     print(('\b' * len(message)), end='')
@@ -170,7 +269,15 @@ def train_distributed(rank, world_size, args):
         if rank == 0:
             print(f'Epoch {epoch} - Avg Value Loss: {avg_value_loss:.5f}, Avg Policy Loss: {avg_policy_loss:.5f}')
             
-            networkFileName = f'AlphaZeroNet_{num_blocks}x{num_filters}_distributed.pt'
+            # Determine output filename
+            if args.output:
+                networkFileName = args.output
+            elif args.resume:
+                # When resuming, add '_continued' to avoid overwriting original
+                base_name = f'AlphaZeroNet_{num_blocks}x{num_filters}_distributed'
+                networkFileName = f'{base_name}_continued.pt'
+            else:
+                networkFileName = f'AlphaZeroNet_{num_blocks}x{num_filters}_distributed.pt'
             
             # Save the model state dict (unwrap DDP if necessary)
             if isinstance(alphaZeroNet, DDP):
@@ -203,10 +310,36 @@ def main():
                         help='Total batch size across all GPUs')
     parser.add_argument('--num-workers', type=int, default=None,
                         help='Number of data loading workers')
-    parser.add_argument('--learning-rate', type=float, default=0.00066,
-                        help='Learning rate for optimizer')
+    parser.add_argument('--lr', type=float, default=default_lr,
+                        help=f'Learning rate for optimizer (default: {default_lr})')
     parser.add_argument('--mixed-precision', action='store_true',
                         help='Use mixed precision training (requires GPU)')
+    
+    # Model and checkpoint arguments
+    parser.add_argument('--resume', type=str, default=None,
+                        help='Path to checkpoint to resume training from')
+    parser.add_argument('--epochs', type=int, default=default_epochs,
+                        help=f'Number of epochs to train (default: {default_epochs})')
+    parser.add_argument('--num-blocks', type=int, default=default_blocks,
+                        help=f'Number of residual blocks (default: {default_blocks})')
+    parser.add_argument('--num-filters', type=int, default=default_filters,
+                        help=f'Number of filters (default: {default_filters})')
+    parser.add_argument('--output', type=str, default=None,
+                        help='Output filename for saved model')
+    parser.add_argument('--policy-weight', type=float, default=default_policy_weight,
+                        help=f'Weight for policy loss relative to value loss (default: {default_policy_weight})')
+    parser.add_argument('--mode', choices=['supervised', 'rl', 'mixed'], default='supervised',
+                        help='Training mode: supervised (CCRL data), rl (self-play), or mixed (both)')
+    parser.add_argument('--rl-dir', type=str, default=rl_dir,
+                        help='Directory containing self-play training data (HDF5 files)')
+    parser.add_argument('--mixed-ratio', type=float, default=0.5,
+                        help='For mixed mode: ratio of RL data (0.0-1.0, default: 0.5)')
+    parser.add_argument('--label-smoothing-temp', type=float, default=0.1,
+                        help='Temperature for label smoothing in mixed mode (default: 0.1)')
+    parser.add_argument('--rl-weight-recent', action='store_true',
+                        help='Weight recent games more heavily in RL mode (Leela approach)')
+    parser.add_argument('--rl-weight-decay', type=float, default=0.1,
+                        help='Weight decay factor for older games (default: 0.1)')
     
     # Multi-node training arguments
     parser.add_argument('--master-addr', type=str, default='localhost',
