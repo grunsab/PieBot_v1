@@ -17,13 +17,23 @@ def log(message):
     print(f"[{timestamp}] {message}")
 
 def run_command(cmd, check=True):
-    """Run a command and return the result"""
+    """Run a command and stream output to stdout"""
     log(f"Running: {cmd}")
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    if check and result.returncode != 0:
-        log(f"Error: {result.stderr}")
-        raise RuntimeError(f"Command failed: {cmd}")
-    return result
+    # Use subprocess.Popen to stream output in real-time
+    process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    
+    # Stream output line by line
+    for line in iter(process.stdout.readline, ''):
+        if line:
+            print(line.rstrip())
+    
+    # Wait for process to complete
+    returncode = process.wait()
+    
+    if check and returncode != 0:
+        raise RuntimeError(f"Command failed with return code {returncode}: {cmd}")
+    
+    return returncode
 
 def phase1_supervised(args):
     """Phase 1: Supervised learning on CCRL dataset"""

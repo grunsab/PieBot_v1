@@ -23,7 +23,7 @@ logmode=True
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train AlphaZero network')
-    parser.add_argument('--resume', type=str, default="AlphaZeroNet_20x256_distributed.pt",
+    parser.add_argument('--resume', type=str,
                         help='Path to checkpoint to resume training from')
     parser.add_argument('--epochs', type=int, default=default_epochs,
                         help=f'Number of epochs to train (default: {default_epochs})')
