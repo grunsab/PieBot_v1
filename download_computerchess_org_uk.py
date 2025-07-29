@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Download and filter grandmaster-level chess games from Lichess database.
-Filters games where both players have ratings >= 2850 (grandmaster level).
+Download and filter super-grandmaster-level chess games from ComputerChess.org.uk.
+Filters games where both players have ratings >= 3000 (super-grandmaster level).
 """
 
 import requests

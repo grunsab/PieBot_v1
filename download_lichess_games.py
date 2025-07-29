@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Download and filter grandmaster-level chess games from Lichess database.
-Filters games where both players have ratings >= 2600 (grandmaster level).
+Filters games where both players have ratings >= 3000 (super-grandmaster level).
 """
 
 import requests
