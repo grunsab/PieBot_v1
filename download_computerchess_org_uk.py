@@ -33,9 +33,8 @@ except ImportError:
 MIN_RATING = 3000
 
 import uuid
-import zstandard as zstd
 import py7zr
-
+from collections import defaultdict
 
 
 def count_games_in_pgn_fast(input_file):
@@ -44,7 +43,7 @@ def count_games_in_pgn_fast(input_file):
     Each game ends with a Result tag.
     """
     count = 0
-    with zstd.open(input_file, 'r', encoding='utf-8', errors='ignore') as f:
+    with open(input_file, 'r') as f:
         for line in f:
             if line.startswith('[Result '):
                 count += 1
@@ -82,35 +81,48 @@ def download_file(url_filename_pairs, chunk_size=8192):
                 f.write(data)
 
 
-
-def filter_games_by_rating_and_time_control(input_file, output_directory, min_rating=3000, min_seconds=180):
+def filter_games_by_rating_and_time_control(input_file, output_directory, min_rating=3000, offset=0):
     """Filter games where both players have rating >= min_rating."""
     
     games_processed = 0
     games_kept = 0
-    
+    games_skipped = 0
+
     with open(input_file, 'r') as fh:
+        if offset > 0:
+            while games_skipped < offset:
+                chess.pgn.skip_game(fh)
+                games_skipped += 1
+
         current_game = ""
         in_game = False
         
         print(f"Filtering games with both players rated >= {min_rating}...")
         
-        i = 0
+        i = 0 + offset
 
         while True:
             game = chess.pgn.read_game(fh)
             if not game:
-                break
+                continue
             games_processed += 1
-            if int(game.headers['WhiteElo']) >= min_rating and int(game.headers['BlackElo']) >= min_rating:
-                output_file = os.path.join(output_directory, f'{3000000 + i}.pgn')
-                with open(output_file, 'w') as game_fh:
-                    print(game, file=game_fh, end='\n\n')
-                games_kept += 1
-                i += 1
+            try:
+                if int(game.headers['WhiteElo']) >= min_rating and int(game.headers['BlackElo']) >= min_rating:
+                    output_file = os.path.join(output_directory, f'{3000000 + i}.pgn')
+                    with open(output_file, 'w') as game_fh:
+                        print(game, file=game_fh, end='\n\n')
+                    games_kept += 1
+                    i += 1
+            except KeyError as k:
+                print(k)
+                continue
 
-            if games_kept % 1000 == 0:
+            if games_kept % 1000 == 0 and games_kept > 0:
                 print(f"Kept {games_kept} games out of {games_processed} games")
+            
+            if games_processed % 1000 == 0 and games_processed > 0:
+                print(f"Processed {games_processed} games out of approximately 2.1MM games")
+
     
     print(f"\nFiltering complete!")
     print(f"Total games processed: {games_processed:,}")
@@ -121,9 +133,9 @@ def filter_games_by_rating_and_time_control(input_file, output_directory, min_ra
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Download and filter grandmaster-level games from Lichess")
-    parser.add_argument('--months', type=int, default=1, help='Number of months to download (default: 1)')
-    parser.add_argument('--min-rating', type=int, default=2850, help='Minimum rating for both players (default: 2850)')
+    parser = argparse.ArgumentParser(description="Download and filter grandmaster-level games from ComputerChess.org.uk")
+    parser.add_argument('--offset', type=int, help='Skip the processing of the first N games')
+    parser.add_argument('--min-rating', type=int, default=3000, help='Minimum rating for both players (default: 3000)')
     parser.add_argument('--output-dir', default='games_training_data/reformatted', help='Output directory (default: games_training_data/reformatted)')
     parser.add_argument('--skip-download', action='store_true', help='Skip download and only filter existing files')
     parser.add_argument('--output-dir-downloads', default='games_training_data/CCRL_computerchess_org/', help='Output directory to store LiChess Databases (default: games_training_data)')
@@ -170,7 +182,7 @@ def main():
             input_path_for_parsing = input_path_for_extraction
             output_directory = os.path.join(args.output_dir)
             print(f"\nProcessing {filename}...")
-            kept, processed = filter_games_by_rating_and_time_control(input_path_for_parsing, output_directory)
+            kept, processed = filter_games_by_rating_and_time_control(input_path_for_parsing, output_directory, args.min_rating, args.offset)
             
             total_kept += kept
             total_processed += processed

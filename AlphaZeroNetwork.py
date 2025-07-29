@@ -140,13 +140,15 @@ class AlphaZeroNet( nn.Module ):
     Neural network with AlphaZero architecture.
     """
 
-    def __init__(self, num_blocks, num_filters ):
+    def __init__(self, num_blocks, num_filters, policy_weight=1.0 ):
         """
         Args:
             num_blocks (int) the number of residual blocks
             filters_per_conv (int) the number of filters in each conv layer
+            policy_weight (float) weight for policy loss relative to value loss (default: 1.0)
         """
         super().__init__()
+        self.policy_weight = policy_weight
         #The number of input planes is fixed at 16
         self.convBlock1 = ConvBlock( 16, num_filters )
 
@@ -186,11 +188,24 @@ class AlphaZeroNet( nn.Module ):
             
             valueLoss = self.mseLoss( value, valueTarget )
 
-            policyTarget = policyTarget.view( policyTarget.shape[0] )
-
-            policyLoss = self.crossEntropyLoss( policy, policyTarget )
+            # Handle different policy target formats
+            if policyTarget.dim() == 1 or (policyTarget.dim() == 2 and policyTarget.shape[1] == 1):
+                # Supervised learning: policy target is move index
+                policyTarget = policyTarget.view( policyTarget.shape[0] )
+                policyLoss = self.crossEntropyLoss( policy, policyTarget )
+            else:
+                # RL: policy target is probability distribution
+                # Use KL divergence or cross entropy with soft targets
+                log_probs = nn.functional.log_softmax(policy, dim=1)
+                # Add small epsilon to avoid log(0)
+                policyTarget = policyTarget + 1e-8
+                policyTarget = policyTarget / policyTarget.sum(dim=1, keepdim=True)
+                policyLoss = -(policyTarget * log_probs).sum(dim=1).mean()
             
-            return valueLoss, policyLoss
+            # Return weighted losses and individual losses for monitoring
+            totalLoss = valueLoss + self.policy_weight * policyLoss
+            
+            return totalLoss, valueLoss, policyLoss
 
         else:
 

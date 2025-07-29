@@ -30,24 +30,13 @@ def count_games_in_pgn_fast(input_file):
                 count += 1
     return count
 
-def count_games_in_pgn(input_file, force_fast=False):
+def count_games_in_pgn(input_file, force_fast=True):
     """
     Count the total number of games in a PGN file.
-    Falls back to full parsing if fast method seems incorrect.
     """
-    # First try fast counting
     fast_count = count_games_in_pgn_fast(input_file)
+    return fast_count
     
-    # If forced fast mode or count seems reasonable (around 8000), use it
-    if force_fast or (7000 <= fast_count <= 9000):
-        return fast_count
-    
-    # Otherwise fall back to accurate counting
-    count = 0
-    with open(input_file, 'r') as pgn_fh:
-        while chess.pgn.skip_game(pgn_fh):
-            count += 1
-    return count
 
 def process_pgn_chunk(args):
     """

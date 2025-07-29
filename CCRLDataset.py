@@ -26,14 +26,18 @@ class CCRLDataset( Dataset ):
     Subclass of torch.utils.data.Dataset for the ccrl dataset.
     """
 
-    def __init__( self, ccrl_dir ):
+    def __init__( self, ccrl_dir, soft_targets=False, temperature=0.1 ):
         """
         Args:
             ccrl_dir (string) Path to directory containing
                 pgn files with names 0.pgn, 1.pgn, 2.pgn, etc.
+            soft_targets (bool) If True, return probability distribution instead of move index
+            temperature (float) Temperature for label smoothing when using soft targets
         """
         self.ccrl_dir = ccrl_dir
         self.pgn_file_names = os.listdir( ccrl_dir )
+        self.soft_targets = soft_targets
+        self.temperature = temperature
 
     def __len__( self ):
         """
@@ -88,9 +92,44 @@ class CCRLDataset( Dataset ):
             
         winner = encoder.parseResult( game.headers[ 'Result' ] )
 
-        position, policy, value, mask = encoder.encodeTrainingPoint( board, next_move, winner )
+        position, policy_idx, value, mask = encoder.encodeTrainingPoint( board, next_move, winner )
+        
+        if self.soft_targets:
+            # Convert to probability distribution with label smoothing
+            policy = np.zeros(4608, dtype=np.float32)
             
-        return { 'position': torch.from_numpy( position ),
-                 'policy': torch.Tensor( [policy] ).type( dtype=torch.long ),
-                 'value': torch.Tensor( [value] ),
-                 'mask': torch.from_numpy( mask ) }
+            # Set the played move to high probability
+            policy[policy_idx] = 1.0
+            
+            # Apply temperature-based label smoothing
+            if self.temperature > 0:
+                # Add small probability to all legal moves
+                legal_indices = []
+                for move in board.legal_moves:
+                    # Mirror the move if it's black's turn (to match encoder behavior)
+                    if not board.turn:
+                        from encoder import mirrorMove
+                        move = mirrorMove(move)
+                    planeIdx, rankIdx, fileIdx = encoder.moveToIdx(move)
+                    moveIdx = planeIdx * 64 + rankIdx * 8 + fileIdx
+                    legal_indices.append(moveIdx)
+                
+                # Apply smoothing only to legal moves
+                num_legal = len(legal_indices)
+                if num_legal > 1:
+                    smoothing_prob = self.temperature / num_legal
+                    policy[policy_idx] = 1.0 - self.temperature + smoothing_prob
+                    for idx in legal_indices:
+                        if idx != policy_idx:
+                            policy[idx] = smoothing_prob
+            
+            return { 'position': torch.from_numpy( position ),
+                     'policy': torch.from_numpy( policy ),
+                     'value': torch.Tensor( [value] ),
+                     'mask': torch.from_numpy( mask ) }
+        else:
+            # Original behavior: return move index
+            return { 'position': torch.from_numpy( position ),
+                     'policy': torch.Tensor( [policy_idx] ).type( dtype=torch.long ),
+                     'value': torch.Tensor( [value] ),
+                     'mask': torch.from_numpy( mask ) }
