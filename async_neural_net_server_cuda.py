@@ -3,6 +3,7 @@ import numpy as np
 import threading
 import queue
 import time
+import sys
 from collections import namedtuple
 from typing import List, Tuple, Optional
 import encoder
@@ -65,7 +66,8 @@ class AsyncNeuralNetworkServerCUDA:
         self.neural_network.eval()
         
         # Compile model with torch.compile for additional speedup (PyTorch 2.0+)
-        if hasattr(torch, 'compile'):
+        # Note: torch.compile requires Triton which has limited Windows support
+        if hasattr(torch, 'compile') and sys.platform != 'win32':
             try:
                 self.neural_network = torch.compile(self.neural_network, mode='reduce-overhead')
                 if verbose:
@@ -73,6 +75,8 @@ class AsyncNeuralNetworkServerCUDA:
             except:
                 if verbose:
                     print("torch.compile not available or failed, using eager mode")
+        elif verbose and sys.platform == 'win32':
+            print("Skipping torch.compile on Windows (Triton not fully supported)")
         
         # Disable gradients for inference
         for param in self.neural_network.parameters():
@@ -212,7 +216,7 @@ class AsyncNeuralNetworkServerCUDA:
                     
                     # Batch evaluate
                     with torch.no_grad():
-                        with torch.cuda.amp.autocast():  # Use automatic mixed precision
+                        with torch.amp.autocast('cuda'):  # Use automatic mixed precision
                             values, policies = self.neural_network(positions, policyMask=masks)
                     
                     # Convert to numpy (async transfer)
