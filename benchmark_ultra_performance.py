@@ -17,8 +17,20 @@ def benchmark_ultra_mcts(model_path, device, num_searches=20):
     
     # Load model
     print(f"Loading model: {model_path}")
-    model = AlphaZeroNet()
+    
+    # Load checkpoint first to check if it has model config
     checkpoint = torch.load(model_path, map_location=device)
+    
+    # Try to infer model size from filename or use default
+    if '20x256' in model_path:
+        num_blocks, num_filters = 20, 256
+    elif '10x128' in model_path:
+        num_blocks, num_filters = 10, 128
+    else:
+        # Default configuration
+        num_blocks, num_filters = 20, 256
+    
+    model = AlphaZeroNet(num_blocks, num_filters)
     
     if 'model_state_dict' in checkpoint:
         model.load_state_dict(checkpoint['model_state_dict'])
