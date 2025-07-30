@@ -55,10 +55,10 @@ class BatchQueue:
         self.results = {}
         self.last_process_time = time.time()
         
-    def add_request(self, board_hash, position, mask):
+    def add_request(self, board_hash, position, mask, board=None):
         """Add a request to the queue."""
         request_id = len(self.results)
-        self.queue.append((request_id, board_hash, position, mask))
+        self.queue.append((request_id, board_hash, position, mask, board))
         
         # Process if batch is full or timeout reached
         if len(self.queue) >= self.batch_size or \
@@ -80,12 +80,14 @@ class BatchQueue:
         
         request_ids = []
         board_hashes = []
+        boards = []
         
-        for i, (req_id, board_hash, position, mask) in enumerate(self.queue):
+        for i, (req_id, board_hash, position, mask, board) in enumerate(self.queue):
             positions[i] = position
             masks[i] = mask
             request_ids.append(req_id)
             board_hashes.append(board_hash)
+            boards.append(board)
         
         # Clear queue
         self.queue.clear()
@@ -104,10 +106,16 @@ class BatchQueue:
         
         # Store results
         for i, req_id in enumerate(request_ids):
-            self.results[req_id] = (values[i], policies[i])
+            # Decode policy output to get move probabilities
+            if boards[i] is not None:
+                move_probs = encoder.decodePolicyOutput(boards[i], policies[i])
+            else:
+                move_probs = policies[i]
+            
+            self.results[req_id] = (values[i], move_probs)
             # Cache results
             if board_hashes[i] not in position_cache and len(position_cache) < POSITION_CACHE_SIZE:
-                position_cache[board_hashes[i]] = (values[i], policies[i])
+                position_cache[board_hashes[i]] = (values[i], move_probs)
     
     def get_result(self, request_id):
         """Get result for a request, processing batch if needed."""
@@ -274,8 +282,8 @@ class CudaRoot(CudaNode):
         
         if ENABLE_AGGRESSIVE_BATCHING and batch_queue is not None:
             # Add to batch queue
-            request_id = batch_queue.add_request(board_hash, position, mask)
-            value, policy = batch_queue.get_result(request_id)
+            request_id = batch_queue.add_request(board_hash, position, mask, board)
+            value, move_probabilities = batch_queue.get_result(request_id)
         else:
             # Direct inference
             with torch.no_grad():
@@ -284,7 +292,7 @@ class CudaRoot(CudaNode):
                 value = value_tensor.item()
                 policy = policy_tensor[0].cpu().numpy()
         
-        move_probabilities = encoder.decodePolicyOutput(board, policy)
+            move_probabilities = encoder.decodePolicyOutput(board, policy)
         
         # Cache result
         if len(position_cache) < POSITION_CACHE_SIZE:
@@ -353,7 +361,13 @@ class CudaRoot(CudaNode):
                     masks_flat = masks.view(batch_size, -1)
                     values, policies = self.neuralNetwork(positions, policyMask=masks_flat)
                     values = values.cpu().numpy()
-                    policies = policies.cpu().numpy()
+                    policies_raw = policies.cpu().numpy()
+                
+                # Decode policies for each board
+                policies = []
+                for i, b in enumerate(leaf_boards):
+                    move_probs = encoder.decodePolicyOutput(b, policies_raw[i])
+                    policies.append(move_probs)
             else:
                 # Sequential evaluation
                 values = []
@@ -375,13 +389,7 @@ class CudaRoot(CudaNode):
                     value = values[leaf_idx]
                     Q = value / 2.0 + 0.5
                     
-                    if leaf_idx < len(policies):
-                        move_probs = policies[leaf_idx]
-                    else:
-                        move_probs = encoder.decodePolicyOutput(
-                            leaf_boards[leaf_idx], 
-                            policies[leaf_idx]
-                        )
+                    move_probs = policies[leaf_idx]
                     
                     parent.expand_edge(edge_idx, leaf_boards[leaf_idx], Q, move_probs)
                     
