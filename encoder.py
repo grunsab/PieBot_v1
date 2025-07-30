@@ -344,6 +344,11 @@ def callNeuralNetwork( board, neuralNetwork ):
     position = position.to(DEVICE)
     mask = mask.to(DEVICE)
     
+    # Convert to half precision if model is FP16
+    if next(neuralNetwork.parameters()).dtype == torch.float16:
+        position = position.half()
+        mask = mask.half()
+    
     # Flatten mask to match expected shape
     mask_flat = mask.view(mask.shape[0], -1)
     value, policy = neuralNetwork( position, policyMask=mask_flat )
@@ -385,6 +390,11 @@ def callNeuralNetworkBatched( boards, neuralNetwork ):
 
     inputs = inputs.to(DEVICE)
     masks = masks.to(DEVICE)
+    
+    # Convert to half precision if model is FP16
+    if next(neuralNetwork.parameters()).dtype == torch.float16:
+        inputs = inputs.half()
+        masks = masks.half()
 
     # Flatten masks to match expected shape
     masks_flat = masks.view(masks.shape[0], -1)

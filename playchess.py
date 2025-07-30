@@ -72,7 +72,21 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
         
         model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
         weights = torch.load(model_file, map_location=device)
-        model.load_state_dict(weights)
+        
+        # Handle different model formats
+        if isinstance(weights, dict) and 'model_state_dict' in weights:
+            # FP16 or quantized model format
+            model.load_state_dict(weights['model_state_dict'])
+            model_type = weights.get('model_type', 'unknown')
+            
+            # Handle FP16 models
+            if model_type == 'fp16':
+                model = model.half()
+                print(f"Loaded FP16 model on GPU {gpu_id}")
+        else:
+            # Regular model format
+            model.load_state_dict(weights)
+        
         model.to(device)
         model.eval()
         
