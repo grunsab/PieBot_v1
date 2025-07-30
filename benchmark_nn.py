@@ -13,17 +13,9 @@ import torch
 import numpy as np
 import random
 from AlphaZeroNetwork import AlphaZeroNet
-from encoder import encodePositionForInference, callNeuralNetworkBatched, callNeuralNetworkBatchedMP
+from encoder import encodePositionForInference, callNeuralNetworkBatched
 from device_utils import get_optimal_device, optimize_for_device, get_batch_size_for_device
 
-
-from multiprocessing import Pool, set_start_method
-
-# Set start method for multiprocessing
-try:
-    set_start_method('spawn', force=True)
-except RuntimeError:
-    pass  # Already set
 
 def generate_diverse_positions(num_positions=10000):
     """
@@ -114,13 +106,6 @@ def generate_diverse_positions(num_positions=10000):
     return positions[:num_positions]
 
 
-def worker_init():
-    """Initialize worker process for multiprocessing."""
-    # Each worker needs its own device context
-    import torch
-    torch.set_num_threads(1)  # Prevent thread oversubscription
-
-
 def benchmark_neural_network(model_path, num_positions=10000, batch_size=None):
     """
     Benchmark neural network evaluation performance.
@@ -138,31 +123,18 @@ def benchmark_neural_network(model_path, num_positions=10000, batch_size=None):
     print(f"Loading model from {model_path}...")
     checkpoint = torch.load(model_path, map_location=device)
     
-    # Determine model configuration
-    if isinstance(checkpoint, dict) and 'model_config' in checkpoint:
+    # Extract model configuration
+    if 'model_config' in checkpoint:
         num_blocks = checkpoint['model_config']['num_blocks']
         num_filters = checkpoint['model_config']['num_filters']
     else:
-        # Try to infer from filename or use default
-        if '20x256' in model_path:
-            num_blocks, num_filters = 20, 256
-        elif '10x128' in model_path:
-            num_blocks, num_filters = 10, 128
-        else:
-            # Default configuration
-            num_blocks = 20
-            num_filters = 256
+        # Default configuration
+        num_blocks = 20
+        num_filters = 256
     
-    # Create model
+    # Create and load model
     model = AlphaZeroNet(num_blocks, num_filters)
-    
-    # Load weights - handle both checkpoint and direct state_dict formats
-    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
-    else:
-        # Assume checkpoint is directly the state_dict
-        model.load_state_dict(checkpoint)
-    
+    model.load_state_dict(checkpoint['model_state_dict'])
     model = optimize_for_device(model, device)
     model.eval()
     
@@ -204,30 +176,14 @@ def benchmark_neural_network(model_path, num_positions=10000, batch_size=None):
     total_evaluations = 0
     
     with torch.no_grad():
-        # For multiprocessing with MPS, we need to move model to CPU.
-        # Hence do not test the performance with multiprocessing on MPS devices, since it'll be radically slower.
-        if 'mps' in str(device).lower():
-            for i in range(num_batches):
-                batch_start = i * batch_size
-                batch_end = min((i + 1) * batch_size, num_positions)
-                batch_positions = positions[batch_start:batch_end]
-                values, policies = callNeuralNetworkBatched(batch_positions, model)
-                total_evaluations += len(batch_positions)
-        else:
-            chunks = []
-            num_processes = min(10, num_batches)  # Don't create more processes than batches
-            for i in range(num_processes):
-                batch_start = i * batch_size
-                batch_end = min((i + 1) * batch_size, num_positions)
-                batch_positions = positions[batch_start:batch_end]
-                chunks.append((batch_positions, model))
-
-            with Pool(num_processes) as pool:
-                results = pool.map(callNeuralNetworkBatchedMP, chunks)
+        for i in range(num_batches):
+            batch_start = i * batch_size
+            batch_end = min((i + 1) * batch_size, num_positions)
+            batch_positions = positions[batch_start:batch_end]
             
-            # Calculate total evaluations from results
-            total_evaluations = sum(len(result[0]) for result in results)
-
+            # Evaluate batch
+            values, policies = callNeuralNetworkBatched(batch_positions, model)
+            total_evaluations += len(batch_positions)
     
     end_time = time.perf_counter()
     elapsed_time = end_time - start_time
