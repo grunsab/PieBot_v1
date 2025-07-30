@@ -70,7 +70,7 @@ The current best model performs at around 2500 ELO on LiChess (available to test
 
 I'm training a new model using a larger dataset including the ones from ComputerChess.org.uk, which should play much stronger once it's completed. That will train on approximately 3MM-3.5MM games in total.
 
-I experimented with increasing the number of positions evaluated by adjusting the MCTS, but I was not sucessful at improving the overall throughput of the model in terms of nodes per second evaluated (see the folder experiments). I was surprised to see that Google DeepMind claims a performance of 80k positions evaluated per second on a 4 TPU setup.
+I experimented with increasing the number of positions evaluated by adjusting the MCTS, but I was not sucessful at improving the overall throughput of the model in terms of nodes per second evaluated (see the folder experiments). I was surprised to see that Google DeepMind claims a performance of 80k positions evaluated per second on a 4 TPU setup. I did however create a benchmark_nn.py script, which shows that the maximum number of nodes per second that my Macbook Pro M4 Pro can reach is 1600 nodes per second, and the maximum number of nodes per second that my RTX 4080 can reach is 3600 nodes per second. I reach approximately 1000 nodes per second on each device right now, which suggests a significant bottleneck on the MCTS code.
 
-I am however now experimenting with model quantization, that should hopefully increase the nodes evaluated per second by double.
+I am however now experimenting with model quantization, that should hopefully increase the nodes evaluated per second significantly, if I can somehow get the quant version to run on GPU, which PyTorch doesn't offically support.
 
