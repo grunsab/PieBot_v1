@@ -497,6 +497,11 @@ def build_extensions():
     
     return True
 
+# Alias for compatibility
+Root = CudaRoot
+Node = CudaNode
+Edge = CudaEdge
+
 # Auto-build on import if needed
 if not CPP_AVAILABLE and not CUDA_AVAILABLE:
     print("\nPerformance extensions not available.")
