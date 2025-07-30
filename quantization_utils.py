@@ -241,7 +241,7 @@ def apply_static_quantization(model: AlphaZeroNetwork.AlphaZeroNet,
         # For x86 CPUs, use per-tensor quantization
         quant_model.qconfig = torch.quantization.QConfig(
             activation=torch.quantization.default_observer,
-            weight=torch.quantization.default_per_tensor_weight_observer
+            weight=torch.quantization.default_weight_observer
         )
     else:
         # For other backends (ARM/mobile)
