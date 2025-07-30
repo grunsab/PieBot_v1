@@ -323,6 +323,7 @@ def main():
     parser.add_argument('--fast-count', '-f', action='store_true',
                         help='Use fast game counting by scanning Result tags')
     parser.add_argument("--starting-offset", type=int, default=0, help="Set starting index for PGN file number")
+    parser.add_argument("--default-base-name", default="", help="set the default base name of the file to save")
     
     args = parser.parse_args()
     

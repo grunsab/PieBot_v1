@@ -11,6 +11,7 @@ from device_utils import get_optimal_device, optimize_for_device
 from quantization_utils import (
     apply_dynamic_quantization,
     apply_static_quantization,
+    apply_fp16_optimization,
     save_quantized_model,
     create_calibration_dataset
 )
@@ -21,8 +22,8 @@ def main():
         description='Quantize AlphaZero model for improved inference performance'
     )
     parser.add_argument('--model', help='Path to model file', required=True)
-    parser.add_argument('--type', choices=['dynamic', 'static'], default='dynamic',
-                       help='Type of quantization (dynamic is easier, static is faster)')
+    parser.add_argument('--type', choices=['dynamic', 'static', 'fp16'], default='dynamic',
+                       help='Type of optimization: dynamic/static quantization (CPU only) or fp16 (GPU/MPS)')
     parser.add_argument('--calibration-size', type=int, default=1000,
                        help='Number of positions for calibration (static only)')
     parser.add_argument('--output', help='Output path for quantized model (optional)')
@@ -33,6 +34,12 @@ def main():
     print(f"Loading model from {args.model}...")
     device, device_str = get_optimal_device()
     print(f"Device: {device_str}")
+    
+    # Check platform compatibility
+    import platform
+    if platform.system() == "Windows":
+        print("\nRunning on Windows - quantization is fully supported.")
+        print("Note: Quantized models run on CPU for best compatibility.\n")
     
     # Determine architecture
     if '20x256' in args.model:
@@ -49,18 +56,28 @@ def main():
     model = optimize_for_device(model, device)
     model.eval()
     
-    # Apply quantization
-    if args.type == 'dynamic':
-        print("\nApplying dynamic quantization...")
+    # Apply optimization based on type
+    if args.type == 'fp16':
+        if device.type in ['cuda', 'mps']:
+            print(f"\nApplying FP16 optimization for {device.type.upper()}...")
+            quantized_model = apply_fp16_optimization(model, device)
+            suffix = "_fp16"
+        else:
+            print(f"\nWARNING: FP16 optimization requires GPU/MPS. Current device: {device.type}")
+            print("Falling back to dynamic quantization...")
+            quantized_model = apply_dynamic_quantization(model)
+            suffix = "_dynamic_quantized"
+    elif args.type == 'dynamic':
+        print("\nApplying dynamic quantization (CPU only)...")
         quantized_model = apply_dynamic_quantization(model)
         suffix = "_dynamic_quantized"
-    else:
-        print(f"\nApplying static quantization with {args.calibration_size} calibration samples...")
+    else:  # static
+        print(f"\nApplying static quantization with {args.calibration_size} calibration samples (CPU only)...")
         print("Generating calibration data...")
         calibration_data = create_calibration_dataset(args.calibration_size)
         
-        # Use appropriate backend
-        backend = 'qnnpack' if device.type == 'mps' else 'fbgemm'
+        # Use fbgemm backend for Windows/x86
+        backend = 'fbgemm'
         quantized_model = apply_static_quantization(model, calibration_data, backend=backend)
         suffix = "_static_quantized"
     

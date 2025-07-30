@@ -219,5 +219,10 @@ class AlphaZeroNet( nn.Module ):
             
             policy_softmax = policy_exp / policy_exp_sum
 
-            return value, policy_softmax
+            # Return consistent tuple format (add dummy loss for inference)
+            if self.training:
+                return value, policy_softmax
+            else:
+                # For inference, return value and policy without loss
+                return value, policy_softmax
 

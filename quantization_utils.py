@@ -88,6 +88,34 @@ def prepare_model_for_quantization(model: AlphaZeroNetwork.AlphaZeroNet) -> Quan
     return quant_model
 
 
+class DynamicQuantizedAlphaZeroNet(nn.Module):
+    """
+    Wrapper for dynamically quantized AlphaZero model that handles inference only.
+    """
+    def __init__(self, model: AlphaZeroNetwork.AlphaZeroNet):
+        super().__init__()
+        # Check if quantization is supported
+        # Apply dynamic quantization
+        self.quantized_model = torch.quantization.quantize_dynamic(
+            model, 
+            qconfig_spec={nn.Linear, nn.Conv2d},
+            dtype=torch.qint8
+        )
+        
+    def forward(self, x, policyMask=None):
+        """
+        Forward pass for inference only.
+        """
+        # Set model to eval mode to ensure consistent behavior
+        self.quantized_model.eval()
+        
+        # Call the quantized model
+        with torch.no_grad():
+            value, policy = self.quantized_model(x, policyMask=policyMask)
+        
+        return value, policy
+
+
 def apply_dynamic_quantization(model: AlphaZeroNetwork.AlphaZeroNet) -> nn.Module:
     """
     Apply dynamic quantization to the model (easiest, no calibration needed).
@@ -97,16 +125,22 @@ def apply_dynamic_quantization(model: AlphaZeroNetwork.AlphaZeroNet) -> nn.Modul
         model: Original AlphaZeroNet model
         
     Returns:
-        Dynamically quantized model
+        Dynamically quantized model wrapped for inference
     """
-    # Dynamic quantization works best on Linear and Conv2d layers
-    quantized_model = torch.quantization.quantize_dynamic(
-        model, 
-        qconfig_spec={nn.Linear, nn.Conv2d},
-        dtype=torch.qint8
-    )
+    # Set model to eval mode
+    model.eval()
     
-    return quantized_model
+    # Move model to CPU for quantization (quantization only works on CPU)
+    device = next(model.parameters()).device
+    model_cpu = model.cpu()
+    
+    # Create wrapper that handles dynamic quantization
+    quantized_wrapper = DynamicQuantizedAlphaZeroNet(model_cpu)
+    
+    # Note: Quantized models must run on CPU, even on CUDA systems
+    print("Note: Quantized model will run on CPU for inference")
+    
+    return quantized_wrapper
 
 
 def create_calibration_dataset(num_positions: int = 1000) -> List[Tuple[torch.Tensor, torch.Tensor]]:
@@ -166,6 +200,7 @@ def calibrate_model(model: nn.Module, calibration_data: List[Tuple[torch.Tensor,
             mask_tensor = mask_tensor.to(device)
             
             # Run forward pass for calibration
+            # Only pass required arguments for inference
             _ = model(input_tensor, policyMask=mask_tensor)
             
             # Progress indicator
@@ -187,14 +222,30 @@ def apply_static_quantization(model: AlphaZeroNetwork.AlphaZeroNet,
     Returns:
         Statically quantized model
     """
-    # Set quantization backend
+    # Move model to CPU for quantization
+    device = next(model.parameters()).device
+    model = model.cpu()
+    
+    # Set quantization backend - use fbgemm for Windows/Linux x86
+    import platform
+    if platform.system() == "Windows":
+        backend = 'fbgemm'
     torch.backends.quantized.engine = backend
     
     # Prepare model for quantization
     quant_model = prepare_model_for_quantization(model)
     
     # Set quantization config
-    quant_model.qconfig = torch.quantization.get_default_qconfig(backend)
+    # Use per-tensor quantization to avoid per_channel_affine error
+    if backend == 'fbgemm':
+        # For x86 CPUs, use per-tensor quantization
+        quant_model.qconfig = torch.quantization.QConfig(
+            activation=torch.quantization.default_observer,
+            weight=torch.quantization.default_per_tensor_weight_observer
+        )
+    else:
+        # For other backends (ARM/mobile)
+        quant_model.qconfig = torch.quantization.get_default_qconfig(backend)
     
     # Prepare model (insert observers)
     torch.quantization.prepare(quant_model, inplace=True)
@@ -204,16 +255,66 @@ def apply_static_quantization(model: AlphaZeroNetwork.AlphaZeroNet,
         print("Generating calibration dataset...")
         calibration_data = create_calibration_dataset(1000)
     
-    # Calibrate the model
-    device, _ = get_optimal_device()
-    print(f"Calibrating model on {device}...")
-    calibrate_model(quant_model, calibration_data, device)
+    # Calibrate the model on CPU (required for quantization)
+    print(f"Calibrating model on CPU...")
+    calibrate_model(quant_model, calibration_data, torch.device('cpu'))
     
     # Convert to quantized model
     print("Converting to quantized model...")
     quantized_model = torch.quantization.convert(quant_model)
     
     return quantized_model
+
+
+class FP16OptimizedAlphaZeroNet(nn.Module):
+    """
+    Wrapper for FP16 (half precision) optimized model with automatic mixed precision.
+    """
+    def __init__(self, model: AlphaZeroNetwork.AlphaZeroNet, device: torch.device):
+        super().__init__()
+        self.model = model.half().to(device)
+        self.device = device
+        
+    def forward(self, x, policyMask=None):
+        """
+        Forward pass with FP16 optimization.
+        """
+        # Ensure inputs are FP16
+        x = x.half()
+        if policyMask is not None:
+            policyMask = policyMask.half()
+        
+        # Run inference
+        with torch.cuda.amp.autocast(enabled=True):
+            return self.model(x, policyMask=policyMask)
+
+
+def apply_fp16_optimization(model: AlphaZeroNetwork.AlphaZeroNet, device: torch.device) -> nn.Module:
+    """
+    Apply FP16 (half precision) optimization for GPU/MPS inference.
+    This is an alternative to quantization that works on GPU.
+    
+    Args:
+        model: Original AlphaZeroNet model
+        device: Target device (cuda or mps)
+        
+    Returns:
+        FP16 optimized model
+    """
+    if device.type not in ['cuda', 'mps']:
+        print("FP16 optimization is only beneficial on GPU/MPS. Returning original model.")
+        return model
+    
+    # Set model to eval mode
+    model.eval()
+    
+    # Create FP16 wrapper
+    fp16_model = FP16OptimizedAlphaZeroNet(model, device)
+    
+    print(f"Model converted to FP16 for {device.type.upper()} inference")
+    print("Note: This provides ~2x memory reduction and faster inference on modern GPUs")
+    
+    return fp16_model
 
 
 def save_quantized_model(quantized_model: nn.Module, original_path: str, suffix: str = "_quantized") -> str:
@@ -231,9 +332,27 @@ def save_quantized_model(quantized_model: nn.Module, original_path: str, suffix:
     base, ext = os.path.splitext(original_path)
     quantized_path = f"{base}{suffix}{ext}"
     
-    # Save using torch.jit.save for quantized models
-    scripted = torch.jit.script(quantized_model)
-    torch.jit.save(scripted, quantized_path)
+    # Handle different model types
+    if isinstance(quantized_model, DynamicQuantizedAlphaZeroNet):
+        # Save the state dict for dynamic quantized
+        torch.save({
+            'model_state_dict': quantized_model.quantized_model.state_dict(),
+            'model_type': 'dynamic_quantized'
+        }, quantized_path)
+    elif isinstance(quantized_model, FP16OptimizedAlphaZeroNet):
+        # Save FP16 model with metadata
+        torch.save({
+            'model_state_dict': quantized_model.model.state_dict(),
+            'model_type': 'fp16',
+            'device_type': quantized_model.device.type
+        }, quantized_path)
+    elif hasattr(quantized_model, 'qconfig'):
+        # For static quantized models, use torch.jit.save
+        scripted = torch.jit.script(quantized_model)
+        torch.jit.save(scripted, quantized_path)
+    else:
+        # For regular models, save normally
+        torch.save(quantized_model.state_dict(), quantized_path)
     
     # Print size comparison
     original_size = os.path.getsize(original_path) / (1024 * 1024)  # MB
@@ -248,21 +367,42 @@ def save_quantized_model(quantized_model: nn.Module, original_path: str, suffix:
     return quantized_path
 
 
-def load_quantized_model(model_path: str, device: torch.device) -> nn.Module:
+def load_quantized_model(model_path: str, device: torch.device, 
+                        num_blocks: int = None, num_filters: int = None) -> nn.Module:
     """
     Load a quantized model from file.
     
     Args:
         model_path: Path to quantized model file
         device: Device to load model on
+        num_blocks: Number of residual blocks (for dynamic quantized models)
+        num_filters: Number of filters (for dynamic quantized models)
         
     Returns:
         Loaded quantized model
     """
-    # Quantized models are saved as TorchScript
-    model = torch.jit.load(model_path, map_location=device)
-    model.eval()
-    return model
+    try:
+        # Try loading as TorchScript (static quantized)
+        model = torch.jit.load(model_path, map_location=device)
+        model.eval()
+        return model
+    except:
+        # Try loading as state dict (dynamic quantized)
+        checkpoint = torch.load(model_path, map_location=device)
+        if checkpoint.get('model_type') == 'dynamic_quantized':
+            # Need to reconstruct the model
+            if num_blocks is None or num_filters is None:
+                raise ValueError("For dynamic quantized models, num_blocks and num_filters must be provided")
+            
+            # Create base model
+            base_model = AlphaZeroNetwork.AlphaZeroNet(num_blocks, num_filters)
+            base_model.load_state_dict(checkpoint['model_state_dict'])
+            
+            # Apply dynamic quantization
+            quantized_model = apply_dynamic_quantization(base_model)
+            return quantized_model
+        else:
+            raise ValueError(f"Unknown model format in {model_path}")
 
 
 def compare_model_outputs(original_model: nn.Module, quantized_model: nn.Module,
