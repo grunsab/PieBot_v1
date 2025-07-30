@@ -363,6 +363,16 @@ def callNeuralNetwork( board, neuralNetwork ):
 
     return value, move_probabilities
 
+
+def callNeuralNetworkBatchedMP(args):
+    boards, neuralNetwork = args
+    # Ensure the model is in eval mode
+    neuralNetwork.eval()
+    # Set torch threads to 1 to prevent oversubscription in workers
+    torch.set_num_threads(1)
+    with torch.no_grad():
+        return callNeuralNetworkBatched(boards, neuralNetwork)
+
 def callNeuralNetworkBatched( boards, neuralNetwork ):
     """
     Run neural network on each board given. Return outputs.

@@ -13,9 +13,17 @@ import torch
 import numpy as np
 import random
 from AlphaZeroNetwork import AlphaZeroNet
-from encoder import encodePositionForInference, callNeuralNetworkBatched
+from encoder import encodePositionForInference, callNeuralNetworkBatched, callNeuralNetworkBatchedMP
 from device_utils import get_optimal_device, optimize_for_device, get_batch_size_for_device
 
+
+from multiprocessing import Pool, set_start_method
+
+# Set start method for multiprocessing
+try:
+    set_start_method('spawn', force=True)
+except RuntimeError:
+    pass  # Already set
 
 def generate_diverse_positions(num_positions=10000):
     """
@@ -106,6 +114,13 @@ def generate_diverse_positions(num_positions=10000):
     return positions[:num_positions]
 
 
+def worker_init():
+    """Initialize worker process for multiprocessing."""
+    # Each worker needs its own device context
+    import torch
+    torch.set_num_threads(1)  # Prevent thread oversubscription
+
+
 def benchmark_neural_network(model_path, num_positions=10000, batch_size=None):
     """
     Benchmark neural network evaluation performance.
@@ -189,14 +204,30 @@ def benchmark_neural_network(model_path, num_positions=10000, batch_size=None):
     total_evaluations = 0
     
     with torch.no_grad():
-        for i in range(num_batches):
-            batch_start = i * batch_size
-            batch_end = min((i + 1) * batch_size, num_positions)
-            batch_positions = positions[batch_start:batch_end]
+        # For multiprocessing with MPS, we need to move model to CPU.
+        # Hence do not test the performance with multiprocessing on MPS devices, since it'll be radically slower.
+        if 'mps' in str(device).lower():
+            for i in range(num_batches):
+                batch_start = i * batch_size
+                batch_end = min((i + 1) * batch_size, num_positions)
+                batch_positions = positions[batch_start:batch_end]
+                values, policies = callNeuralNetworkBatched(batch_positions, model)
+                total_evaluations += len(batch_positions)
+        else:
+            chunks = []
+            num_processes = min(10, num_batches)  # Don't create more processes than batches
+            for i in range(num_processes):
+                batch_start = i * batch_size
+                batch_end = min((i + 1) * batch_size, num_positions)
+                batch_positions = positions[batch_start:batch_end]
+                chunks.append((batch_positions, model))
+
+            with Pool(num_processes) as pool:
+                results = pool.map(callNeuralNetworkBatchedMP, chunks)
             
-            # Evaluate batch
-            values, policies = callNeuralNetworkBatched(batch_positions, model)
-            total_evaluations += len(batch_positions)
+            # Calculate total evaluations from results
+            total_evaluations = sum(len(result[0]) for result in results)
+
     
     end_time = time.perf_counter()
     elapsed_time = end_time - start_time

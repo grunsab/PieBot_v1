@@ -52,7 +52,7 @@ class AsyncNeuralNetworkServer:
             param.requires_grad = False
         
         # Request queue and processing thread
-        self.request_queue = queue.Queue(maxsize=max_batch_size * 64)  # Larger queue for heavy load
+        self.request_queue = queue.Queue(maxsize=max_batch_size * 128)  # Larger queue for heavy load
         self.running = False
         self.server_thread = None
         
