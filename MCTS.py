@@ -316,6 +316,7 @@ class Root( Node ):
 
         super().__init__( board, Q, move_probabilities )
 
+        self.board = board  # Store board for multiprocessing
         self.same_paths = 0
         
         # Pre-create thread pool for reuse

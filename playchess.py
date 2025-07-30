@@ -7,6 +7,7 @@ import AlphaZeroNetwork
 import time
 from device_utils import get_optimal_device, optimize_for_device, get_gpu_count
 from quantization_utils import load_quantized_model
+import MCTS_multiprocess
 
 def tolist( move_generator ):
     """
@@ -222,7 +223,7 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
     
     return models, devices
 
-def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_ids=None ):
+def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_ids=None, num_processes=1 ):
     
     # Load models (supports multi-GPU)
     models, devices = load_model_multi_gpu(modelFile, gpu_ids)
@@ -296,13 +297,22 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
                 if verbose:
                     print(f"DEBUG: Creating MCTS root")
                 
-                root = MCTS.Root( board, alphaZeroNet )
+                if num_processes > 1:
+                    # Use multiprocessing version
+                    if verbose:
+                        print(f"DEBUG: Using multiprocessing with {num_processes} processes")
+                    
+                    root = MCTS_multiprocess.create_multiprocess_root(board, alphaZeroNet, modelFile)
+                    root.multiprocess_rollouts(board, modelFile, num_rollouts, num_processes, num_threads)
+                else:
+                    # Use regular single-process version
+                    root = MCTS.Root( board, alphaZeroNet )
+                    
+                    if verbose:
+                        print(f"DEBUG: Starting {num_rollouts} rollouts with {num_threads} threads")
                 
-                if verbose:
-                    print(f"DEBUG: Starting {num_rollouts} rollouts with {num_threads} threads")
-            
-                for i in range( num_rollouts ):
-                    root.parallelRollouts( board.copy(), alphaZeroNet, num_threads )
+                    for i in range( num_rollouts ):
+                        root.parallelRollouts( board.copy(), alphaZeroNet, num_threads )
 
             endtime = time.perf_counter()
 
@@ -360,7 +370,8 @@ if __name__=='__main__':
     parser.add_argument( '--verbose', help='Print search statistics', action='store_true' )
     parser.add_argument( '--fen', help='Starting fen' )
     parser.add_argument( '--gpus', help='Comma-separated list of GPU IDs to use (e.g., "0,1,2")')
-    parser.set_defaults( verbose=False, mode='p', color='w', rollouts=10, threads=1 )
+    parser.add_argument( '--processes', type=int, help='Number of processes for multiprocessing (default: 1)' )
+    parser.set_defaults( verbose=False, mode='p', color='w', rollouts=10, threads=1, processes=1 )
     parser = parser.parse_args()
     
     # Parse GPU IDs if provided
@@ -369,7 +380,7 @@ if __name__=='__main__':
         gpu_ids = [int(gpu_id.strip()) for gpu_id in parser.gpus.split(',')]
 
     try:
-        main( parser.model, parser.mode, parseColor( parser.color ), parser.rollouts, parser.threads, parser.fen, parser.verbose, gpu_ids )
+        main( parser.model, parser.mode, parseColor( parser.color ), parser.rollouts, parser.threads, parser.fen, parser.verbose, gpu_ids, parser.processes )
     except Exception as e:
         print(f"Error occurred: {e}")
         import traceback
