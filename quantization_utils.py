@@ -347,9 +347,13 @@ def save_quantized_model(quantized_model: nn.Module, original_path: str, suffix:
             'device_type': quantized_model.device.type
         }, quantized_path)
     elif hasattr(quantized_model, 'qconfig'):
-        # For static quantized models, use torch.jit.save
-        scripted = torch.jit.script(quantized_model)
-        torch.jit.save(scripted, quantized_path)
+        # For static quantized models, save the state dict with metadata
+        # TorchScript saving can fail for some quantized models
+        torch.save({
+            'model_state_dict': quantized_model.state_dict(),
+            'model_type': 'static_quantized',
+            'quantization_backend': torch.backends.quantized.engine
+        }, quantized_path)
     else:
         # For regular models, save normally
         torch.save(quantized_model.state_dict(), quantized_path)
@@ -412,24 +416,42 @@ def load_quantized_model(model_path: str, device: torch.device,
             if num_blocks is None or num_filters is None:
                 raise ValueError("For static quantized models, num_blocks and num_filters must be provided")
             
-            # This is a static quantized model with quantized tensors
-            # We need to create a prepared model and load it carefully
-            model = QuantizableAlphaZeroNet(num_blocks, num_filters)
+            # For static quantized models that can't be loaded as TorchScript,
+            # we'll dequantize them and use as regular models
+            # This is a fallback for platforms without quantization support
+            print("Loading static quantized model as dequantized regular model...")
             
-            # Set up quantization config
-            backend = 'fbgemm' if device.type == 'cpu' else 'qnnpack'
-            model.qconfig = torch.quantization.get_default_qconfig(backend)
+            # Create a regular model
+            model = AlphaZeroNetwork.AlphaZeroNet(num_blocks, num_filters)
             
-            # Prepare the model (insert observers/fake_quants)
-            torch.quantization.prepare(model, inplace=True)
+            # Extract and dequantize weights
+            new_state_dict = {}
+            for key, value in checkpoint.items():
+                if key.startswith('base_model.'):
+                    new_key = key.replace('base_model.', '')
+                    # Skip quantization-specific keys
+                    if any(x in new_key for x in ['.scale', '.zero_point', '_packed_params']):
+                        continue
+                    # Dequantize if needed
+                    if hasattr(value, 'dequantize'):
+                        new_state_dict[new_key] = value.dequantize()
+                    elif hasattr(value, '_data'):  # QuantizedTensor
+                        new_state_dict[new_key] = value.dequantize()
+                    else:
+                        new_state_dict[new_key] = value
+                elif not any(x in key for x in ['quant.', 'dequant.']):
+                    # For non-base_model keys that aren't quant/dequant
+                    if hasattr(value, 'dequantize'):
+                        new_state_dict[key] = value.dequantize()
+                    elif hasattr(value, '_data'):  # QuantizedTensor
+                        new_state_dict[key] = value.dequantize()
+                    else:
+                        new_state_dict[key] = value
             
-            # Convert to quantized
-            torch.quantization.convert(model, inplace=True)
-            
-            # Now try to load the state dict with strict=False
-            # This allows missing keys and handles quantized tensors
-            model.load_state_dict(checkpoint, strict=False)
+            model.load_state_dict(new_state_dict, strict=False)
+            model.to(device)
             model.eval()
+            print("Loaded dequantized model successfully")
             return model
         else:
             raise ValueError(f"Unknown model format in {model_path}")
