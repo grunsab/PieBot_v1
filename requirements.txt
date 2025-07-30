@@ -5,4 +5,4 @@ flask>=2.0.0
 atomic-py>=1.0.0
 py7zr>=0.20.0
 tqdm
-py7zr
+numba>=0.61.2
