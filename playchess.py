@@ -65,10 +65,33 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
                 model = torch.jit.load(model_file, map_location=cpu_device)
                 model.eval()
                 print(f"Loaded static quantized model (TorchScript) on CPU")
-            except:
-                # Load using quantization_utils
-                model = load_quantized_model(model_file, cpu_device, 20, 256)
-                print(f"Loaded static quantized model on CPU")
+            except Exception as e:
+                print(f"Warning: Could not load as TorchScript: {e}")
+                try:
+                    # Try using quantization_utils
+                    model = load_quantized_model(model_file, cpu_device, 20, 256)
+                    print(f"Loaded static quantized model on CPU")
+                except Exception as e2:
+                    print(f"Warning: Static quantization not supported on this platform: {e2}")
+                    print("Falling back to loading as regular model...")
+                    # Fall back to loading as regular non-quantized model
+                    # Extract the base model weights from the quantized state dict
+                    model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
+                    # Create a new state dict with dequantized weights
+                    new_state_dict = {}
+                    for key, value in weights.items():
+                        if key.startswith('base_model.'):
+                            new_key = key.replace('base_model.', '')
+                            # Skip quantization-specific keys
+                            if any(x in new_key for x in ['.scale', '.zero_point', '_packed_params']):
+                                continue
+                            # Dequantize if needed
+                            if hasattr(value, 'dequantize'):
+                                new_state_dict[new_key] = value.dequantize()
+                            else:
+                                new_state_dict[new_key] = value
+                    model.load_state_dict(new_state_dict, strict=False)
+                    print(f"Loaded dequantized model on CPU")
             device = cpu_device
             device_str = 'CPU (static quantized model)'
         else:
@@ -123,10 +146,33 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
                 model = torch.jit.load(model_file, map_location=cpu_device)
                 model.eval()
                 print(f"Loaded static quantized model (TorchScript) on CPU (GPU {gpu_id} requested but quantized models run on CPU)")
-            except:
-                # Load using quantization_utils
-                model = load_quantized_model(model_file, cpu_device, 20, 256)
-                print(f"Loaded static quantized model on CPU (GPU {gpu_id} requested but quantized models run on CPU)")
+            except Exception as e:
+                print(f"Warning: Could not load as TorchScript: {e}")
+                try:
+                    # Try using quantization_utils
+                    model = load_quantized_model(model_file, cpu_device, 20, 256)
+                    print(f"Loaded static quantized model on CPU (GPU {gpu_id} requested but quantized models run on CPU)")
+                except Exception as e2:
+                    print(f"Warning: Static quantization not supported on this platform: {e2}")
+                    print("Falling back to loading as regular model...")
+                    # Fall back to loading as regular non-quantized model
+                    # Extract the base model weights from the quantized state dict
+                    model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
+                    # Create a new state dict with dequantized weights
+                    new_state_dict = {}
+                    for key, value in weights.items():
+                        if key.startswith('base_model.'):
+                            new_key = key.replace('base_model.', '')
+                            # Skip quantization-specific keys
+                            if any(x in new_key for x in ['.scale', '.zero_point', '_packed_params']):
+                                continue
+                            # Dequantize if needed
+                            if hasattr(value, 'dequantize'):
+                                new_state_dict[new_key] = value.dequantize()
+                            else:
+                                new_state_dict[new_key] = value
+                    model.load_state_dict(new_state_dict, strict=False)
+                    print(f"Loaded dequantized model on CPU (GPU {gpu_id} requested)")
             device = cpu_device
             devices[len(models)] = cpu_device
         else:
