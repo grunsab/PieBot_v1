@@ -134,7 +134,7 @@ def benchmark_neural_network(model_path, num_positions=10000, batch_size=None):
     
     # Create and load model
     model = AlphaZeroNet(num_blocks, num_filters)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(checkpoint)
     model = optimize_for_device(model, device)
     model.eval()
     
