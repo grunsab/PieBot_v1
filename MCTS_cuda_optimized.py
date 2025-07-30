@@ -230,10 +230,13 @@ class CudaRoot(CudaNode):
     def __init__(self, board, neuralNetwork):
         global batch_queue
         
+        # Set device first, before any neural network calls
+        self.device = next(neuralNetwork.parameters()).device
+        self.neuralNetwork = neuralNetwork
+        
         # Initialize batch queue if needed
         if batch_queue is None:
-            device = next(neuralNetwork.parameters()).device
-            batch_queue = BatchQueue(neuralNetwork, device)
+            batch_queue = BatchQueue(neuralNetwork, self.device)
         
         # Get neural network evaluation
         value, move_probabilities = self._call_neural_network(board, neuralNetwork)
@@ -241,8 +244,6 @@ class CudaRoot(CudaNode):
         
         super().__init__(board, Q, move_probabilities, node_id=0)
         
-        self.neuralNetwork = neuralNetwork
-        self.device = next(neuralNetwork.parameters()).device
         self.same_paths = 0
         
         # Pre-allocate tensors for batch operations
