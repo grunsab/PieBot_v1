@@ -4,6 +4,7 @@ import math
 from threading import Thread, Lock
 from concurrent.futures import ThreadPoolExecutor
 import time
+import multiprocessing as mp
 
 def calcUCT( edge, N_p ):
     """
@@ -319,7 +320,7 @@ class Root( Node ):
         
         # Pre-create thread pool for reuse
         self.thread_pool = None
-        self.max_workers = 20  # Maximum number of threads we might use
+        self.max_workers = mp.cpu_count()  # Maximum number of threads we might use
 
     def selectTask( self, board, node_path, edge_path ):
         """

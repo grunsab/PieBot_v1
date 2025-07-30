@@ -16,6 +16,7 @@ from collections import deque
 import torch
 import hashlib
 from functools import lru_cache
+import multiprocessing as mp
 
 # Try to import numba for JIT compilation
 try:
@@ -332,7 +333,7 @@ class Root(Node):
         
         self.same_paths = 0
         self.thread_pool = None
-        self.max_workers = 20
+        self.max_workers = mp.cpu_count()
         self.nn_device = next(neuralNetwork.parameters()).device
         
         # Pre-allocate work arrays for parallel operations

@@ -15,7 +15,7 @@ import random
 from AlphaZeroNetwork import AlphaZeroNet
 from encoder import encodePositionForInference, callNeuralNetworkBatched
 from device_utils import get_optimal_device, optimize_for_device, get_batch_size_for_device
-
+import sys
 
 def generate_diverse_positions(num_positions=10000):
     """
@@ -146,7 +146,16 @@ def benchmark_neural_network(model_path, num_positions=10000, batch_size=None):
 
     model = optimize_for_device(model, device)
     model.eval()
-    
+    # Basically if we're using Linux with a CUDA device
+    if hasattr(torch, 'compile') and sys.platform != 'win32' and device.type != "mps":
+        try:
+            model = torch.compile(model, mode='reduce-overhead')
+            print("Model compiled with torch.compile for additional speedup")
+        except:
+            print("torch.compile not available or failed, using eager mode")
+    elif sys.platform == 'win32':
+        print("Skipping torch.compile on Windows (Triton not fully supported)")
+
     # Determine batch size
     if batch_size is None:
         batch_size = get_batch_size_for_device(base_batch_size=256)

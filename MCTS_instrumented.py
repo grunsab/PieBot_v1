@@ -4,6 +4,7 @@ from threading import Thread, Lock
 from concurrent.futures import ThreadPoolExecutor
 import time
 from collections import defaultdict
+import multiprocessing as mp
 
 class PerformanceMonitor:
     """Track performance metrics for MCTS operations."""
@@ -377,7 +378,7 @@ class Root( Node ):
         
         # Pre-create thread pool for reuse
         self.thread_pool = None
-        self.max_workers = 20  # Maximum number of threads we might use
+        self.max_workers = mp.cpu_count() # Maximum number of threads we might use
         
         perf_monitor.record_time('Root.__init__', time.perf_counter() - start_time)
 

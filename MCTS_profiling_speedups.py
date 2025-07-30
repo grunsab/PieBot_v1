@@ -7,6 +7,7 @@ import numpy as np
 from collections import deque
 import torch
 import hashlib
+import multiprocessing as mp
 
 # Global caches for optimization
 position_cache = {}  # Cache for position encodings
@@ -406,7 +407,7 @@ class Root( Node ):
         
         # Pre-create thread pool for reuse
         self.thread_pool = None
-        self.max_workers = 20  # Maximum number of threads we might use
+        self.max_workers = mp.cpu_count()  # Maximum number of threads we might use
         
         # Store the neural network device for optimization
         self.nn_device = next(neuralNetwork.parameters()).device
