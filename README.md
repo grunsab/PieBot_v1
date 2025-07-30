@@ -66,8 +66,11 @@ The algorithm is based on [this paper](https://arxiv.org/pdf/1712.01815.pdf). On
 
 Note that there are multiple models included in the repository. AlphaZeroNet_20x256_distributed.pt is currently the most refined of them, with a policy loss of approximately 1.5 and a value loss of approximately 0.4. It was trained across 250 epochs on a dataset of 2MM games from LCZero's standard dataset, using supervised learning.
 
-The current best model performs at around 2500 ELO on LiChess (available to test on AlphaZeroNet_20x256_distributed.pt), on a Macbook Mini M4 at 400-500 nodes per second evaluated. It performs at a higher ELO of around 2750 on a Macbook Pro M4 Pro.
+The current best model performs at around 2500 ELO on LiChess (available to test on AlphaZeroNet_20x256_distributed.pt), on a Macbook Mini M4 at 400-500 nodes per second evaluated. It performs at a higher ELO of around 2750 on a Macbook Pro M4 Pro due to that device processing 800 nodes per second.
 
 I'm training a new model using a larger dataset including the ones from ComputerChess.org.uk, which should play much stronger once it's completed. That will train on approximately 3MM-3.5MM games in total.
 
-Note also that I'm working on significantly improving the number of nodes evaluated per second, as AlphaZero evaluated 80k nodes per second on a 4 TPU system. I suspect that with some improvements to the codebase we should be able to reach 2k to 4k nodes per second on a RTX 4080 GPU. If I can significantly improve the number of nodes evaluated per second, I will switch the LiChess Bot (PieBot) to run on the Windows computer with the RTX 4080 GPU.
+I experimented with increasing the number of positions evaluated by adjusting the MCTS, but I was not sucessful at improving the overall throughput of the model in terms of nodes per second evaluated (see the folder experiments). I was surprised to see that Google DeepMind claims a performance of 80k positions evaluated per second on a 4 TPU setup.
+
+I am however now experimenting with model quantization, that should hopefully increase the nodes evaluated per second by double.
+
