@@ -191,46 +191,45 @@ class UCIEngine:
                 print(f"info string Loading model on device: {device_str}")
                 sys.stdout.flush()
                 
-            self.model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
             weights = torch.load(full_path, map_location=self.device)
             
-            # Handle different model formats
-            if isinstance(weights, dict) and 'model_state_dict' in weights:
-                model_type = weights.get('model_type', 'unknown')
-                
-                # Handle static quantized models
-                if model_type == 'static_quantized':
-                    # Static quantized models run on CPU
-                    cpu_device = torch.device('cpu')
-                    try:
-                        # Try loading as TorchScript
-                        self.model = torch.jit.load(full_path, map_location=cpu_device)
-                        self.model.eval()
-                        if self.verbose:
-                            print(f"info string Loaded static quantized model (TorchScript) on CPU")
-                    except:
-                        # Load using quantization_utils
-                        self.model = load_quantized_model(full_path, cpu_device, 20, 256)
-                        if self.verbose:
-                            print(f"info string Loaded static quantized model on CPU")
-                    self.device = cpu_device
-                    device_str = 'CPU (static quantized model)'
+            # Check if it's a static quantized model first
+            if isinstance(weights, dict) and weights.get('model_type') == 'static_quantized':
+                # Static quantized models run on CPU
+                cpu_device = torch.device('cpu')
+                try:
+                    # Try loading as TorchScript
+                    self.model = torch.jit.load(full_path, map_location=cpu_device)
+                    self.model.eval()
                     if self.verbose:
-                        print(f"info string Using device: {device_str}")
-                        sys.stdout.flush()
-                else:
-                    # Handle FP16 models
+                        print(f"info string Loaded static quantized model (TorchScript) on CPU")
+                except:
+                    # Load using quantization_utils
+                    self.model = load_quantized_model(full_path, cpu_device, 20, 256)
+                    if self.verbose:
+                        print(f"info string Loaded static quantized model on CPU")
+                self.device = cpu_device
+                device_str = 'CPU (static quantized model)'
+                if self.verbose:
+                    print(f"info string Using device: {device_str}")
+                    sys.stdout.flush()
+            else:
+                # Create regular model
+                self.model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
+                
+                # Handle different model formats
+                if isinstance(weights, dict) and 'model_state_dict' in weights:
+                    # FP16 model format
                     self.model.load_state_dict(weights['model_state_dict'])
-                    if model_type == 'fp16':
+                    if weights.get('model_type') == 'fp16':
                         self.model = self.model.half()
                         if self.verbose:
                             print(f"info string Loaded FP16 model on {device_str}")
                             sys.stdout.flush()
-                    self.model = optimize_for_device(self.model, self.device)
-                    self.model.eval()
-            else:
-                # Regular model format
-                self.model.load_state_dict(weights)
+                else:
+                    # Regular model format
+                    self.model.load_state_dict(weights)
+                
                 self.model = optimize_for_device(self.model, self.device)
                 self.model.eval()
             

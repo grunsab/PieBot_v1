@@ -48,39 +48,38 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
         device, device_str = get_optimal_device()
         print(f'Using device: {device_str}')
         
-        model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
         weights = torch.load(model_file, map_location=device)
         
-        # Handle different model formats
-        if isinstance(weights, dict) and 'model_state_dict' in weights:
-            model_type = weights.get('model_type', 'unknown')
+        # Check if it's a static quantized model first
+        if isinstance(weights, dict) and weights.get('model_type') == 'static_quantized':
+            # Static quantized models run on CPU
+            cpu_device = torch.device('cpu')
+            try:
+                # Try loading as TorchScript
+                model = torch.jit.load(model_file, map_location=cpu_device)
+                model.eval()
+                print(f"Loaded static quantized model (TorchScript) on CPU")
+            except:
+                # Load using quantization_utils
+                model = load_quantized_model(model_file, cpu_device, 20, 256)
+                print(f"Loaded static quantized model on CPU")
+            device = cpu_device
+            device_str = 'CPU (static quantized model)'
+        else:
+            # Create regular model
+            model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
             
-            # Handle static quantized models
-            if model_type == 'static_quantized':
-                # Static quantized models run on CPU
-                cpu_device = torch.device('cpu')
-                try:
-                    # Try loading as TorchScript
-                    model = torch.jit.load(model_file, map_location=cpu_device)
-                    model.eval()
-                    print(f"Loaded static quantized model (TorchScript) on CPU")
-                except:
-                    # Load using quantization_utils
-                    model = load_quantized_model(model_file, cpu_device, 20, 256)
-                    print(f"Loaded static quantized model on CPU")
-                device = cpu_device
-                device_str = 'CPU (static quantized model)'
-            else:
-                # Handle FP16 models
+            # Handle different model formats
+            if isinstance(weights, dict) and 'model_state_dict' in weights:
+                # FP16 model format
                 model.load_state_dict(weights['model_state_dict'])
-                if model_type == 'fp16':
+                if weights.get('model_type') == 'fp16':
                     model = model.half()
                     print(f"Loaded FP16 model on {device_str}")
-                model = optimize_for_device(model, device)
-                model.eval()
-        else:
-            # Regular model format
-            model.load_state_dict(weights)
+            else:
+                # Regular model format
+                model.load_state_dict(weights)
+            
             model = optimize_for_device(model, device)
             model.eval()
         
@@ -101,38 +100,37 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
         device = torch.device(f'cuda:{gpu_id}')
         devices.append(device)
         
-        model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
         weights = torch.load(model_file, map_location=device)
         
-        # Handle different model formats
-        if isinstance(weights, dict) and 'model_state_dict' in weights:
-            # FP16 or quantized model format
-            model_type = weights.get('model_type', 'unknown')
+        # Check if it's a static quantized model first
+        if isinstance(weights, dict) and weights.get('model_type') == 'static_quantized':
+            # Static quantized models run on CPU
+            cpu_device = torch.device('cpu')
+            try:
+                # Try loading as TorchScript
+                model = torch.jit.load(model_file, map_location=cpu_device)
+                model.eval()
+                print(f"Loaded static quantized model (TorchScript) on CPU (GPU {gpu_id} requested but quantized models run on CPU)")
+            except:
+                # Load using quantization_utils
+                model = load_quantized_model(model_file, cpu_device, 20, 256)
+                print(f"Loaded static quantized model on CPU (GPU {gpu_id} requested but quantized models run on CPU)")
+            device = cpu_device
+            devices[len(models)] = cpu_device
+        else:
+            # Create regular model
+            model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
             
-            # Handle static quantized models
-            if model_type == 'static_quantized':
-                # Static quantized models run on CPU
-                cpu_device = torch.device('cpu')
-                try:
-                    # Try loading as TorchScript
-                    model = torch.jit.load(model_file, map_location=cpu_device)
-                    model.eval()
-                    print(f"Loaded static quantized model (TorchScript) on CPU (GPU {gpu_id} requested but quantized models run on CPU)")
-                except:
-                    # Load using quantization_utils
-                    model = load_quantized_model(model_file, cpu_device, 20, 256)
-                    print(f"Loaded static quantized model on CPU (GPU {gpu_id} requested but quantized models run on CPU)")
-                device = cpu_device
-                devices[len(models)] = cpu_device
-            else:
-                # Handle FP16 or regular quantized models
+            # Handle different model formats
+            if isinstance(weights, dict) and 'model_state_dict' in weights:
+                # FP16 model format
                 model.load_state_dict(weights['model_state_dict'])
-                if model_type == 'fp16':
+                if weights.get('model_type') == 'fp16':
                     model = model.half()
                     print(f"Loaded FP16 model on GPU {gpu_id}")
-        else:
-            # Regular model format
-            model.load_state_dict(weights)
+            else:
+                # Regular model format
+                model.load_state_dict(weights)
         
         # Only move to device if not static quantized (already on CPU)
         if not (isinstance(weights, dict) and weights.get('model_type') == 'static_quantized'):
