@@ -191,7 +191,8 @@ class UCIEngine:
                 print(f"info string Loading model on device: {device_str}")
                 sys.stdout.flush()
                 
-            weights = torch.load(full_path, map_location=self.device)
+            # Always load to CPU first to check model type
+            weights = torch.load(full_path, map_location='cpu')
             
             # Check if it's a static quantized model first
             if isinstance(weights, dict) and weights.get('model_type') == 'static_quantized':

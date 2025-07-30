@@ -48,7 +48,8 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
         device, device_str = get_optimal_device()
         print(f'Using device: {device_str}')
         
-        weights = torch.load(model_file, map_location=device)
+        # Always load to CPU first to check model type
+        weights = torch.load(model_file, map_location='cpu')
         
         # Check if it's a static quantized model first
         if isinstance(weights, dict) and weights.get('model_type') == 'static_quantized':
@@ -100,7 +101,8 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
         device = torch.device(f'cuda:{gpu_id}')
         devices.append(device)
         
-        weights = torch.load(model_file, map_location=device)
+        # Always load to CPU first to check model type
+        weights = torch.load(model_file, map_location='cpu')
         
         # Check if it's a static quantized model first
         if isinstance(weights, dict) and weights.get('model_type') == 'static_quantized':
