@@ -195,7 +195,12 @@ class UCIEngine:
             weights = torch.load(full_path, map_location='cpu')
             
             # Check if it's a static quantized model first
-            if isinstance(weights, dict) and weights.get('model_type') == 'static_quantized':
+            # Static quantized models have 'quant.scale' and 'base_model.*' keys
+            is_static_quantized = (isinstance(weights, dict) and 
+                                 'quant.scale' in weights and 
+                                 any(k.startswith('base_model.') for k in weights.keys()))
+            
+            if is_static_quantized or (isinstance(weights, dict) and weights.get('model_type') == 'static_quantized'):
                 # Static quantized models run on CPU
                 cpu_device = torch.device('cpu')
                 try:

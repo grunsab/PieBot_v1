@@ -51,13 +51,13 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
         # Always load to CPU first to check model type
         weights = torch.load(model_file, map_location='cpu')
         
-        # Debug: print model type
-        if isinstance(weights, dict):
-            print(f"Model type in weights: {weights.get('model_type', 'not specified')}")
-            print(f"Keys in weights dict: {list(weights.keys())[:5]}...")  # Print first 5 keys
-        
         # Check if it's a static quantized model first
-        if isinstance(weights, dict) and weights.get('model_type') == 'static_quantized':
+        # Static quantized models have 'quant.scale' and 'base_model.*' keys
+        is_static_quantized = (isinstance(weights, dict) and 
+                             'quant.scale' in weights and 
+                             any(k.startswith('base_model.') for k in weights.keys()))
+        
+        if is_static_quantized or (isinstance(weights, dict) and weights.get('model_type') == 'static_quantized'):
             # Static quantized models run on CPU
             cpu_device = torch.device('cpu')
             try:
@@ -110,7 +110,12 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
         weights = torch.load(model_file, map_location='cpu')
         
         # Check if it's a static quantized model first
-        if isinstance(weights, dict) and weights.get('model_type') == 'static_quantized':
+        # Static quantized models have 'quant.scale' and 'base_model.*' keys
+        is_static_quantized = (isinstance(weights, dict) and 
+                             'quant.scale' in weights and 
+                             any(k.startswith('base_model.') for k in weights.keys()))
+        
+        if is_static_quantized or (isinstance(weights, dict) and weights.get('model_type') == 'static_quantized'):
             # Static quantized models run on CPU
             cpu_device = torch.device('cpu')
             try:
@@ -140,7 +145,10 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
                 model.load_state_dict(weights)
         
         # Only move to device if not static quantized (already on CPU)
-        if not (isinstance(weights, dict) and weights.get('model_type') == 'static_quantized'):
+        is_static_quantized = (isinstance(weights, dict) and 
+                             'quant.scale' in weights and 
+                             any(k.startswith('base_model.') for k in weights.keys()))
+        if not is_static_quantized and not (isinstance(weights, dict) and weights.get('model_type') == 'static_quantized'):
             model.to(device)
         model.eval()
         
