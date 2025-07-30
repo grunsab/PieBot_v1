@@ -73,8 +73,10 @@ class BatchQueue:
             return
         
         batch_size = len(self.queue)
-        positions = torch.zeros((batch_size, 16, 8, 8), device=self.device)
-        masks = torch.zeros((batch_size, 72, 8, 8), device=self.device)
+        # Get model dtype to ensure compatibility
+        model_dtype = next(self.model.parameters()).dtype
+        positions = torch.zeros((batch_size, 16, 8, 8), device=self.device, dtype=model_dtype)
+        masks = torch.zeros((batch_size, 72, 8, 8), device=self.device, dtype=model_dtype)
         
         request_ids = []
         board_hashes = []
@@ -260,8 +262,10 @@ class CudaRoot(CudaNode):
         
         # Encode position
         position, mask = encoder.encodePositionForInference(board)
-        position = torch.from_numpy(position).to(self.device)
-        mask = torch.from_numpy(mask).to(self.device)
+        # Get model dtype to ensure compatibility
+        model_dtype = next(neuralNetwork.parameters()).dtype
+        position = torch.from_numpy(position).to(self.device, dtype=model_dtype)
+        mask = torch.from_numpy(mask).to(self.device, dtype=model_dtype)
         
         if position.dim() == 3:
             position = position.unsqueeze(0)
@@ -334,13 +338,15 @@ class CudaRoot(CudaNode):
             
             if CUDA_AVAILABLE and batch_size > 1:
                 # Batch encode positions on GPU
-                positions = torch.zeros((batch_size, 16, 8, 8), device=self.device)
-                masks = torch.zeros((batch_size, 72, 8, 8), device=self.device)
+                # Get model dtype to ensure compatibility
+                model_dtype = next(self.neuralNetwork.parameters()).dtype
+                positions = torch.zeros((batch_size, 16, 8, 8), device=self.device, dtype=model_dtype)
+                masks = torch.zeros((batch_size, 72, 8, 8), device=self.device, dtype=model_dtype)
                 
                 for i, b in enumerate(leaf_boards):
                     pos, mask = encoder.encodePositionForInference(b)
-                    positions[i] = torch.from_numpy(pos).to(self.device)
-                    masks[i] = torch.from_numpy(mask).to(self.device)
+                    positions[i] = torch.from_numpy(pos).to(self.device, dtype=model_dtype)
+                    masks[i] = torch.from_numpy(mask).to(self.device, dtype=model_dtype)
                 
                 # Batch inference
                 with torch.no_grad():
