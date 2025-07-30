@@ -238,10 +238,13 @@ class UCIEngine:
                                 else:
                                     new_state_dict[new_key] = value
                         self.model.load_state_dict(new_state_dict, strict=False)
+                        # Move to original device since we're using a regular model now
+                        self.model.to(self.device)
                         if self.verbose:
-                            print(f"info string Loaded dequantized model on CPU")
-                self.device = cpu_device
-                device_str = 'CPU (static quantized model)'
+                            print(f"info string Loaded dequantized model on {device_str}")
+                # Keep original device since we're not using quantization
+                # self.device = cpu_device
+                # device_str = 'CPU (static quantized model)'
                 if self.verbose:
                     print(f"info string Using device: {device_str}")
                     sys.stdout.flush()

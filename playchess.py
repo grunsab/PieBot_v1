@@ -91,9 +91,12 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
                             else:
                                 new_state_dict[new_key] = value
                     model.load_state_dict(new_state_dict, strict=False)
-                    print(f"Loaded dequantized model on CPU")
-            device = cpu_device
-            device_str = 'CPU (static quantized model)'
+                    # Move to original device since we're using a regular model now
+                    model.to(device)
+                    print(f"Loaded dequantized model on {device_str}")
+            # Keep original device since we're not using quantization
+            # device = cpu_device
+            # device_str = 'CPU (static quantized model)'
         else:
             # Create regular model
             model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
@@ -172,9 +175,12 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
                             else:
                                 new_state_dict[new_key] = value
                     model.load_state_dict(new_state_dict, strict=False)
-                    print(f"Loaded dequantized model on CPU (GPU {gpu_id} requested)")
-            device = cpu_device
-            devices[len(models)] = cpu_device
+                    # Move to the requested GPU device since we're using a regular model now
+                    model.to(device)
+                    print(f"Loaded dequantized model on GPU {gpu_id}")
+            # Keep GPU device since we're not using quantization anymore
+            # device = cpu_device
+            # devices[len(models)] = cpu_device
         else:
             # Create regular model
             model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
