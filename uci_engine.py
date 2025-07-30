@@ -206,13 +206,16 @@ class UCIEngine:
                         # Try loading as TorchScript
                         self.model = torch.jit.load(full_path, map_location=cpu_device)
                         self.model.eval()
+                        if self.verbose:
+                            print(f"info string Loaded static quantized model (TorchScript) on CPU")
                     except:
                         # Load using quantization_utils
                         self.model = load_quantized_model(full_path, cpu_device, 20, 256)
+                        if self.verbose:
+                            print(f"info string Loaded static quantized model on CPU")
                     self.device = cpu_device
                     device_str = 'CPU (static quantized model)'
                     if self.verbose:
-                        print(f"info string Loaded static quantized model on CPU")
                         print(f"info string Using device: {device_str}")
                         sys.stdout.flush()
                 else:
