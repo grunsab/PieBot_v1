@@ -412,9 +412,23 @@ def load_quantized_model(model_path: str, device: torch.device,
             if num_blocks is None or num_filters is None:
                 raise ValueError("For static quantized models, num_blocks and num_filters must be provided")
             
-            # Create quantizable model and load the state dict
+            # This is a static quantized model with quantized tensors
+            # We need to create a prepared model and load it carefully
             model = QuantizableAlphaZeroNet(num_blocks, num_filters)
-            model.load_state_dict(checkpoint)
+            
+            # Set up quantization config
+            backend = 'fbgemm' if device.type == 'cpu' else 'qnnpack'
+            model.qconfig = torch.quantization.get_default_qconfig(backend)
+            
+            # Prepare the model (insert observers/fake_quants)
+            torch.quantization.prepare(model, inplace=True)
+            
+            # Convert to quantized
+            torch.quantization.convert(model, inplace=True)
+            
+            # Now try to load the state dict with strict=False
+            # This allows missing keys and handles quantized tensors
+            model.load_state_dict(checkpoint, strict=False)
             model.eval()
             return model
         else:
