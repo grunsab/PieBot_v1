@@ -51,6 +51,11 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
         # Always load to CPU first to check model type
         weights = torch.load(model_file, map_location='cpu')
         
+        # Debug: print model type
+        if isinstance(weights, dict):
+            print(f"Model type in weights: {weights.get('model_type', 'not specified')}")
+            print(f"Keys in weights dict: {list(weights.keys())[:5]}...")  # Print first 5 keys
+        
         # Check if it's a static quantized model first
         if isinstance(weights, dict) and weights.get('model_type') == 'static_quantized':
             # Static quantized models run on CPU
