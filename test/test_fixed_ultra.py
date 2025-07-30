@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Test the fixed Ultra-Performance MCTS implementation"""
 
+import sys
+sys.path.append('..')
 import chess
 import torch
 from AlphaZeroNetwork import AlphaZeroNet
-from MCTS_ultra_performance_fixed import UltraPerformanceMCTSEngine
+from experiments.MCTS.MCTS_ultra_performance_fixed import UltraPerformanceMCTSEngine
 import MCTS
 
 def test_fixed_ultra():

@@ -12,6 +12,7 @@ Comprehensive benchmarking tool that measures:
 
 import os
 import sys
+sys.path.append('..')
 import time
 import chess
 import torch
@@ -23,8 +24,8 @@ import threading
 import queue
 import psutil
 import AlphaZeroNetwork
-from MCTS_cuda import MCTSEngineCUDA
-from MCTS_high_performance import HighPerformanceMCTSEngine
+from experiments.MCTS.MCTS_cuda import MCTSEngineCUDA
+from experiments.MCTS.MCTS_high_performance import HighPerformanceMCTSEngine
 import encoder
 
 # Windows-specific imports

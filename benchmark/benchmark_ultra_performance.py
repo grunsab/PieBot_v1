@@ -4,11 +4,13 @@ Benchmark script for Ultra-Performance MCTS implementation.
 Tests the new leaf batching approach for maximum NPS.
 """
 
+import sys
+sys.path.append('..')
 import argparse
 import time
 import torch
 import chess
-from MCTS_ultra_performance import UltraPerformanceMCTSEngine
+from experiments.MCTS.MCTS_ultra_performance import UltraPerformanceMCTSEngine
 from AlphaZeroNetwork import AlphaZeroNet
 import device_utils
 

@@ -5,6 +5,7 @@ Simple benchmark to test raw neural network throughput for MCTS
 
 import os
 import sys
+sys.path.append('..')
 import time
 import chess
 import torch

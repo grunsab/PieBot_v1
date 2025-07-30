@@ -9,6 +9,8 @@ This script measures:
 - Memory usage
 """
 
+import sys
+sys.path.append('..')
 import argparse
 import time
 import torch

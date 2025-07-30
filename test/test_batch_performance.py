@@ -3,6 +3,8 @@
 Test script to measure the performance difference between single and batched inference.
 """
 
+import sys
+sys.path.append('..')
 import torch
 import time
 import numpy as np

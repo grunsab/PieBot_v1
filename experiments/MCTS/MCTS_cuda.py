@@ -1,10 +1,12 @@
+import sys
+sys.path.append('../..')
 import encoder
 import math
 from threading import Thread, Lock
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import torch
-from async_neural_net_server_cuda import AsyncNeuralNetworkServerCUDA, NeuralNetworkPoolCUDA
+from experiments.async_neural_net_server_cuda import AsyncNeuralNetworkServerCUDA, NeuralNetworkPoolCUDA
 from collections import deque
 import numpy as np
 import queue

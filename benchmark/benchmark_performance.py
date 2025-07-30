@@ -9,6 +9,8 @@ This script measures:
 - Response time distribution
 """
 
+import sys
+sys.path.append('..')
 import argparse
 import time
 import torch
@@ -16,13 +18,12 @@ import chess
 import numpy as np
 import AlphaZeroNetwork
 from device_utils import get_optimal_device, optimize_for_device
-import sys
 import os
 
 # Import all implementations
 import MCTS
-from MCTS_async import MCTSEngine
-from MCTS_async_v2 import MCTSEngineV2
+from experiments.MCTS.MCTS_async import MCTSEngine
+from experiments.MCTS.MCTS_async_v2 import MCTSEngineV2
 
 
 def benchmark_original_mcts(model, board, num_rollouts, num_threads, num_runs=5):

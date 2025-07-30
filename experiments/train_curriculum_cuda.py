@@ -8,6 +8,7 @@ Manages transition from supervised to reinforcement learning with CUDA accelerat
 
 import os
 import sys
+sys.path.append('..')
 import subprocess
 import argparse
 import time

@@ -8,6 +8,7 @@ and multi-GPU support for RTX 4080 and similar GPUs.
 
 import os
 import sys
+sys.path.append('..')
 import torch
 import torch.optim as optim
 import torch.nn as nn

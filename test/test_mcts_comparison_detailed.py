@@ -3,6 +3,8 @@
 Detailed test suite to compare original MCTS vs Ultra-Performance MCTS with extensive logging.
 """
 
+import sys
+sys.path.append('..')
 import chess
 import torch
 import argparse
@@ -11,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from AlphaZeroNetwork import AlphaZeroNet
 import MCTS
-from MCTS_ultra_performance import UltraPerformanceMCTSEngine
+from experiments.MCTS.MCTS_ultra_performance import UltraPerformanceMCTSEngine
 import device_utils
 
 class DetailedMCTSComparison:

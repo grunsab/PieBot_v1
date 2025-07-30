@@ -9,7 +9,7 @@ from device_utils import get_optimal_device, optimize_for_device, get_gpu_count
 from RLDataset import SelfPlayDataCollector
 import numpy as np
 import encoder
-from MCTS_async import MCTSEngine, AsyncRoot
+from MCTS.MCTS_async import MCTSEngine, AsyncRoot
 from async_neural_net_server import NeuralNetworkPool
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing as mp

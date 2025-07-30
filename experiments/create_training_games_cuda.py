@@ -19,7 +19,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 import multiprocessing as mp
 import numpy as np
 import encoder
-from MCTS_cuda import MCTSEngineCUDA, AsyncRootCUDA
+from MCTS.MCTS_cuda import MCTSEngineCUDA, AsyncRootCUDA
 from async_neural_net_server_cuda import NeuralNetworkPoolCUDA
 from RLDataset import SelfPlayDataCollector
 import queue

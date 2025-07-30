@@ -1,10 +1,12 @@
+import sys
+sys.path.append('..')
 import argparse
 import chess
 import torch
 import AlphaZeroNetwork
 import time
 from device_utils import get_optimal_device, optimize_for_device, get_gpu_count
-from MCTS_async import MCTSEngine
+from MCTS.MCTS_async import MCTSEngine
 from async_neural_net_server import NeuralNetworkPool
 
 

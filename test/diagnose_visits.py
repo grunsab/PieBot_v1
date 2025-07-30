@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Diagnose why visit counts are lower than requested"""
 
+import sys
+sys.path.append('..')
 import chess
 import torch
 from AlphaZeroNetwork import AlphaZeroNet
-from MCTS_ultra_performance import UltraPerformanceMCTSEngine
+from experiments.MCTS.MCTS_ultra_performance import UltraPerformanceMCTSEngine
 
 def diagnose_visits():
     board = chess.Board()

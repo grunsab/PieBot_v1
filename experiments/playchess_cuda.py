@@ -6,14 +6,15 @@ High-performance interactive chess playing interface optimized for Windows
 systems with NVIDIA GPUs (RTX 4080 and similar).
 """
 
+import sys
+sys.path.append('..')
 import argparse
 import chess
 import torch
 import AlphaZeroNetwork
 import time
 import os
-import sys
-from MCTS_cuda import MCTSEngineCUDA
+from MCTS.MCTS_cuda import MCTSEngineCUDA
 from async_neural_net_server_cuda import NeuralNetworkPoolCUDA
 
 # Windows-specific imports

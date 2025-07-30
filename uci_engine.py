@@ -19,7 +19,7 @@ import time
 import threading
 from queue import Queue
 import AlphaZeroNetwork
-from MCTS_ultra_performance import UltraPerformanceMCTSEngine
+import MCTS
 from device_utils import get_optimal_device, optimize_for_device
 
 
@@ -200,19 +200,12 @@ class UCIEngine:
             for param in self.model.parameters():
                 param.requires_grad = False
             
-            # Initialize Ultra-Performance MCTS engine
-            self.mcts_engine = UltraPerformanceMCTSEngine(
-                self.model,
-                device=self.device,
-                batch_size=512,
-                num_workers=self.threads,
-                verbose=self.verbose
-            )
-            self.mcts_engine.start()
+            # Initialize MCTS
+            self.mcts_engine = MCTS.Root()
                 
             if self.verbose:
                 print(f"info string Model loaded successfully")
-                print(f"info string Ultra-Performance MCTS engine initialized")
+                print(f"info string MCTS initialized")
                 sys.stdout.flush()
             return True
             
@@ -299,7 +292,19 @@ class UCIEngine:
             start_time = time.time()
             
             # Run search
-            best_move = self.mcts_engine.search(self.board, rollouts)
+            self.mcts_engine.parallelRollouts(self.board, self.model, self.threads)
+            
+            # Continue rollouts
+            rollouts_per_iteration = self.threads
+            num_iterations = max(1, rollouts // rollouts_per_iteration)
+            
+            for _ in range(num_iterations - 1):
+                if self.stop_search.is_set():
+                    break
+                self.mcts_engine.parallelRollouts(self.board, self.model, self.threads)
+            
+            # Get best move
+            best_move = self.mcts_engine.bestMove(self.board)
             
             elapsed_time = time.time() - start_time
             
@@ -444,8 +449,6 @@ class UCIEngine:
     def quit(self):
         """Handle 'quit' command."""
         self.stop_search.set()
-        if self.mcts_engine:
-            self.mcts_engine.stop()
         sys.exit(0)
         
     def setoption(self, args):

@@ -5,12 +5,13 @@ Benchmark for High-Performance MCTS Implementation
 
 import os
 import sys
+sys.path.append('..')
 import time
 import chess
 import torch
 import argparse
 import AlphaZeroNetwork
-from MCTS_high_performance import HighPerformanceMCTSEngine
+from experiments.MCTS.MCTS_high_performance import HighPerformanceMCTSEngine
 
 def benchmark_mcts(model_path, device_id=0, num_searches=100, rollouts_per_search=1000):
     """Benchmark the high-performance MCTS implementation"""

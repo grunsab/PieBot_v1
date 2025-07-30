@@ -1,9 +1,10 @@
+import sys
+sys.path.append('..')
 import torch
 import numpy as np
 import threading
 import queue
 import time
-import sys
 from collections import namedtuple
 from typing import List, Tuple, Optional
 import encoder
