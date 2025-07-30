@@ -63,12 +63,13 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
                     # Try loading as TorchScript
                     model = torch.jit.load(model_file, map_location=cpu_device)
                     model.eval()
+                    print(f"Loaded static quantized model (TorchScript) on CPU")
                 except:
                     # Load using quantization_utils
                     model = load_quantized_model(model_file, cpu_device, 20, 256)
+                    print(f"Loaded static quantized model on CPU")
                 device = cpu_device
                 device_str = 'CPU (static quantized model)'
-                print(f'Using device: {device_str}')
             else:
                 # Handle FP16 models
                 model.load_state_dict(weights['model_state_dict'])
@@ -116,12 +117,13 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
                     # Try loading as TorchScript
                     model = torch.jit.load(model_file, map_location=cpu_device)
                     model.eval()
+                    print(f"Loaded static quantized model (TorchScript) on CPU (GPU {gpu_id} requested but quantized models run on CPU)")
                 except:
                     # Load using quantization_utils
                     model = load_quantized_model(model_file, cpu_device, 20, 256)
+                    print(f"Loaded static quantized model on CPU (GPU {gpu_id} requested but quantized models run on CPU)")
                 device = cpu_device
                 devices[len(models)] = cpu_device
-                print(f"Loaded static quantized model on CPU (GPU {gpu_id} requested but quantized models run on CPU)")
             else:
                 # Handle FP16 or regular quantized models
                 model.load_state_dict(weights['model_state_dict'])
