@@ -199,11 +199,45 @@ class UltraPerformanceMCTSEngine:
                 
                 # Expand node (check if node still exists)
                 if node_idx < len(self.nodes):
+                    # First, update the leaf node itself if it's being visited for first time
+                    node = self.nodes[node_idx]
+                    if node.visits == 0:
+                        # Initialize the leaf node with the neural network evaluation
+                        # This matches original MCTS where new nodes start with N=1 and sum_Q=value
+                        self.nodes[node_idx] = MCTSNode(
+                            node.board_hash,
+                            1,  # First visit
+                            value,  # Value from neural network
+                            node.prior,
+                            node.move,
+                            node.parent_idx,
+                            max(0, node.virtual_loss - 1)
+                        )
+                    
+                    # Then expand it with children
                     self._expand_node(node_idx, board, move_probs)
                     
-                    # Remove virtual loss and backup real value
-                    # Value is from perspective of board position at leaf
-                    self._backup(path, value, remove_virtual_loss=True)
+                    # Backup: the value needs to be flipped as we go up the tree
+                    # The leaf stores value from its perspective
+                    flipped_value = 1.0 - value
+                    
+                    # Backup to ancestors (not including the leaf itself since we updated it above)
+                    if len(path) > 1:
+                        self._backup(path[:-1], flipped_value, remove_virtual_loss=True)
+                    
+                    # Remove virtual loss from the leaf
+                    if node_idx < len(self.nodes):
+                        node = self.nodes[node_idx]
+                        if node.virtual_loss > 0:
+                            self.nodes[node_idx] = MCTSNode(
+                                node.board_hash,
+                                node.visits,
+                                node.total_value,
+                                node.prior,
+                                node.move,
+                                node.parent_idx,
+                                max(0, node.virtual_loss - 1)
+                            )
     
     def search(self, board, num_simulations):
         """
@@ -248,8 +282,9 @@ class UltraPerformanceMCTSEngine:
             policy_np = policy[0].cpu().numpy()
             root_priors = encoder.decodePolicyOutput(board, policy_np)
             
-            # Create root
+            # Create root (matching original MCTS initialization)
             root_idx = len(self.nodes)
+            # Root starts with N=1 and sum_Q=root_value (already converted to win probability)
             self.nodes.append(MCTSNode(root_hash, 1, root_value, 1.0, None, -1))
             self.node_lookup[root_hash] = root_idx
             self._expand_node(root_idx, board, root_priors)
@@ -417,7 +452,9 @@ class UltraPerformanceMCTSEngine:
                 # Child stores value from its perspective, we need parent's perspective
                 q_value = 1.0 - (child.total_value / visits_with_vl)
             else:
-                q_value = 0.5  # Neutral value for unexplored nodes
+                # Unvisited nodes get a neutral Q-value
+                # This matches original MCTS where getQ() returns 0 for unvisited edges
+                q_value = 0.0
             
             puct = q_value + self.c_puct * child.prior * sqrt_parent / (1 + visits_with_vl)
             
@@ -466,26 +503,37 @@ class UltraPerformanceMCTSEngine:
         children_indices = []
         
         legal_moves = list(board.legal_moves)
+        # Default prior for moves not in policy output
+        default_prior = 1.0 / max(len(legal_moves), 200)
+        
         for i, move in enumerate(legal_moves):
-            if i < len(move_probs) and move_probs[i] > 1e-8:
-                # Create child node
-                board.push(move)
-                child_hash = board.fen()
-                board.pop()
-                
-                # Check if already exists
-                if child_hash in self.node_lookup:
-                    child_idx = self.node_lookup[child_hash]
-                else:
-                    child_idx = len(self.nodes)
-                    child_node = MCTSNode(
-                        child_hash, 0, 0.0,
-                        float(move_probs[i]), move, node_idx
-                    )
-                    self.nodes.append(child_node)
-                    self.node_lookup[child_hash] = child_idx
-                
-                children_indices.append(child_idx)
+            # Get move probability - use default if not available or too small
+            if i < len(move_probs) and move_probs[i] > 0:
+                prior = float(move_probs[i])
+            else:
+                # Assign small uniform probability to ensure exploration
+                prior = default_prior
+            
+            # Create child node for ALL legal moves
+            board.push(move)
+            child_hash = board.fen()
+            board.pop()
+            
+            # Check if already exists
+            if child_hash in self.node_lookup:
+                child_idx = self.node_lookup[child_hash]
+            else:
+                child_idx = len(self.nodes)
+                # Initialize with visits=0 (will be incremented when first visited)
+                # This matches original MCTS where edges start unvisited
+                child_node = MCTSNode(
+                    child_hash, 0, 0.0,  # Unvisited node
+                    prior, move, node_idx
+                )
+                self.nodes.append(child_node)
+                self.node_lookup[child_hash] = child_idx
+            
+            children_indices.append(child_idx)
         
         self.children[node_idx] = children_indices
     
