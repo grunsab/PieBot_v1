@@ -4,6 +4,11 @@
 #include <algorithm>
 #include <mutex>
 #include <atomic>
+#include <memory>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 // Fast UCT calculation
 float calc_uct_single(float Q, float N_c, float P, float N_p, float C = 1.5f) {

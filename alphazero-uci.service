@@ -1,0 +1,41 @@
+[Unit]
+Description=AlphaZero UCI Chess Engine (CUDA-optimized)
+After=network.target
+
+[Service]
+Type=simple
+User=chess
+Group=chess
+WorkingDirectory=/opt/pytorch-alpha-zero
+
+# Environment variables
+Environment="CUDA_VISIBLE_DEVICES=0"
+Environment="OMP_NUM_THREADS=16"
+Environment="LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
+
+# Start command
+ExecStart=/usr/bin/python3 /opt/pytorch-alpha-zero/UCI_engine_cuda.py \
+    --model /opt/pytorch-alpha-zero/weights/AlphaZeroNet_20x256.pt \
+    --threads 32 \
+    --verbose
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Performance settings
+CPUAffinity=0-15
+Nice=-10
+
+# Security settings (optional)
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
