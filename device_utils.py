@@ -132,7 +132,7 @@ def get_num_workers_for_device():
     
     if device.type == 'cuda':
         # For GPU training, use more workers to keep GPU fed
-        return max(cpu_count, 16)
+        return min(cpu_count, 24)
     elif device.type == 'mps':
         # MPS benefits from fewer workers due to unified memory
         return cpu_count
