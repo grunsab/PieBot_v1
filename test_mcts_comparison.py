@@ -21,7 +21,7 @@ import device_utils
 class MCTSComparison:
     """Handles comparison between MCTS implementations"""
     
-    def __init__(self, model_path, device, num_games=10, rollouts=1000, verbose=True):
+    def __init__(self, model_path, device, num_games=20, rollouts=1000, verbose=True):
         self.model_path = model_path
         self.device = device
         self.num_games = num_games
@@ -232,7 +232,7 @@ def main():
         description='Compare Original MCTS vs Ultra-Performance MCTS'
     )
     parser.add_argument('--model', required=True, help='Path to model file')
-    parser.add_argument('--games', type=int, default=10, help='Number of games to play')
+    parser.add_argument('--games', type=int, default=20, help='Number of games to play')
     parser.add_argument('--rollouts', type=int, default=1000, help='Rollouts per move')
     parser.add_argument('--device', type=int, default=0, help='CUDA device ID')
     parser.add_argument('--quiet', action='store_true', help='Minimal output')

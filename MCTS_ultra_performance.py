@@ -199,45 +199,14 @@ class UltraPerformanceMCTSEngine:
                 
                 # Expand node (check if node still exists)
                 if node_idx < len(self.nodes):
-                    # First, update the leaf node itself if it's being visited for first time
-                    node = self.nodes[node_idx]
-                    if node.visits == 0:
-                        # Initialize the leaf node with the neural network evaluation
-                        # This matches original MCTS where new nodes start with N=1 and sum_Q=value
-                        self.nodes[node_idx] = MCTSNode(
-                            node.board_hash,
-                            1,  # First visit
-                            value,  # Value from neural network
-                            node.prior,
-                            node.move,
-                            node.parent_idx,
-                            max(0, node.virtual_loss - 1)
-                        )
-                    
-                    # Then expand it with children
+                    # Just expand the node - don't modify its statistics
+                    # The node was already visited during selection
                     self._expand_node(node_idx, board, move_probs)
                     
-                    # Backup: the value needs to be flipped as we go up the tree
-                    # The leaf stores value from its perspective
-                    flipped_value = 1.0 - value
-                    
-                    # Backup to ancestors (not including the leaf itself since we updated it above)
-                    if len(path) > 1:
-                        self._backup(path[:-1], flipped_value, remove_virtual_loss=True)
-                    
-                    # Remove virtual loss from the leaf
-                    if node_idx < len(self.nodes):
-                        node = self.nodes[node_idx]
-                        if node.virtual_loss > 0:
-                            self.nodes[node_idx] = MCTSNode(
-                                node.board_hash,
-                                node.visits,
-                                node.total_value,
-                                node.prior,
-                                node.move,
-                                node.parent_idx,
-                                max(0, node.virtual_loss - 1)
-                            )
+                    # For an expanded node, we backup the value from the neural network
+                    # Note: the value is from the perspective of the expanded position
+                    # So we backup this value to all nodes in the path
+                    self._backup(path, value, remove_virtual_loss=True)
     
     def search(self, board, num_simulations):
         """
@@ -507,11 +476,14 @@ class UltraPerformanceMCTSEngine:
         default_prior = 1.0 / max(len(legal_moves), 200)
         
         for i, move in enumerate(legal_moves):
-            # Get move probability - use default if not available or too small
-            if i < len(move_probs) and move_probs[i] > 0:
+            # Get move probability - use exact value from neural network
+            if i < len(move_probs):
                 prior = float(move_probs[i])
+                # Handle NaN or negative values (matching original MCTS)
+                if math.isnan(prior) or prior < 0:
+                    prior = default_prior
             else:
-                # Assign small uniform probability to ensure exploration
+                # Move index beyond policy output - shouldn't happen
                 prior = default_prior
             
             # Create child node for ALL legal moves
