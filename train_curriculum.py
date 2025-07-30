@@ -140,7 +140,7 @@ def main():
     parser.add_argument('--filters', type=int, default=256, help='Number of filters')
     
     # Phase 1: Supervised learning
-    parser.add_argument('--supervised-epochs', type=int, default=10, help='Epochs for supervised learning')
+    parser.add_argument('--supervised-epochs', type=int, default=20, help='Epochs for supervised learning')
     parser.add_argument('--supervised-lr', type=float, default=0.0005, help='Learning rate for supervised')
     parser.add_argument('--resume-supervised', type=str, help='Resume supervised training from checkpoint')
     parser.add_argument('--skip-supervised', action='store_true', help='Skip supervised phase')
