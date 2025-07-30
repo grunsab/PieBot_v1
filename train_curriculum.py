@@ -140,7 +140,7 @@ def main():
     parser.add_argument('--filters', type=int, default=256, help='Number of filters')
     
     # Phase 1: Supervised learning
-    parser.add_argument('--supervised-epochs', type=int, default=20, help='Epochs for supervised learning')
+    parser.add_argument('--supervised-epochs', type=int, default=50, help='Epochs for supervised learning')
     parser.add_argument('--supervised-lr', type=float, default=0.0005, help='Learning rate for supervised')
     parser.add_argument('--resume-supervised', type=str, help='Resume supervised training from checkpoint')
     parser.add_argument('--skip-supervised', action='store_true', help='Skip supervised phase')
@@ -158,7 +158,7 @@ def main():
     
     # Training configuration
     parser.add_argument('--distributed', action='store_true', help='Use distributed training')
-    parser.add_argument('--gpus', type=int, default=4, help='Number of GPUs for distributed training')
+    parser.add_argument('--gpus', type=int, default=1, help='Number of GPUs for distributed training')
     parser.add_argument('--output-dir', type=str, default='curriculum_training', help='Output directory')
     parser.add_argument('--selfplay-dir', type=str, default='games_training_data/selfplay', help='Self-play data directory')
     parser.add_argument('--weight-decay', type=float, default=0.05, help='Weight decay for recent games (lambda in exp(-lambda * age))')
