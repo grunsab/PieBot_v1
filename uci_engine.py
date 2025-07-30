@@ -240,6 +240,7 @@ class UCIEngine:
                         self.model.load_state_dict(new_state_dict, strict=False)
                         # Move to original device since we're using a regular model now
                         self.model.to(self.device)
+                        self.model.eval()
                         if self.verbose:
                             print(f"info string Loaded dequantized model on {device_str}")
                 # Keep original device since we're not using quantization

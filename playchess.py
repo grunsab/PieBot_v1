@@ -93,6 +93,7 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
                     model.load_state_dict(new_state_dict, strict=False)
                     # Move to original device since we're using a regular model now
                     model.to(device)
+                    model.eval()
                     print(f"Loaded dequantized model on {device_str}")
             # Keep original device since we're not using quantization
             # device = cpu_device
@@ -177,6 +178,7 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
                     model.load_state_dict(new_state_dict, strict=False)
                     # Move to the requested GPU device since we're using a regular model now
                     model.to(device)
+                    model.eval()
                     print(f"Loaded dequantized model on GPU {gpu_id}")
             # Keep GPU device since we're not using quantization anymore
             # device = cpu_device
