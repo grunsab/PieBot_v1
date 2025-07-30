@@ -7,7 +7,7 @@ chess engine, enabling it to communicate with chess GUI applications and online
 chess platforms like Lichess.
 
 Time management: Dynamically adjusts the number of MCTS rollouts based on available
-time, using the baseline that 500 rollouts take approximately 1 second on 8 threads.
+time, using the baseline that 1500 rollouts take approximately 1 second on 12 threads.
 """
 
 import sys
@@ -26,7 +26,7 @@ from device_utils import get_optimal_device, optimize_for_device
 class TimeManager:
     """Manages time allocation for moves based on game time constraints."""
     
-    def __init__(self, base_rollouts=500, base_time=1.0, threads=8):
+    def __init__(self, base_rollouts=1500, base_time=1.0, threads=12):
         """
         Initialize time manager.
         
@@ -444,6 +444,8 @@ class UCIEngine:
     def quit(self):
         """Handle 'quit' command."""
         self.stop_search.set()
+        if self.mcts_engine:
+            self.mcts_engine.stop()
         sys.exit(0)
         
     def setoption(self, args):

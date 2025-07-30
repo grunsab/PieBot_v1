@@ -190,7 +190,8 @@ class UltraPerformanceMCTSEngine:
                 board = boards[i]
                 node_idx = node_indices[i]
                 path = paths[i]
-                value = float(values_np[i, 0])
+                # Convert neural network value to win probability
+                value = float(values_np[i, 0]) / 2.0 + 0.5
                 policy = policies_np[i]
                 
                 # Decode policy
@@ -201,6 +202,7 @@ class UltraPerformanceMCTSEngine:
                     self._expand_node(node_idx, board, move_probs)
                     
                     # Remove virtual loss and backup real value
+                    # Value is from perspective of board position at leaf
                     self._backup(path, value, remove_virtual_loss=True)
     
     def search(self, board, num_simulations):
@@ -220,14 +222,20 @@ class UltraPerformanceMCTSEngine:
                 buffer['node_indices'].clear()
                 buffer['paths'].clear()
         
-        # Clear tree for new search (avoid stale moves)
-        self.nodes.clear()
-        self.children.clear()
-        self.node_lookup.clear()
-        
-        # Initialize root
+        # Check if we can reuse existing tree
         root_hash = board.fen()
-        if root_hash not in self.node_lookup:
+        if root_hash in self.node_lookup:
+            # Root already exists in tree - reuse it
+            root_idx = self.node_lookup[root_hash]
+            if self.verbose:
+                print(f"Reusing existing tree with root at index {root_idx}")
+        else:
+            # Need to create new root
+            # Clear tree only if we can't reuse
+            self.nodes.clear()
+            self.children.clear()
+            self.node_lookup.clear()
+            
             # Get initial evaluation
             pos, mask = encoder.encodePositionForInference(board)
             with torch.no_grad():
@@ -235,7 +243,8 @@ class UltraPerformanceMCTSEngine:
                 mask_tensor = torch.from_numpy(mask).flatten().unsqueeze(0).to(self.device)
                 value, policy = self.neural_network(pos_tensor, policyMask=mask_tensor)
             
-            root_value = float(value[0, 0])
+            # Convert neural network value to win probability
+            root_value = float(value[0, 0]) / 2.0 + 0.5
             policy_np = policy[0].cpu().numpy()
             root_priors = encoder.decodePolicyOutput(board, policy_np)
             
@@ -281,7 +290,7 @@ class UltraPerformanceMCTSEngine:
         
         # Select best move
         root_idx = self.node_lookup[root_hash]
-        return self._select_best_move(root_idx)
+        return self._select_best_move(root_idx, temperature=0)  # Use temperature=0 for strong play
     
     def _leaf_collector(self, board, target_simulations):
         """Worker thread that collects leaf nodes"""
@@ -321,6 +330,8 @@ class UltraPerformanceMCTSEngine:
                     value = encoder.parseResult(result)
                     if not sim_board.turn:
                         value = -value
+                    # Convert to win probability
+                    value = value / 2.0 + 0.5
                     self._backup(path, value, remove_virtual_loss=True)
                     break
                 
@@ -375,11 +386,22 @@ class UltraPerformanceMCTSEngine:
         valid_children = [idx for idx in children_indices if 0 <= idx < len(self.nodes)]
         if not valid_children:
             return -1
+        
+        # Get parent node to calculate parent visits correctly
+        if valid_children:
+            first_child = self.nodes[valid_children[0]]
+            if first_child.parent_idx >= 0:
+                parent_node = self.nodes[first_child.parent_idx]
+                parent_visits = parent_node.visits + parent_node.virtual_loss
+            else:
+                # Fallback for root
+                parent_visits = sum(
+                    self.nodes[idx].visits + self.nodes[idx].virtual_loss 
+                    for idx in valid_children
+                )
+        else:
+            parent_visits = 1
             
-        parent_visits = sum(
-            self.nodes[idx].visits + self.nodes[idx].virtual_loss 
-            for idx in valid_children
-        )
         sqrt_parent = math.sqrt(parent_visits) if parent_visits > 0 else 1.0
         
         best_idx = -1
@@ -391,9 +413,11 @@ class UltraPerformanceMCTSEngine:
             # Calculate PUCT with virtual loss
             visits_with_vl = child.visits + child.virtual_loss
             if visits_with_vl > 0:
-                q_value = child.total_value / visits_with_vl
+                # Fix Q-value calculation: flip for opponent's perspective
+                # Child stores value from its perspective, we need parent's perspective
+                q_value = 1.0 - (child.total_value / visits_with_vl)
             else:
-                q_value = 0
+                q_value = 0.5  # Neutral value for unexplored nodes
             
             puct = q_value + self.c_puct * child.prior * sqrt_parent / (1 + visits_with_vl)
             
@@ -402,6 +426,40 @@ class UltraPerformanceMCTSEngine:
                 best_idx = child_idx
         
         return best_idx
+    
+    def get_visit_counts(self, board):
+        """Get visit counts for all moves from current root position"""
+        import numpy as np
+        
+        root_hash = board.fen()
+        if root_hash not in self.node_lookup:
+            return None
+            
+        root_idx = self.node_lookup[root_hash]
+        if root_idx not in self.children:
+            return None
+            
+        # Create visit count array indexed by move
+        visit_counts = np.zeros(4608, dtype=np.float32)
+        
+        children = self.children[root_idx]
+        for child_idx in children:
+            child = self.nodes[child_idx]
+            move = child.move
+            
+            # Encode move to get index
+            if not board.turn:
+                # For black, we need to mirror the move
+                from encoder import mirrorMove
+                mirrored_move = mirrorMove(move)
+                planeIdx, rankIdx, fileIdx = encoder.moveToIdx(mirrored_move)
+            else:
+                planeIdx, rankIdx, fileIdx = encoder.moveToIdx(move)
+            
+            moveIdx = planeIdx * 64 + rankIdx * 8 + fileIdx
+            visit_counts[moveIdx] = child.visits
+            
+        return visit_counts
     
     def _expand_node(self, node_idx, board, move_probs):
         """Expand a node with children"""
@@ -433,14 +491,26 @@ class UltraPerformanceMCTSEngine:
     
     def _backup(self, path, value, remove_virtual_loss=False):
         """Backup value through path"""
-        for i, node_idx in enumerate(path):
+        # value is from the perspective of the last node in path
+        # We need to flip it as we go up the tree
+        
+        for i in range(len(path) - 1, -1, -1):
+            node_idx = path[i]
+            
             # Check if node index is still valid
             if node_idx < 0 or node_idx >= len(self.nodes):
                 # Node was removed or index is invalid, skip
                 continue
-                
-            # Flip value for alternating players
-            backup_value = value if i % 2 == 0 else -value
+            
+            # Calculate backup value
+            # The value alternates as we go up the tree
+            # If we're at an even distance from the leaf, use the value as-is
+            # If we're at an odd distance, flip it
+            distance_from_leaf = len(path) - 1 - i
+            if distance_from_leaf % 2 == 0:
+                backup_value = value
+            else:
+                backup_value = 1.0 - value
             
             # Update node
             try:
@@ -463,8 +533,8 @@ class UltraPerformanceMCTSEngine:
                 # Race condition - node was removed, skip
                 continue
     
-    def _select_best_move(self, root_idx):
-        """Select best move based on visit count"""
+    def _select_best_move(self, root_idx, temperature=0):
+        """Select best move based on visit count with optional temperature"""
         if root_idx not in self.children:
             return None
         
@@ -472,14 +542,34 @@ class UltraPerformanceMCTSEngine:
         if not children:
             return None
         
-        # Select child with most visits
-        best_visits = -1
-        best_move = None
-        
-        for child_idx in children:
-            child = self.nodes[child_idx]
-            if child.visits > best_visits:
-                best_visits = child.visits
-                best_move = child.move
-        
-        return best_move
+        if temperature == 0:
+            # Select child with most visits (deterministic)
+            best_visits = -1
+            best_move = None
+            
+            for child_idx in children:
+                child = self.nodes[child_idx]
+                if child.visits > best_visits:
+                    best_visits = child.visits
+                    best_move = child.move
+            
+            return best_move
+        else:
+            # Temperature-based selection
+            import numpy as np
+            
+            visits = []
+            moves = []
+            for child_idx in children:
+                child = self.nodes[child_idx]
+                visits.append(child.visits)
+                moves.append(child.move)
+            
+            visits = np.array(visits, dtype=np.float32)
+            # Apply temperature
+            visits_temp = np.power(visits, 1.0 / temperature)
+            probs = visits_temp / np.sum(visits_temp)
+            
+            # Sample from probability distribution
+            selected_idx = np.random.choice(len(moves), p=probs)
+            return moves[selected_idx]

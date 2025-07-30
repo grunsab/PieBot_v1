@@ -25,7 +25,7 @@ from device_utils import get_optimal_device, optimize_for_device
 class TimeManager:
     """Manages time allocation for moves based on game time constraints."""
     
-    def __init__(self, base_rollouts=5000, base_time=1.0, threads=32):
+    def __init__(self, base_rollouts=2000, base_time=1.0, threads=32):
         """
         Initialize time manager.
         
