@@ -65,12 +65,18 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
                 model = torch.jit.load(model_file, map_location=cpu_device)
                 model.eval()
                 print(f"Loaded static quantized model (TorchScript) on CPU")
+                # Update device to CPU for static quantized models
+                device = cpu_device
+                device_str = 'CPU (static quantized model)'
             except Exception as e:
                 print(f"Warning: Could not load as TorchScript: {e}")
                 try:
                     # Try using quantization_utils
                     model = load_quantized_model(model_file, cpu_device, 20, 256)
                     print(f"Loaded static quantized model on CPU")
+                    # Update device to CPU for static quantized models
+                    device = cpu_device
+                    device_str = 'CPU (static quantized model)'
                 except Exception as e2:
                     print(f"Warning: Static quantization not supported on this platform: {e2}")
                     print("Falling back to loading as regular model...")
@@ -95,9 +101,6 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
                     model.to(device)
                     model.eval()
                     print(f"Loaded dequantized model on {device_str}")
-            # Keep original device since we're not using quantization
-            # device = cpu_device
-            # device_str = 'CPU (static quantized model)'
         else:
             # Create regular model
             model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
@@ -150,12 +153,16 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
                 model = torch.jit.load(model_file, map_location=cpu_device)
                 model.eval()
                 print(f"Loaded static quantized model (TorchScript) on CPU (GPU {gpu_id} requested but quantized models run on CPU)")
+                # Update device to CPU for static quantized models
+                devices[-1] = cpu_device
             except Exception as e:
                 print(f"Warning: Could not load as TorchScript: {e}")
                 try:
                     # Try using quantization_utils
                     model = load_quantized_model(model_file, cpu_device, 20, 256)
                     print(f"Loaded static quantized model on CPU (GPU {gpu_id} requested but quantized models run on CPU)")
+                    # Update device to CPU for static quantized models
+                    devices[-1] = cpu_device
                 except Exception as e2:
                     print(f"Warning: Static quantization not supported on this platform: {e2}")
                     print("Falling back to loading as regular model...")
@@ -180,9 +187,6 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
                     model.to(device)
                     model.eval()
                     print(f"Loaded dequantized model on GPU {gpu_id}")
-            # Keep GPU device since we're not using quantization anymore
-            # device = cpu_device
-            # devices[len(models)] = cpu_device
         else:
             # Create regular model
             model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
@@ -343,5 +347,10 @@ if __name__=='__main__':
     if parser.gpus:
         gpu_ids = [int(gpu_id.strip()) for gpu_id in parser.gpus.split(',')]
 
-    main( parser.model, parser.mode, parseColor( parser.color ), parser.rollouts, parser.threads, parser.fen, parser.verbose, gpu_ids )
+    try:
+        main( parser.model, parser.mode, parseColor( parser.color ), parser.rollouts, parser.threads, parser.fen, parser.verbose, gpu_ids )
+    except Exception as e:
+        print(f"Error occurred: {e}")
+        import traceback
+        traceback.print_exc()
 

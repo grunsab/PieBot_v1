@@ -209,6 +209,9 @@ class UCIEngine:
                     self.model.eval()
                     if self.verbose:
                         print(f"info string Loaded static quantized model (TorchScript) on CPU")
+                    # Update device to CPU for static quantized models
+                    self.device = cpu_device
+                    device_str = 'CPU (static quantized model)'
                 except Exception as e:
                     if self.verbose:
                         print(f"info string Warning: Could not load as TorchScript: {e}")
@@ -217,6 +220,9 @@ class UCIEngine:
                         self.model = load_quantized_model(full_path, cpu_device, 20, 256)
                         if self.verbose:
                             print(f"info string Loaded static quantized model on CPU")
+                        # Update device to CPU for static quantized models
+                        self.device = cpu_device
+                        device_str = 'CPU (static quantized model)'
                     except Exception as e2:
                         if self.verbose:
                             print(f"info string Warning: Static quantization not supported on this platform: {e2}")
@@ -243,9 +249,6 @@ class UCIEngine:
                         self.model.eval()
                         if self.verbose:
                             print(f"info string Loaded dequantized model on {device_str}")
-                # Keep original device since we're not using quantization
-                # self.device = cpu_device
-                # device_str = 'CPU (static quantized model)'
                 if self.verbose:
                     print(f"info string Using device: {device_str}")
                     sys.stdout.flush()
