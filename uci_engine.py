@@ -21,6 +21,7 @@ from queue import Queue
 import AlphaZeroNetwork
 import MCTS
 from device_utils import get_optimal_device, optimize_for_device
+from quantization_utils import load_quantized_model
 
 
 class TimeManager:
@@ -192,9 +193,43 @@ class UCIEngine:
                 
             self.model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
             weights = torch.load(full_path, map_location=self.device)
-            self.model.load_state_dict(weights)
-            self.model = optimize_for_device(self.model, self.device)
-            self.model.eval()
+            
+            # Handle different model formats
+            if isinstance(weights, dict) and 'model_state_dict' in weights:
+                model_type = weights.get('model_type', 'unknown')
+                
+                # Handle static quantized models
+                if model_type == 'static_quantized':
+                    # Static quantized models run on CPU
+                    cpu_device = torch.device('cpu')
+                    try:
+                        # Try loading as TorchScript
+                        self.model = torch.jit.load(full_path, map_location=cpu_device)
+                        self.model.eval()
+                    except:
+                        # Load using quantization_utils
+                        self.model = load_quantized_model(full_path, cpu_device, 20, 256)
+                    self.device = cpu_device
+                    device_str = 'CPU (static quantized model)'
+                    if self.verbose:
+                        print(f"info string Loaded static quantized model on CPU")
+                        print(f"info string Using device: {device_str}")
+                        sys.stdout.flush()
+                else:
+                    # Handle FP16 models
+                    self.model.load_state_dict(weights['model_state_dict'])
+                    if model_type == 'fp16':
+                        self.model = self.model.half()
+                        if self.verbose:
+                            print(f"info string Loaded FP16 model on {device_str}")
+                            sys.stdout.flush()
+                    self.model = optimize_for_device(self.model, self.device)
+                    self.model.eval()
+            else:
+                # Regular model format
+                self.model.load_state_dict(weights)
+                self.model = optimize_for_device(self.model, self.device)
+                self.model.eval()
             
             # Disable gradients for inference
             for param in self.model.parameters():
