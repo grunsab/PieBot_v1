@@ -122,7 +122,7 @@ def benchmark_neural_network(model_path, num_positions=10000, batch_size=None):
     # Load model
     print(f"Loading model from {model_path}...")
     checkpoint = torch.load(model_path, map_location=device)
-    
+
     # Extract model configuration
     if 'model_config' in checkpoint:
         num_blocks = checkpoint['model_config']['num_blocks']
@@ -132,9 +132,18 @@ def benchmark_neural_network(model_path, num_positions=10000, batch_size=None):
         num_blocks = 20
         num_filters = 256
     
-    # Create and load model
     model = AlphaZeroNet(num_blocks, num_filters)
-    model.load_state_dict(checkpoint)
+    # Create and load model
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        # FP16 model format
+        model.load_state_dict(checkpoint['model_state_dict'])
+        if checkpoint.get('model_type') == 'fp16':
+            model = model.half()
+            print(f"Loaded FP16 model on {device_str}")
+    else:
+        # Regular model format
+        model.load_state_dict(checkpoint)
+
     model = optimize_for_device(model, device)
     model.eval()
     
