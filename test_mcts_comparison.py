@@ -21,7 +21,7 @@ import device_utils
 class MCTSComparison:
     """Handles comparison between MCTS implementations"""
     
-    def __init__(self, model_path, device, num_games=20, rollouts=1000, verbose=True):
+    def __init__(self, model_path, device, num_games=20, rollouts=5000, verbose=True):
         self.model_path = model_path
         self.device = device
         self.num_games = num_games
@@ -36,7 +36,7 @@ class MCTSComparison:
             self.model,
             device=device,
             batch_size=512,
-            num_workers=16,
+            num_workers=20,
             verbose=False
         )
         self.ultra_engine.start()
@@ -124,8 +124,8 @@ class MCTSComparison:
                 root = MCTS.Root(board, self.model)
                 
                 # Run rollouts
-                for _ in range(self.rollouts // 8):  # 8 threads per iteration
-                    root.parallelRollouts(board.copy(), self.model, 8)
+                for _ in range(self.rollouts // 20):  # 20 threads per iteration
+                    root.parallelRollouts(board.copy(), self.model, 20)
                 
                 elapsed = time.time() - start_time
                 
@@ -233,7 +233,7 @@ def main():
     )
     parser.add_argument('--model', required=True, help='Path to model file')
     parser.add_argument('--games', type=int, default=20, help='Number of games to play')
-    parser.add_argument('--rollouts', type=int, default=1000, help='Rollouts per move')
+    parser.add_argument('--rollouts', type=int, default=5000, help='Rollouts per move')
     parser.add_argument('--device', type=int, default=0, help='CUDA device ID')
     parser.add_argument('--quiet', action='store_true', help='Minimal output')
     
