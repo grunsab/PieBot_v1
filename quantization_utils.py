@@ -387,8 +387,14 @@ def load_quantized_model(model_path: str, device: torch.device,
         model.eval()
         return model
     except:
-        # Try loading as state dict (dynamic quantized)
+        # Try loading as state dict
         checkpoint = torch.load(model_path, map_location=device)
+        
+        # Check if it's a static quantized model by its structure
+        is_static_quantized = (isinstance(checkpoint, dict) and 
+                             'quant.scale' in checkpoint and 
+                             any(k.startswith('base_model.') for k in checkpoint.keys()))
+        
         if checkpoint.get('model_type') == 'dynamic_quantized':
             # Need to reconstruct the model
             if num_blocks is None or num_filters is None:
@@ -401,6 +407,16 @@ def load_quantized_model(model_path: str, device: torch.device,
             # Apply dynamic quantization
             quantized_model = apply_dynamic_quantization(base_model)
             return quantized_model
+        elif checkpoint.get('model_type') == 'static_quantized' or is_static_quantized:
+            # Static quantized model saved as state dict
+            if num_blocks is None or num_filters is None:
+                raise ValueError("For static quantized models, num_blocks and num_filters must be provided")
+            
+            # Create quantizable model and load the state dict
+            model = QuantizableAlphaZeroNet(num_blocks, num_filters)
+            model.load_state_dict(checkpoint)
+            model.eval()
+            return model
         else:
             raise ValueError(f"Unknown model format in {model_path}")
 
