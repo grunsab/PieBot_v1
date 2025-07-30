@@ -214,7 +214,11 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
             param.requires_grad = False
         
         models.append(model)
-        print(f'Loaded model on GPU {gpu_id}: {torch.cuda.get_device_name(gpu_id)}')
+        # Print appropriate message based on actual device
+        if devices[-1].type == 'cpu':
+            print(f'Model using CPU (static quantized)')
+        else:
+            print(f'Loaded model on GPU {gpu_id}: {torch.cuda.get_device_name(gpu_id)}')
     
     return models, devices
 
@@ -226,6 +230,12 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
     # For backward compatibility, use first model/device for single GPU mode
     alphaZeroNet = models[0]
     device = devices[0]
+    
+    if verbose:
+        print(f"DEBUG: Model device: {device}")
+        print(f"DEBUG: Model type: {type(alphaZeroNet)}")
+        import sys
+        sys.stdout.flush()
     
     # Print GPU usage info
     if len(models) > 1:
@@ -274,11 +284,22 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
         else:
             #In all other cases the AI selects the next move
             
+            if verbose:
+                print(f"DEBUG: Starting AI move calculation")
+                print(f"DEBUG: Device for neural network: {device}")
+                import sys
+                sys.stdout.flush()
+            
             starttime = time.perf_counter()
 
             with torch.no_grad():
-
+                if verbose:
+                    print(f"DEBUG: Creating MCTS root")
+                
                 root = MCTS.Root( board, alphaZeroNet )
+                
+                if verbose:
+                    print(f"DEBUG: Starting {num_rollouts} rollouts with {num_threads} threads")
             
                 for i in range( num_rollouts ):
                     root.parallelRollouts( board.copy(), alphaZeroNet, num_threads )

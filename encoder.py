@@ -341,8 +341,10 @@ def callNeuralNetwork( board, neuralNetwork ):
         
     mask = torch.from_numpy( mask )[ None, ... ]
 
-    position = position.to(DEVICE)
-    mask = mask.to(DEVICE)
+    # Get the device from the model parameters
+    model_device = next(neuralNetwork.parameters()).device
+    position = position.to(model_device)
+    mask = mask.to(model_device)
     
     # Convert to half precision if model is FP16
     if next(neuralNetwork.parameters()).dtype == torch.float16:
@@ -388,8 +390,10 @@ def callNeuralNetworkBatched( boards, neuralNetwork ):
 
         masks[ i ] = torch.from_numpy( mask )
 
-    inputs = inputs.to(DEVICE)
-    masks = masks.to(DEVICE)
+    # Get the device from the model parameters
+    model_device = next(neuralNetwork.parameters()).device
+    inputs = inputs.to(model_device)
+    masks = masks.to(model_device)
     
     # Convert to half precision if model is FP16
     if next(neuralNetwork.parameters()).dtype == torch.float16:
