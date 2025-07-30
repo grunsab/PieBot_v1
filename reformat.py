@@ -64,6 +64,7 @@ def process_pgn_chunk(args):
             output_file = os.path.join(output_dir, f'{offset + i + STARTING_OFFSET_FOR_FILENAME}.pgn')
             with open(output_file, 'w') as game_fh:
                 print(game, file=game_fh, end='\n\n')
+                
             
             games_written += 1
             
