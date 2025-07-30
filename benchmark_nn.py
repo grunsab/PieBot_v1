@@ -106,7 +106,7 @@ def generate_diverse_positions(num_positions=10000):
     return positions[:num_positions]
 
 
-def benchmark_neural_network(model_path, num_positions=10000, batch_size=None):
+def benchmark_neural_network(model_path, num_positions=10000, batch_size=None, skip_compile=False):
     """
     Benchmark neural network evaluation performance.
     
@@ -147,7 +147,7 @@ def benchmark_neural_network(model_path, num_positions=10000, batch_size=None):
     model = optimize_for_device(model, device)
     model.eval()
     # Basically if we're using Linux with a CUDA device
-    if hasattr(torch, 'compile') and sys.platform != 'win32' and device.type != "mps":
+    if hasattr(torch, 'compile') and sys.platform != 'win32' and device.type != "mps" and not skip_compile:
         try:
             model = torch.compile(model, mode='reduce-overhead')
             print("Model compiled with torch.compile for additional speedup")
@@ -158,7 +158,7 @@ def benchmark_neural_network(model_path, num_positions=10000, batch_size=None):
 
     # Determine batch size
     if batch_size is None:
-        batch_size = get_batch_size_for_device(base_batch_size=256)
+        batch_size = get_batch_size_for_device(base_batch_size=4096)
     print(f"Using batch size: {batch_size}")
     
     # Generate positions
@@ -242,6 +242,8 @@ def main():
                         help='Batch size for evaluation (auto-detect if not specified)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for position generation')
+    parser.add_argument("--skip-compile", type=bool, default=False,
+                        help="Should we skip the compilation of the neural network")
     
     args = parser.parse_args()
     
@@ -251,7 +253,7 @@ def main():
     torch.manual_seed(args.seed)
     
     # Run benchmark
-    benchmark_neural_network(args.model, args.positions, args.batch_size)
+    benchmark_neural_network(args.model, args.positions, args.batch_size, args.skip_compile)
 
 
 if __name__ == '__main__':

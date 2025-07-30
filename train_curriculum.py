@@ -58,16 +58,46 @@ def phase2_selfplay(args, model_path, iteration):
     output_dir = f"{args.selfplay_dir}/iter_{iteration}"
     os.makedirs(output_dir, exist_ok=True)
     
-    cmd = f"""python3 create_training_games.py \
-        --model {model_path} \
-        --save-format h5 \
-        --rollouts {args.rollouts} \
-        --temperature {args.temperature} \
-        --games-to-play {args.games_per_iter} \
-        --threads {args.threads} \
-        --output-dir {output_dir} \
-        --file-base selfplay_iter{iteration} \
-        --iteration {iteration}"""
+    # Check if multi-GPU generation is enabled
+    if args.selfplay_gpus and args.selfplay_gpus > 1:
+        log(f"Using multi-GPU game generation with {args.selfplay_gpus} GPUs")
+        
+        # Use multi-GPU script
+        cmd = f"""python3 create_training_games_multigpu.py \
+            --model {model_path} \
+            --games-total {args.games_per_iter} \
+            --save-format h5 \
+            --rollouts {args.rollouts} \
+            --temperature {args.temperature} \
+            --threads-per-gpu {args.threads} \
+            --output-dir {output_dir} \
+            --file-base selfplay_iter{iteration} \
+            --iteration {iteration}"""
+        
+        # Add GPU specification if provided
+        if args.selfplay_gpu_ids:
+            cmd += f" --gpus {args.selfplay_gpu_ids}"
+        else:
+            cmd += f" --gpus {','.join(map(str, range(args.selfplay_gpus)))}"
+        
+        # Add CUDA optimization if requested
+        if args.use_cuda_mcts:
+            cmd += " --use-cuda-mcts"
+    else:
+        # Single GPU or CPU generation
+        cmd = f"""python3 create_training_games.py \
+            --model {model_path} \
+            --save-format h5 \
+            --rollouts {args.rollouts} \
+            --temperature {args.temperature} \
+            --games-to-play {args.games_per_iter} \
+            --threads {args.threads} \
+            --output-dir {output_dir} \
+            --file-base selfplay_iter{iteration} \
+            --iteration {iteration}"""
+        
+        if args.use_cuda_mcts:
+            cmd += " --use-cuda-mcts"
     
     run_command(cmd)
     log(f"Generated {args.games_per_iter} games in {output_dir}")
@@ -150,6 +180,9 @@ def main():
     parser.add_argument('--rollouts', type=int, default=40, help='MCTS rollouts per thread')
     parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for move selection')
     parser.add_argument('--threads', type=int, default=20, help='Threads for MCTS')
+    parser.add_argument('--selfplay-gpus', type=int, default=1, help='Number of GPUs for self-play generation')
+    parser.add_argument('--selfplay-gpu-ids', type=str, help='Specific GPU IDs for self-play (e.g., "0,1,2")')
+    parser.add_argument('--use-cuda-mcts', action='store_true', help='Use CUDA-optimized MCTS for game generation')
     
     # Phase 3: Reinforcement learning
     parser.add_argument('--rl-epochs', type=int, default=20, help='Epochs per RL iteration')

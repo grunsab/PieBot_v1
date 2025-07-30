@@ -1,9 +1,9 @@
 
 import argparse
 import os
+import sys
 import chess
 import chess.pgn
-import MCTS
 import torch
 import AlphaZeroNetwork
 import time
@@ -11,6 +11,10 @@ from device_utils import get_optimal_device, optimize_for_device, get_gpu_count
 from RLDataset import SelfPlayDataCollector
 import numpy as np
 import encoder
+
+# Import MCTS module (standard or CUDA-optimized)
+MCTS = None
+USE_CUDA_MCTS = False
 
 def tolist( move_generator ):
     """
@@ -90,7 +94,23 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
     return models, devices
 
 
-def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, output_directory, offset, file_base, games_to_play, gpu_ids=None, save_format='pgn', temperature=1.0, iteration=0 ):
+def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, output_directory, offset, file_base, games_to_play, gpu_ids=None, save_format='pgn', temperature=1.0, iteration=0, use_cuda_mcts=False ):
+    global MCTS, USE_CUDA_MCTS
+    
+    # Import appropriate MCTS module
+    if use_cuda_mcts:
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import MCTS_cuda_optimized as MCTS
+            USE_CUDA_MCTS = True
+            print("Using CUDA-optimized MCTS")
+        except ImportError:
+            print("WARNING: CUDA-optimized MCTS not available, falling back to standard MCTS")
+            import MCTS
+            USE_CUDA_MCTS = False
+    else:
+        import MCTS
+        USE_CUDA_MCTS = False
 
     def get_fileName(games_played, offset, file_base, extension='pgn'):
         return f'{output_directory}/{file_base}_{games_played + offset}.{extension}'
@@ -262,6 +282,7 @@ if __name__=='__main__':
     parser.add_argument('--save-format', choices=['pgn', 'h5'], default='pgn', help='Output format: pgn for games, h5 for training data (default: pgn)')
     parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for move selection (0 for greedy, >0 for exploration, default: 1.0)')
     parser.add_argument('--iteration', type=int, default=0, help='Training iteration number for metadata (default: 0)')
+    parser.add_argument('--use-cuda-mcts', action='store_true', help='Use CUDA-optimized MCTS implementation')
     parser.set_defaults( verbose=False, mode='s', color='w', rollouts=10, threads=20)
     parser = parser.parse_args()
     
@@ -271,5 +292,5 @@ if __name__=='__main__':
         gpu_ids = [int(gpu_id.strip()) for gpu_id in parser.gpus.split(',')]
 
     main( parser.model, parser.mode, parseColor( parser.color ), parser.rollouts, parser.threads, parser.fen, parser.verbose, parser.output_dir, 
-        parser.offset, parser.file_base, parser.games_to_play, gpu_ids, parser.save_format, parser.temperature, parser.iteration )
+        parser.offset, parser.file_base, parser.games_to_play, gpu_ids, parser.save_format, parser.temperature, parser.iteration, parser.use_cuda_mcts )
 
