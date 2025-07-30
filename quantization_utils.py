@@ -169,11 +169,11 @@ def create_calibration_dataset(num_positions: int = 1000) -> List[Tuple[torch.Te
             board.push(move)
         
         # Encode the position
-        input_planes = encoder.encode_board(board)
+        input_planes = encoder.encodePosition(board)
         input_tensor = torch.tensor(input_planes, dtype=torch.float32).unsqueeze(0)
         
         # Create legal move mask
-        mask = encoder.create_move_mask(board)
+        mask = encoder.getLegalMoveMask(board)
         mask_tensor = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)
         
         calibration_data.append((input_tensor, mask_tensor))
