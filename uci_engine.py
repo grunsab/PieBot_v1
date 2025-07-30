@@ -209,11 +209,37 @@ class UCIEngine:
                     self.model.eval()
                     if self.verbose:
                         print(f"info string Loaded static quantized model (TorchScript) on CPU")
-                except:
-                    # Load using quantization_utils
-                    self.model = load_quantized_model(full_path, cpu_device, 20, 256)
+                except Exception as e:
                     if self.verbose:
-                        print(f"info string Loaded static quantized model on CPU")
+                        print(f"info string Warning: Could not load as TorchScript: {e}")
+                    try:
+                        # Try using quantization_utils
+                        self.model = load_quantized_model(full_path, cpu_device, 20, 256)
+                        if self.verbose:
+                            print(f"info string Loaded static quantized model on CPU")
+                    except Exception as e2:
+                        if self.verbose:
+                            print(f"info string Warning: Static quantization not supported on this platform: {e2}")
+                            print("info string Falling back to loading as regular model...")
+                        # Fall back to loading as regular non-quantized model
+                        # Extract the base model weights from the quantized state dict
+                        self.model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
+                        # Create a new state dict with dequantized weights
+                        new_state_dict = {}
+                        for key, value in weights.items():
+                            if key.startswith('base_model.'):
+                                new_key = key.replace('base_model.', '')
+                                # Skip quantization-specific keys
+                                if any(x in new_key for x in ['.scale', '.zero_point', '_packed_params']):
+                                    continue
+                                # Dequantize if needed
+                                if hasattr(value, 'dequantize'):
+                                    new_state_dict[new_key] = value.dequantize()
+                                else:
+                                    new_state_dict[new_key] = value
+                        self.model.load_state_dict(new_state_dict, strict=False)
+                        if self.verbose:
+                            print(f"info string Loaded dequantized model on CPU")
                 self.device = cpu_device
                 device_str = 'CPU (static quantized model)'
                 if self.verbose:
