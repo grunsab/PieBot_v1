@@ -49,6 +49,7 @@ class UltraPerformanceMCTSEngine:
         self.nodes = []
         self.children = {}  # node_idx -> list of child indices
         self.node_lookup = {}  # board_hash -> node_idx
+        self._pending_expansions = {}  # node_idx -> (board, move_probs)
         
         # Leaf collection buffers (double buffering)
         self.leaf_buffer_size = batch_size
@@ -199,9 +200,13 @@ class UltraPerformanceMCTSEngine:
                 
                 # Expand node (check if node still exists)
                 if node_idx < len(self.nodes):
-                    # Just expand the node - don't modify its statistics
-                    # The node was already visited during selection
-                    self._expand_node(node_idx, board, move_probs)
+                    # Check if this node has pending expansion (e.g., root on first visit)
+                    if node_idx in self._pending_expansions:
+                        stored_board, stored_priors = self._pending_expansions.pop(node_idx)
+                        self._expand_node(node_idx, stored_board, stored_priors)
+                    else:
+                        # Normal expansion
+                        self._expand_node(node_idx, board, move_probs)
                     
                     # For an expanded node, we backup the value from the neural network
                     # Note: the value is from the perspective of the expanded position
@@ -232,6 +237,8 @@ class UltraPerformanceMCTSEngine:
             root_idx = self.node_lookup[root_hash]
             if self.verbose:
                 print(f"Reusing existing tree with root at index {root_idx}")
+            # Clear pending expansions when reusing tree
+            self._pending_expansions.clear()
         else:
             # Need to create new root
             # Clear tree only if we can't reuse
@@ -256,7 +263,11 @@ class UltraPerformanceMCTSEngine:
             # Root starts with N=1 and sum_Q=root_value (already converted to win probability)
             self.nodes.append(MCTSNode(root_hash, 1, root_value, 1.0, None, -1))
             self.node_lookup[root_hash] = root_idx
+            # Expand root immediately to avoid race conditions
+            # This differs from original MCTS but is necessary for the parallel architecture
             self._expand_node(root_idx, board, root_priors)
+            # Clear pending expansions
+            self._pending_expansions = {}
         
         # Reset simulation counter
         with self.simulation_lock:
@@ -279,13 +290,26 @@ class UltraPerformanceMCTSEngine:
         
         # Ensure all leaves are processed
         with self.buffer_lock:
-            # Force evaluation of any remaining leaves
-            for buffer in self.leaf_buffers:
-                if buffer['count'] > 0:
-                    self.buffer_ready.notify()
+            # Notify GPU thread about any remaining leaves
+            self.buffer_ready.notify_all()
         
-        # Give GPU thread time to process final batch
-        time.sleep(0.1)
+        # Wait for all leaves to be processed
+        # Check periodically if all simulations have been backed up
+        max_wait = 2.0  # Maximum 2 seconds
+        wait_interval = 0.01
+        waited = 0.0
+        
+        while waited < max_wait:
+            with self.buffer_lock:
+                # Check if all buffers are empty
+                all_empty = all(buf['count'] == 0 for buf in self.leaf_buffers)
+                if all_empty:
+                    break
+                # Wake up GPU thread if needed
+                self.buffer_ready.notify_all()
+            
+            time.sleep(wait_interval)
+            waited += wait_interval
         
         elapsed = time.time() - start_time
         if self.verbose:
@@ -294,7 +318,17 @@ class UltraPerformanceMCTSEngine:
         
         # Select best move
         root_idx = self.node_lookup[root_hash]
-        return self._select_best_move(root_idx, temperature=0)  # Use temperature=0 for strong play
+        best_move = self._select_best_move(root_idx, temperature=0)  # Use temperature=0 for strong play
+        
+        # Safety check: if no move found, return first legal move
+        if best_move is None and not board.is_game_over():
+            legal_moves = list(board.legal_moves)
+            if legal_moves:
+                if self.verbose:
+                    print("Warning: No move selected by MCTS, using first legal move")
+                best_move = legal_moves[0]
+        
+        return best_move
     
     def _leaf_collector(self, board, target_simulations):
         """Worker thread that collects leaf nodes"""
@@ -343,21 +377,35 @@ class UltraPerformanceMCTSEngine:
                 if node_idx not in self.children:
                     # Add to leaf buffer
                     with self.buffer_lock:
-                        buffer = self.leaf_buffers[self.current_buffer]
-                        
-                        # Check if buffer is full
-                        if buffer['count'] >= self.batch_size:
-                            # Switch to other buffer
-                            self.current_buffer = 1 - self.current_buffer
-                            self.buffer_ready.notify()
+                        # Wait until we have a buffer with space
+                        while self.running:
                             buffer = self.leaf_buffers[self.current_buffer]
-                        
-                        # Add to buffer if there's space
-                        if buffer['count'] < self.batch_size:
-                            buffer['boards'].append(sim_board.copy())
-                            buffer['node_indices'].append(node_idx)
-                            buffer['paths'].append(path.copy())
-                            buffer['count'] += 1
+                            
+                            # Check if current buffer has space
+                            if buffer['count'] < self.batch_size:
+                                # Add to buffer
+                                buffer['boards'].append(sim_board.copy())
+                                buffer['node_indices'].append(node_idx)
+                                buffer['paths'].append(path.copy())
+                                buffer['count'] += 1
+                                
+                                # If buffer is now full, notify GPU thread
+                                if buffer['count'] >= self.batch_size:
+                                    self.buffer_ready.notify()
+                                    # Switch to other buffer for next simulation
+                                    self.current_buffer = 1 - self.current_buffer
+                                break
+                            
+                            # Current buffer is full, try other buffer
+                            other_buffer = 1 - self.current_buffer
+                            if self.leaf_buffers[other_buffer]['count'] < self.batch_size:
+                                # Switch to other buffer
+                                self.current_buffer = other_buffer
+                                continue
+                            
+                            # Both buffers full - wait for GPU to process
+                            self.buffer_ready.notify()  # Wake up GPU if sleeping
+                            self.buffer_ready.wait(timeout=0.01)  # Wait for space
                     break
                 
                 # Select child
@@ -382,8 +430,9 @@ class UltraPerformanceMCTSEngine:
         
         # Flush any remaining leaves
         with self.buffer_lock:
+            # Notify GPU thread if there are any pending leaves
             if any(buf['count'] > 0 for buf in self.leaf_buffers):
-                self.buffer_ready.notify()
+                self.buffer_ready.notify_all()
     
     def _select_child_with_virtual_loss(self, children_indices):
         """Select best child using PUCT formula with virtual loss"""
@@ -391,22 +440,35 @@ class UltraPerformanceMCTSEngine:
         if not valid_children:
             return -1
         
-        # Get parent node to calculate parent visits correctly
-        if valid_children:
-            first_child = self.nodes[valid_children[0]]
-            if first_child.parent_idx >= 0:
-                parent_node = self.nodes[first_child.parent_idx]
-                parent_visits = parent_node.visits + parent_node.virtual_loss
-            else:
-                # Fallback for root
-                parent_visits = sum(
-                    self.nodes[idx].visits + self.nodes[idx].virtual_loss 
-                    for idx in valid_children
-                )
-        else:
-            parent_visits = 1
-            
-        sqrt_parent = math.sqrt(parent_visits) if parent_visits > 0 else 1.0
+        # Check if all children are unvisited
+        all_unvisited = all(
+            self.nodes[idx].visits + self.nodes[idx].virtual_loss == 0 
+            for idx in valid_children
+        )
+        
+        # If all unvisited, add small random noise to break ties and encourage exploration
+        if all_unvisited:
+            import random
+            # Select based on prior + small noise
+            best_idx = -1
+            best_score = -float('inf')
+            for child_idx in valid_children:
+                child = self.nodes[child_idx]
+                # Add small random noise (±5% of prior)
+                score = child.prior * (1.0 + 0.1 * (random.random() - 0.5))
+                if score > best_score:
+                    best_score = score
+                    best_idx = child_idx
+            return best_idx
+        
+        # Calculate parent visits as sum of all child visits + virtual losses + 1
+        # This ensures the exploration term grows as more children are selected
+        total_child_visits = sum(
+            self.nodes[idx].visits + self.nodes[idx].virtual_loss 
+            for idx in valid_children
+        )
+        parent_visits = max(1, total_child_visits + 1)
+        sqrt_parent = math.sqrt(parent_visits)
         
         best_idx = -1
         best_puct = -float('inf')
@@ -421,8 +483,8 @@ class UltraPerformanceMCTSEngine:
                 # Child stores value from its perspective, we need parent's perspective
                 q_value = 1.0 - (child.total_value / visits_with_vl)
             else:
-                # Unvisited nodes get a neutral Q-value
-                # This matches original MCTS where getQ() returns 0 for unvisited edges
+                # Unvisited nodes: use a default Q-value
+                # The original MCTS returns 0.0 for unvisited edges
                 q_value = 0.0
             
             puct = q_value + self.c_puct * child.prior * sqrt_parent / (1 + visits_with_vl)
@@ -568,10 +630,11 @@ class UltraPerformanceMCTSEngine:
             best_move = None
             
             for child_idx in children:
-                child = self.nodes[child_idx]
-                if child.visits > best_visits:
-                    best_visits = child.visits
-                    best_move = child.move
+                if child_idx < len(self.nodes):  # Bounds check
+                    child = self.nodes[child_idx]
+                    if child.visits > best_visits:
+                        best_visits = child.visits
+                        best_move = child.move
             
             return best_move
         else:
