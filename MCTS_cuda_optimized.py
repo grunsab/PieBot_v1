@@ -479,7 +479,7 @@ class CudaRoot(CudaNode):
         for parent, parent_edge_idx in reversed(path):
             parent.N += 1
             parent.sum_Q += 1.0 - Q
-            parent.update_edge(parent_edge_idx, 1.0 - Q, 1)
+            parent.update_edge_stats(parent_edge_idx, 1.0 - Q, 1)
             Q = 1.0 - Q
     
     def parallelRollouts(self, board, neuralNetwork, num_threads):
