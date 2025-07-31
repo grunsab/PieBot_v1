@@ -211,7 +211,14 @@ class CudaNode:
                     best_uct = uct
                     best_idx = i
         
-        return self.moves[best_idx], best_idx
+        class EdgeWrapper:
+            def __init__(self, move):
+                self.move = move
+            
+            def getMove(self):
+                return self.move
+        
+        return EdgeWrapper(self.moves[best_idx]), best_idx
     
     def expand_edge(self, edge_idx, board, new_Q, move_probabilities):
         """Expand an edge by creating child node."""
