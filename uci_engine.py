@@ -345,8 +345,7 @@ class UCIEngine:
                 print(f"info depth {actual_rollouts} score cp {score} nodes {actual_rollouts} nps {nps} pv {move} ")
                 sys.stdout.flush()
 
-
-                bestmove = edge.getMove()        
+                bestmove = move   
                 self.best_move = bestmove.uci()
                 sys.stdout.flush()
                         
