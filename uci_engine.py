@@ -19,7 +19,7 @@ import time
 import threading
 from queue import Queue
 import AlphaZeroNetwork
-import MCTS
+import MCTS_profiling_speedups as MCTS
 from device_utils import get_optimal_device, optimize_for_device
 from quantization_utils import load_quantized_model
 
@@ -380,8 +380,9 @@ class UCIEngine:
                 self.mcts_engine.parallelRollouts(self.board, self.model, self.threads)
             
             # Get best move
-            best_move = self.mcts_engine.bestMove(self.board)
-            
+            edge = self.mcts_engine.maxNSelect()
+            best_move = edge.getMove()
+
             elapsed_time = time.time() - start_time
             
             # Update time manager with actual performance
@@ -596,6 +597,8 @@ class UCIEngine:
                 elif command == "ucinewgame":
                     # Reset board for new game
                     self.board = chess.Board()
+                    if self.mcts_engine:
+                        self.mcts_engine.clear_caches()
                 elif self.verbose:
                     print(f"info string Unknown command: {command}")
                     sys.stdout.flush()
