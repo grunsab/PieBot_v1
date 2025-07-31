@@ -128,6 +128,11 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
             elapsed = endtime - starttime
 
             Q = root.getQ()
+            # Ensure Q is a scalar value
+            if hasattr(Q, 'item'):
+                Q = Q.item()
+            elif hasattr(Q, '__len__'):
+                Q = float(Q)
 
             N = root.getN()
 
