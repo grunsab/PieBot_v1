@@ -122,6 +122,10 @@ def filter_games_by_rating_and_time_control(input_file, output_directory, min_ra
             
             if games_processed % 1000 == 0 and games_processed > 0:
                 print(f"Processed {games_processed} games out of approximately 2.1MM games")
+            
+            # There are approximately 2.14MM games here
+            if games_processed >= 2140000:
+                break
 
     
     print(f"\nFiltering complete!")
