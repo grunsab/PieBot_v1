@@ -151,8 +151,8 @@ class UCIEngine:
             verbose: Whether to output debug information
         """
         self.model_path = model_path
-        device, device_str = get_optimal_device() 
-        if device.type == "mps":
+        self.device, self.device_str = get_optimal_device() 
+        if self.device.type == "mps":
             self.threads = threads * 8
         else:
             self.threads = threads * 32
@@ -525,7 +525,10 @@ class UCIEngine:
         
         if name == "threads":
             try:
-                self.threads = int(value)
+                if self.device.type == "mps":
+                    self.threads = int(value) * 8
+                else:
+                    self.threads = int(value) * 32
                 self.time_manager.threads = self.threads
             except:
                 pass

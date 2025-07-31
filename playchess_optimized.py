@@ -77,14 +77,15 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
 
         else:
             #In all other cases the AI selects the next move
-            
+            starttime = time.perf_counter()
+
             if verbose:
                 print(f"DEBUG: Starting AI move calculation")
                 print(f"DEBUG: Device for neural network: {device}")
                 import sys
                 sys.stdout.flush()
             
-            starttime = time.perf_counter()
+            
 
             with torch.no_grad():
                 if verbose:
@@ -98,27 +99,13 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
                 for i in range( num_rollouts ):
                     root.parallelRollouts( board.copy(), alphaZeroNet, num_threads )
 
-            endtime = time.perf_counter()
-
-            elapsed = endtime - starttime
 
             Q = root.getQ()
-
+            
             N = root.getN()
 
-            nps = N / elapsed
-
             same_paths = root.same_paths
-       
-            if verbose:
-                #In verbose mode, print some statistics
-                print( root.getStatisticsString() )
-                print( 'total rollouts {} Q {:0.3f} duplicate paths {} elapsed {:0.2f} nps {:0.2f}'.format( int( N ), Q, same_paths, elapsed, nps ) )
-                
-                # Print cache statistics
-                print(f'Cache stats - Positions: {len(MCTS.position_cache)}, Legal moves: {len(MCTS.legal_moves_cache)}')
-                print(f'Pool stats - Nodes: {len(MCTS.node_pool)}, Edges: {len(MCTS.edge_pool)}')
-     
+
             edge = root.maxNSelect()
 
             bestmove = edge.getMove()
@@ -137,6 +124,20 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
                 MCTS.clear_caches()
                 if verbose:
                     print("Cleared caches after 50 moves")
+
+            endtime = time.perf_counter()
+            elapsed = endtime - starttime
+            nps = N / elapsed
+
+
+            if verbose:
+                #In verbose mode, print some statistics
+                print( root.getStatisticsString() )
+                print( 'total rollouts {} Q {:0.3f} duplicate paths {} elapsed {:0.2f} nps {:0.2f}'.format( int( N ), Q, same_paths, elapsed, nps ) )
+                
+                # Print cache statistics
+                print(f'Cache stats - Positions: {len(MCTS.position_cache)}, Legal moves: {len(MCTS.legal_moves_cache)}')
+                print(f'Pool stats - Nodes: {len(MCTS.node_pool)}, Edges: {len(MCTS.edge_pool)}')
 
         if mode == 'p':
             #In profile mode, exit after the first move
