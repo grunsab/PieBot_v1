@@ -259,7 +259,7 @@ def main():
     
     # Phase 3: Reinforcement learning
     parser.add_argument('--rl-epochs', type=int, default=20, help='Epochs per RL iteration')
-    parser.add_argument('--rl-lr', type=float, default=0.001, help='Learning rate for RL')
+    parser.add_argument('--rl-lr', type=float, default=0.01, help='Learning rate for RL')
     parser.add_argument('--iterations', type=int, default=80, help='Number of RL iterations')
     
     # Training configuration

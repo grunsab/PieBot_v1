@@ -54,7 +54,7 @@ class TimeManager:
         if device.type == "mps":
             self.rollouts_per_second = 450
         else:
-            self.rollouts_per_second = 3000  # Average for RTX 5080
+            self.rollouts_per_second = 1900  # Average for RTX 5080
         
         # Track actual performance
         self.measured_rollouts_per_second = None
