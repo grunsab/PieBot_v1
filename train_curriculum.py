@@ -38,8 +38,10 @@ def run_command(cmd, check=True):
 def phase1_supervised(args):
     """Phase 1: Supervised learning on CCRL dataset"""
     log("Starting Phase 1: Supervised Learning")
+
+    filepath_of_model = f"CurriculumAlphaZeroNet_{args.blocks}x{args.filters}.pt"
     
-    cmd = f"python3 train.py --mode supervised --epochs {args.supervised_epochs} --lr {args.supervised_lr}"
+    cmd = f"python3 train.py --mode supervised --epochs {args.supervised_epochs} --lr {args.supervised_lr} --output {filepath_of_model}"
     
     if args.distributed:
         cmd = f"python3 -m torch.distributed.launch --nproc_per_node={args.gpus} train_distributed.py --mode supervised --epochs {args.supervised_epochs} --lr {args.supervised_lr}"
@@ -49,7 +51,7 @@ def phase1_supervised(args):
     
     run_command(cmd)
     log("Phase 1 Complete")
-    return f"AlphaZeroNet_{args.blocks}x{args.filters}.pt"
+    return filepath_of_model
 
 def phase2_selfplay(args, model_path, iteration):
     """Phase 2: Generate self-play games"""
@@ -108,7 +110,7 @@ def phase3_reinforcement(args, model_path, iteration):
     log(f"Starting Phase 3: Reinforcement Learning (Iteration {iteration})")
     log(f"Training on all games from {args.selfplay_dir} with weight decay {args.weight_decay}")
     
-    output_model = f"AlphaZeroNet_{args.blocks}x{args.filters}_rl_iter{iteration}.pt"
+    output_model = f"CurriculumAlphaZeroNet_{args.blocks}x{args.filters}_rl_iter{iteration}.pt"
     
     cmd = f"""python3 train.py \
         --mode rl \
@@ -170,23 +172,23 @@ def main():
     parser.add_argument('--filters', type=int, default=256, help='Number of filters')
     
     # Phase 1: Supervised learning
-    parser.add_argument('--supervised-epochs', type=int, default=20, help='Epochs for supervised learning')
+    parser.add_argument('--supervised-epochs', type=int, default=100, help='Epochs for supervised learning')
     parser.add_argument('--supervised-lr', type=float, default=0.0005, help='Learning rate for supervised')
     parser.add_argument('--resume-supervised', type=str, help='Resume supervised training from checkpoint')
     parser.add_argument('--skip-supervised', action='store_true', help='Skip supervised phase')
     
     # Phase 2: Self-play
-    parser.add_argument('--games-per-iter', type=int, default=10000, help='Games per iteration')
-    parser.add_argument('--rollouts', type=int, default=40, help='MCTS rollouts per thread')
+    parser.add_argument('--games-per-iter', type=int, default=20000, help='Games per iteration')
+    parser.add_argument('--rollouts', type=int, default=20, help='MCTS rollouts per thread')
     parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for move selection')
-    parser.add_argument('--threads', type=int, default=20, help='Threads for MCTS')
+    parser.add_argument('--threads', type=int, default=40, help='Threads for MCTS')
     parser.add_argument('--selfplay-gpus', type=int, default=1, help='Number of GPUs for self-play generation')
     parser.add_argument('--selfplay-gpu-ids', type=str, help='Specific GPU IDs for self-play (e.g., "0,1,2")')
     parser.add_argument('--use-cuda-mcts', action='store_true', help='Use CUDA-optimized MCTS for game generation')
     
     # Phase 3: Reinforcement learning
     parser.add_argument('--rl-epochs', type=int, default=20, help='Epochs per RL iteration')
-    parser.add_argument('--rl-lr', type=float, default=0.0005, help='Learning rate for RL')
+    parser.add_argument('--rl-lr', type=float, default=0.001, help='Learning rate for RL')
     parser.add_argument('--iterations', type=int, default=80, help='Number of RL iterations')
     
     # Training configuration
