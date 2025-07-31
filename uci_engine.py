@@ -147,7 +147,7 @@ class TimeManager:
 class UCIEngine:
     """UCI Protocol handler for AlphaZero chess engine."""
     
-    def __init__(self, model_path=None, threads=128, verbose=False):
+    def __init__(self, model_path=None, threads=64, verbose=False):
         """
         Initialize UCI engine.
         
@@ -590,7 +590,7 @@ def main():
     parser.add_argument("--model", help="Path to model file", 
                        default="AlphaZeroNet_20x256_distributed_fp16.pt")
     parser.add_argument("--threads", type=int, help="Number of threads", 
-                       default=128)
+                       default=64)
     parser.add_argument("--verbose", action="store_true", 
                        help="Enable verbose output")
     
