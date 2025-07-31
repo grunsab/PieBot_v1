@@ -366,7 +366,9 @@ class UCIEngine:
                     MCTS.clear_batch_queue()
                 if hasattr(self.mcts_engine, 'cleanup'):
                     self.mcts_engine.cleanup()
-                    
+                if hasattr(MCTS, 'clear_pools'):
+                    MCTS.clear_pools()
+
 
 
                 same_paths = getattr(self.mcts_engine, 'same_paths', 0)
