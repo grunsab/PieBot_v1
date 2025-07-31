@@ -341,9 +341,18 @@ class UCIEngine:
                 
                 edge = self.mcts_engine.maxNSelect()
                 move = edge.getMove()
+                Q = self.mcts_engine.getQ()
+                # Ensure Q is a scalar value
+                if hasattr(Q, 'item'):
+                    Q = Q.item()
+                elif hasattr(Q, '__len__'):
+                    Q = float(Q)
+
+
+                score = int(Q * 1000 - 500)
                 elapsed = time.time() - start_time
                 nps = int(actual_rollouts / elapsed) if elapsed > 0 else 0
-                print(f"info depth {actual_rollouts} nodes {actual_rollouts} nps {nps} pv {move} ")
+                print(f"info depth {actual_rollouts} score cp {score} nodes {actual_rollouts} nps {nps} pv {move} ")
                 sys.stdout.flush()
 
                 bestmove = move   
