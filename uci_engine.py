@@ -19,7 +19,7 @@ import time
 import threading
 from queue import Queue
 import AlphaZeroNetwork
-#import MCTS_profiling_speedups as MCTS
+import MCTS_profiling_speedups as MCTS
 import MCTS
 from device_utils import get_optimal_device, optimize_for_device
 from quantization_utils import load_quantized_model
@@ -28,7 +28,7 @@ from quantization_utils import load_quantized_model
 class TimeManager:
     """Manages time allocation for moves based on game time constraints."""
     
-    def __init__(self, base_rollouts=1500, base_time=1.0, threads=128):
+    def __init__(self, base_rollouts=10000, base_time=1.0, threads=2000):
         """
         Initialize time manager.
         
@@ -145,13 +145,13 @@ class UCIEngine:
             verbose: Whether to output debug information
         """
         self.model_path = model_path
-        self.threads = threads
+        self.threads = threads * 16
         self.verbose = verbose
         self.board = chess.Board()
         self.model = None
         self.mcts_engine = None
         self.device = None
-        self.time_manager = TimeManager(threads=threads)
+        self.time_manager = TimeManager(threads=self.threads)
         self.search_thread = None
         self.stop_search = threading.Event()
         self.best_move = None
@@ -192,97 +192,93 @@ class UCIEngine:
                 print(f"info string Loading model on device: {device_str}")
                 sys.stdout.flush()
                 
-            # Always load to CPU first to check model type
-            weights = torch.load(full_path, map_location='cpu')
+            # # Always load to CPU first to check model type
             
-            # Check if it's a static quantized model first
-            # Static quantized models have 'quant.scale' and 'base_model.*' keys
-            is_static_quantized = (isinstance(weights, dict) and 
-                                 'quant.scale' in weights and 
-                                 any(k.startswith('base_model.') for k in weights.keys()))
+            # # Check if it's a static quantized model first
+            # # Static quantized models have 'quant.scale' and 'base_model.*' keys
+            # is_static_quantized = (isinstance(weights, dict) and 
+            #                      'quant.scale' in weights and 
+            #                      any(k.startswith('base_model.') for k in weights.keys()))
             
-            if is_static_quantized or (isinstance(weights, dict) and weights.get('model_type') == 'static_quantized'):
-                # Static quantized models run on CPU
-                cpu_device = torch.device('cpu')
-                try:
-                    # Try loading as TorchScript
-                    self.model = torch.jit.load(full_path, map_location=cpu_device)
-                    self.model.eval()
+            # if is_static_quantized or (isinstance(weights, dict) and weights.get('model_type') == 'static_quantized'):
+            #     # Static quantized models run on CPU
+            #     cpu_device = torch.device('cpu')
+            #     try:
+            #         # Try loading as TorchScript
+            #         self.model = torch.jit.load(full_path, map_location=cpu_device)
+            #         self.model.eval()
+            #         if self.verbose:
+            #             print(f"info string Loaded static quantized model (TorchScript) on CPU")
+            #         # Update device to CPU for static quantized models
+            #         self.device = cpu_device
+            #         device_str = 'CPU (static quantized model)'
+            #     except Exception as e:
+            #         if self.verbose:
+            #             print(f"info string Warning: Could not load as TorchScript: {e}")
+            #         try:
+            #             # Try using quantization_utils
+            #             self.model = load_quantized_model(full_path, cpu_device, 20, 256)
+            #             if self.verbose:
+            #                 print(f"info string Loaded static quantized model on CPU")
+            #             # Update device to CPU for static quantized models
+            #             self.device = cpu_device
+            #             device_str = 'CPU (static quantized model)'
+            #         except Exception as e2:
+            #             if self.verbose:
+            #                 print(f"info string Warning: Static quantization not supported on this platform: {e2}")
+            #                 print("info string Falling back to loading as regular model...")
+            #             # Fall back to loading as regular non-quantized model
+            #             # Extract the base model weights from the quantized state dict
+            #             self.model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
+            #             # Create a new state dict with dequantized weights
+            #             new_state_dict = {}
+            #             for key, value in weights.items():
+            #                 if key.startswith('base_model.'):
+            #                     new_key = key.replace('base_model.', '')
+            #                     # Skip quantization-specific keys
+            #                     if any(x in new_key for x in ['.scale', '.zero_point', '_packed_params']):
+            #                         continue
+            #                     # Dequantize if needed
+            #                     if hasattr(value, 'dequantize'):
+            #                         new_state_dict[new_key] = value.dequantize()
+            #                     else:
+            #                         new_state_dict[new_key] = value
+            #             self.model.load_state_dict(new_state_dict, strict=False)
+            #             # Move to original device since we're using a regular model now
+            #             self.model.to(self.device)
+            #             self.model.eval()
+            #             if self.verbose:
+            #                 print(f"info string Loaded dequantized model on {device_str}")
+            #     if self.verbose:
+            #         print(f"info string Using device: {device_str}")
+            #         sys.stdout.flush()
+            # else:
+            #     # Create regular model
+            self.model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
+            weights = torch.load(full_path, map_location=self.device)
+            
+            # Handle different model formats
+            if isinstance(weights, dict) and 'model_state_dict' in weights:
+                # FP16 model format
+                self.model.load_state_dict(weights['model_state_dict'])
+                if weights.get('model_type') == 'fp16':
+                    self.model = self.model.half()
                     if self.verbose:
-                        print(f"info string Loaded static quantized model (TorchScript) on CPU")
-                    # Update device to CPU for static quantized models
-                    self.device = cpu_device
-                    device_str = 'CPU (static quantized model)'
-                except Exception as e:
-                    if self.verbose:
-                        print(f"info string Warning: Could not load as TorchScript: {e}")
-                    try:
-                        # Try using quantization_utils
-                        self.model = load_quantized_model(full_path, cpu_device, 20, 256)
-                        if self.verbose:
-                            print(f"info string Loaded static quantized model on CPU")
-                        # Update device to CPU for static quantized models
-                        self.device = cpu_device
-                        device_str = 'CPU (static quantized model)'
-                    except Exception as e2:
-                        if self.verbose:
-                            print(f"info string Warning: Static quantization not supported on this platform: {e2}")
-                            print("info string Falling back to loading as regular model...")
-                        # Fall back to loading as regular non-quantized model
-                        # Extract the base model weights from the quantized state dict
-                        self.model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
-                        # Create a new state dict with dequantized weights
-                        new_state_dict = {}
-                        for key, value in weights.items():
-                            if key.startswith('base_model.'):
-                                new_key = key.replace('base_model.', '')
-                                # Skip quantization-specific keys
-                                if any(x in new_key for x in ['.scale', '.zero_point', '_packed_params']):
-                                    continue
-                                # Dequantize if needed
-                                if hasattr(value, 'dequantize'):
-                                    new_state_dict[new_key] = value.dequantize()
-                                else:
-                                    new_state_dict[new_key] = value
-                        self.model.load_state_dict(new_state_dict, strict=False)
-                        # Move to original device since we're using a regular model now
-                        self.model.to(self.device)
-                        self.model.eval()
-                        if self.verbose:
-                            print(f"info string Loaded dequantized model on {device_str}")
-                if self.verbose:
-                    print(f"info string Using device: {device_str}")
-                    sys.stdout.flush()
+                        print(f"info string Loaded FP16 model on {device_str}")
+                        sys.stdout.flush()
             else:
-                # Create regular model
-                self.model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
-                
-                # Handle different model formats
-                if isinstance(weights, dict) and 'model_state_dict' in weights:
-                    # FP16 model format
-                    self.model.load_state_dict(weights['model_state_dict'])
-                    if weights.get('model_type') == 'fp16':
-                        self.model = self.model.half()
-                        if self.verbose:
-                            print(f"info string Loaded FP16 model on {device_str}")
-                            sys.stdout.flush()
-                else:
-                    # Regular model format
-                    self.model.load_state_dict(weights)
-                
-                self.model = optimize_for_device(self.model, self.device)
-                self.model.eval()
+                # Regular model format
+                self.model.load_state_dict(weights)
+            
+            self.model = optimize_for_device(self.model, self.device)
+            self.model.eval()
             
             # Disable gradients for inference
             for param in self.model.parameters():
                 param.requires_grad = False
-            
-            # Initialize MCTS
-            self.mcts_engine = MCTS.Root(self.board, self.model)
-                
+                            
             if self.verbose:
                 print(f"info string Model loaded successfully")
-                print(f"info string MCTS initialized")
                 sys.stdout.flush()
             return True
             
@@ -361,56 +357,83 @@ class UCIEngine:
                 sys.stdout.flush()
                 return
                 
-            if self.mcts_engine is None:
-                print(f"info string ERROR: No MCTS engine loaded")
-                sys.stdout.flush()
-                return
-            
-            start_time = time.time()
-            
-            # Run search
-            self.mcts_engine.parallelRollouts(self.board, self.model, self.threads)
-            
-            # Continue rollouts
-            rollouts_per_iteration = self.threads
-            num_iterations = max(1, rollouts // rollouts_per_iteration)
-            
-            for _ in range(num_iterations - 1):
-                if self.stop_search.is_set():
-                    break
-                self.mcts_engine.parallelRollouts(self.board, self.model, self.threads)
-            
-            # Get best move
-            edge = self.mcts_engine.maxNSelect()
-            best_move = edge.getMove()
-
-            elapsed_time = time.time() - start_time
-            
-            # Update time manager with actual performance
-            if elapsed_time > 0:
-                self.time_manager.update_performance(rollouts, elapsed_time)
-            
-            # Set best move
-            if best_move:
-                # Check for repetition
-                test_board = self.board.copy()
-                test_board.push(best_move)
+            with torch.no_grad():
+                self.mcts_engine = MCTS.Root(self.board, self.model)
+                # Perform rollouts
+                # parallelRollouts performs 'threads' rollouts per call
+                # So we need to call it rollouts/threads times
+                num_iterations = max(1, rollouts // self.threads)
+                remainder = rollouts % self.threads
                 
-                if test_board.can_claim_threefold_repetition():
+                start_time = time.time()
+                
+                for i in range(num_iterations):
+                    if self.stop_search.is_set():
+                        break
+                    self.mcts_engine.parallelRollouts(self.board.copy(), self.model, self.threads)
+                    
+                    # Output progress periodically
+                    if (i + 1) % max(1, num_iterations // 10) == 0 or i == num_iterations - 1:
+                        current_rollouts = (i + 1) * self.threads
+                        current_edge = self.mcts_engine.maxNSelect()
+                        if current_edge:
+                            move = current_edge.getMove()
+                            score = int(current_edge.getQ() * 1000 - 500)
+                            elapsed = time.time() - start_time
+                            nps = int(current_rollouts / elapsed) if elapsed > 0 else 0
+                            print(f"info depth {current_rollouts} score cp {score} nodes {current_rollouts} nps {nps} pv {move}")
+                            sys.stdout.flush()
+                
+                # Handle remainder rollouts if any
+                if remainder > 0 and not self.stop_search.is_set():
+                    self.mcts_engine.parallelRollouts(self.board.copy(), self.model, remainder)
+                
+                elapsed_time = time.time() - start_time
+                actual_rollouts = num_iterations * self.threads + (remainder if remainder > 0 else 0)
+                
+                # Update time manager with actual performance
+                if elapsed_time > 0:
+                    self.time_manager.update_performance(actual_rollouts, elapsed_time)
+                                
+                # Get final best move, avoiding threefold repetition
+                # Sort edges by visit count (N) in descending order
+                sorted_edges = sorted(self.mcts_engine.edges, key=lambda e: e.getN(), reverse=True)
+                
+                self.best_move = None
+                for edge in sorted_edges:
+                    if edge.getN() == 0:
+                        # Skip edges that were never visited
+                        continue
+                        
+                    move = edge.getMove()
+                    # Create a copy of the board and make the move
+                    test_board = self.board.copy()
+                    test_board.push(move)
+                    
+                    # Check if this move would allow threefold repetition claim
+                    if not test_board.can_claim_threefold_repetition():
+                        # This move doesn't lead to threefold repetition, use it
+                        self.best_move = move
+                        if self.verbose:
+                            if edge != sorted_edges[0]:
+                                print(f"info string Avoided threefold repetition, selected alternative move: {move}")
+                        break
+                
+                # If all moves lead to threefold repetition, use the best one anyway
+                if self.best_move is None and sorted_edges:
+                    self.best_move = sorted_edges[0].getMove()
                     if self.verbose:
-                        print(f"info string Warning: Best move leads to repetition")
-                
-                self.best_move = best_move
-                
-                # Output final info
-                nps = int(rollouts / elapsed_time) if elapsed_time > 0 else 0
-                print(f"info depth {rollouts} nodes {rollouts} nps {nps} pv {self.best_move}")
-                sys.stdout.flush()
-                
-                if self.verbose:
-                    print(f"info string Completed {rollouts} rollouts in {elapsed_time:.2f}s")
-                    print(f"info string Nodes per second: {nps}")
+                        print(f"info string Warning: All moves lead to threefold repetition, using best move anyway")
+                    
+                if self.verbose and self.best_move:
+                    print(f"info string Completed {actual_rollouts} rollouts in {elapsed_time:.2f}s")
+                    print(f"info string Rollouts per second: {actual_rollouts/elapsed_time:.1f}")
+                    print(self.mcts_engine.getStatisticsString())
                     sys.stdout.flush()
+                        
+                # Clean up
+                self.mcts_engine.cleanup()
+                self.mcts_engine.clear_cache()
                 
         except Exception as e:
             print(f"info string Error during search: {e}")
@@ -599,8 +622,8 @@ class UCIEngine:
                 elif command == "ucinewgame":
                     # Reset board for new game
                     self.board = chess.Board()
-                    # if self.mcts_engine:
-                    #     self.mcts_engine.clear_caches()
+                    if self.mcts_engine:
+                        self.mcts_engine.clear_caches()
                 elif self.verbose:
                     print(f"info string Unknown command: {command}")
                     sys.stdout.flush()
