@@ -28,7 +28,7 @@ import sys
 class TimeManager:
     """Manages time allocation for moves based on game time constraints."""
     
-    def __init__(self, base_rollouts=10000, base_time=1.0, threads=2000):
+    def __init__(self, base_rollouts=10000, base_time=1.0, threads=250):
         """
         Initialize time manager.
         
@@ -152,9 +152,9 @@ class UCIEngine:
         self.model_path = model_path
         self.device, self.device_str = get_optimal_device() 
         if self.device.type == "mps":
-            self.threads = threads * 8
+            self.threads = 250
         else:
-            self.threads = threads * 8
+            self.threads = 250
 
         self.verbose = verbose
         self.board = chess.Board()
@@ -335,7 +335,7 @@ class UCIEngine:
                 
                 elapsed_time = time.time() - start_time
                 actual_rollouts = num_iterations * self.threads + (remainder if remainder > 0 else 0)
-                print(actual_rollouts, "rollouts completed in", elapsed_time, "seconds")
+                # print(actual_rollouts, "rollouts completed in", elapsed_time, "seconds")
                 
                 # Update time manager with actual performance
                 if elapsed_time > 0:
@@ -347,6 +347,7 @@ class UCIEngine:
                 print(f"info string Completed {actual_rollouts} rollouts in {elapsed_time:.2f}s")
                 print(f"info string Rollouts per second: {actual_rollouts/elapsed_time:.1f}")
                 # print(self.mcts_engine.getStatisticsString())
+                print("Same Paths: ", self.mcts_engine.same_paths)
                 sys.stdout.flush()
                         
                 # Clean up
@@ -499,9 +500,9 @@ class UCIEngine:
         if name == "threads":
             try:
                 if self.device.type == "mps":
-                    self.threads = int(value) * 8
+                    self.threads = 250
                 else:
-                    self.threads = int(value) * 8
+                    self.threads = 250
                 self.time_manager.threads = self.threads
             except:
                 pass
