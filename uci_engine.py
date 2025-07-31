@@ -7,7 +7,7 @@ chess engine, enabling it to communicate with chess GUI applications and online
 chess platforms like Lichess.
 
 Time management: Dynamically adjusts the number of MCTS rollouts based on available
-time, using the baseline that 1500 rollouts take approximately 1 second on 12 threads.
+time, using the baseline that 1500 rollouts take approximately 1 second on 300 threads.
 """
 
 import sys
@@ -27,7 +27,7 @@ from quantization_utils import load_quantized_model
 class TimeManager:
     """Manages time allocation for moves based on game time constraints."""
     
-    def __init__(self, base_rollouts=1500, base_time=1.0, threads=12):
+    def __init__(self, base_rollouts=1500, base_time=1.0, threads=300):
         """
         Initialize time manager.
         
@@ -134,7 +134,7 @@ class TimeManager:
 class UCIEngine:
     """UCI Protocol handler for AlphaZero chess engine."""
     
-    def __init__(self, model_path=None, threads=8, verbose=False):
+    def __init__(self, model_path=None, threads=500, verbose=False):
         """
         Initialize UCI engine.
         
@@ -621,7 +621,7 @@ def main():
     parser.add_argument("--model", help="Path to model file", 
                        default="AlphaZeroNet_20x256_distributed.pt")
     parser.add_argument("--threads", type=int, help="Number of threads", 
-                       default=8)
+                       default=300)
     parser.add_argument("--verbose", action="store_true", 
                        help="Enable verbose output")
     
