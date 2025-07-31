@@ -26,7 +26,7 @@ class CCRLDataset( Dataset ):
     Subclass of torch.utils.data.Dataset for the ccrl dataset.
     """
 
-    def __init__( self, ccrl_dir, soft_targets=False, temperature=0.1 ):
+    def __init__( self, ccrl_dir, soft_targets=True, temperature=0.1 ):
         """
         Args:
             ccrl_dir (string) Path to directory containing
