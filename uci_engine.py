@@ -360,7 +360,6 @@ class UCIEngine:
                 sys.stdout.flush()
                         
                 # Clean up
-                self.mcts_engine.cleanup()
                 MCTS.clear_caches()
                 if hasattr(MCTS, 'clear_batch_queue'):
                     MCTS.clear_batch_queue()
