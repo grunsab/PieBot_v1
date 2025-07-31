@@ -335,46 +335,19 @@ class UCIEngine:
                 
                 elapsed_time = time.time() - start_time
                 actual_rollouts = num_iterations * self.threads + (remainder if remainder > 0 else 0)
+                print(actual_rollouts, "rollouts completed in", elapsed_time, "seconds")
                 
                 # Update time manager with actual performance
                 if elapsed_time > 0:
                     self.time_manager.update_performance(actual_rollouts, elapsed_time)
-                                
-                # Get final best move, avoiding threefold repetition
-                # Sort edges by visit count (N) in descending order
-                sorted_edges = sorted(self.mcts_engine.edges, key=lambda e: e.getN(), reverse=True)
-                
-                self.best_move = None
-                for edge in sorted_edges:
-                    if edge.getN() == 0:
-                        # Skip edges that were never visited
-                        continue
-                        
-                    move = edge.getMove()
-                    # Create a copy of the board and make the move
-                    test_board = self.board.copy()
-                    test_board.push(move)
-                    
-                    # Check if this move would allow threefold repetition claim
-                    if not test_board.can_claim_threefold_repetition():
-                        # This move doesn't lead to threefold repetition, use it
-                        self.best_move = move
-                        if self.verbose:
-                            if edge != sorted_edges[0]:
-                                print(f"info string Avoided threefold repetition, selected alternative move: {move}")
-                        break
-                
-                # If all moves lead to threefold repetition, use the best one anyway
-                if self.best_move is None and sorted_edges:
-                    self.best_move = sorted_edges[0].getMove()
-                    if self.verbose:
-                        print(f"info string Warning: All moves lead to threefold repetition, using best move anyway")
-                    
-                if self.verbose and self.best_move:
-                    print(f"info string Completed {actual_rollouts} rollouts in {elapsed_time:.2f}s")
-                    print(f"info string Rollouts per second: {actual_rollouts/elapsed_time:.1f}")
-                    print(self.mcts_engine.getStatisticsString())
-                    sys.stdout.flush()
+                edge = self.mcts_engine.maxNSelect()
+
+                bestmove = edge.getMove()        
+                self.best_move = bestmove.uci()
+                print(f"info string Completed {actual_rollouts} rollouts in {elapsed_time:.2f}s")
+                print(f"info string Rollouts per second: {actual_rollouts/elapsed_time:.1f}")
+                print(self.mcts_engine.getStatisticsString())
+                sys.stdout.flush()
                         
                 # Clean up
                 self.mcts_engine.cleanup()
