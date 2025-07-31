@@ -19,7 +19,7 @@ import time
 import threading
 from queue import Queue
 import AlphaZeroNetwork
-import MCTS_profiling_speedups as MCTS
+import MCTS
 from device_utils import get_optimal_device, optimize_for_device
 from quantization_utils import load_quantized_model
 
@@ -27,7 +27,7 @@ from quantization_utils import load_quantized_model
 class TimeManager:
     """Manages time allocation for moves based on game time constraints."""
     
-    def __init__(self, base_rollouts=1500, base_time=1.0, threads=300):
+    def __init__(self, base_rollouts=1500, base_time=1.0, threads=128):
         """
         Initialize time manager.
         
@@ -134,7 +134,7 @@ class TimeManager:
 class UCIEngine:
     """UCI Protocol handler for AlphaZero chess engine."""
     
-    def __init__(self, model_path=None, threads=500, verbose=False):
+    def __init__(self, model_path=None, threads=128, verbose=False):
         """
         Initialize UCI engine.
         
@@ -596,8 +596,6 @@ class UCIEngine:
                 elif command == "ucinewgame":
                     # Reset board for new game
                     self.board = chess.Board()
-                    if self.mcts_engine:
-                        self.mcts_engine.clear_caches()
                 elif self.verbose:
                     print(f"info string Unknown command: {command}")
                     sys.stdout.flush()
@@ -623,7 +621,7 @@ def main():
     parser.add_argument("--model", help="Path to model file", 
                        default="AlphaZeroNet_20x256_distributed.pt")
     parser.add_argument("--threads", type=int, help="Number of threads", 
-                       default=300)
+                       default=128)
     parser.add_argument("--verbose", action="store_true", 
                        help="Enable verbose output")
     
