@@ -330,10 +330,11 @@ class CudaRoot(CudaNode):
             b = boards[i]
             
             while current is not None and current.num_edges > 0:
-                move, edge_idx = current.select_edge()
-                if move is None:
+                edge, edge_idx = current.select_edge()
+                if edge is None:
                     break
                 
+                move = edge.getMove()
                 path.append((current, edge_idx))
                 edge_path.append(edge_idx)
                 b.push(move)
