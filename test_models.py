@@ -9,6 +9,7 @@ from device_utils import get_optimal_device, optimize_for_device
 from quantization_utils import load_quantized_model
 from datetime import datetime
 import io
+from chess_openings import get_opening, get_total_openings
 
 def load_model(model_file, device_hint=None):
     """
@@ -95,7 +96,7 @@ def load_model(model_file, device_hint=None):
         
     return model, device
 
-def play_game(model1, device1, model2, device2, rollouts=100, threads=1, verbose=False):
+def play_game(model1, device1, model2, device2, rollouts=100, threads=1, verbose=False, opening_index=None):
     """
     Play a single game between two models.
     
@@ -107,6 +108,7 @@ def play_game(model1, device1, model2, device2, rollouts=100, threads=1, verbose
         rollouts: Number of MCTS rollouts per move
         threads: Number of threads for MCTS
         verbose: Print move details
+        opening_index: Index of the opening to use (None for no opening)
     
     Returns:
         result: Game result ('1-0', '0-1', '1/2-1/2')
@@ -122,8 +124,20 @@ def play_game(model1, device1, model2, device2, rollouts=100, threads=1, verbose
     pgn_game.headers["White"] = "Model 1"
     pgn_game.headers["Black"] = "Model 2"
     
+    # Add opening information if using one
+    opening_moves = []
+    opening_name = None
+    if opening_index is not None:
+        opening_data = get_opening(opening_index)
+        opening_moves = opening_data["moves"]
+        opening_name = opening_data["name"]
+        pgn_game.headers["Opening"] = opening_name
+        if verbose:
+            print(f"Using opening: {opening_name}")
+    
     node = pgn_game
     move_count = 0
+    opening_move_index = 0
     
     while not board.is_game_over():
         move_count += 1
@@ -142,26 +156,37 @@ def play_game(model1, device1, model2, device2, rollouts=100, threads=1, verbose
             print(f"\nMove {move_count}. {player_name}'s turn")
             print(board)
         
-        # Use MCTS to find the best move
-        start_time = time.perf_counter()
-        
-        with torch.no_grad():
-            root = MCTS.Root(board, current_model)
+        # Check if we should use opening moves
+        if opening_moves and opening_move_index < len(opening_moves):
+            # Use opening move
+            best_move = chess.Move.from_uci(opening_moves[opening_move_index])
+            opening_move_index += 1
             
-            for i in range(rollouts):
-                root.parallelRollouts(board.copy(), current_model, threads)
-        
-        elapsed = time.perf_counter() - start_time
-        
-        # Get the best move
-        edge = root.maxNSelect()
-        best_move = edge.getMove()
-        
-        if verbose:
-            Q = root.getQ()
-            N = root.getN()
-            nps = N / elapsed if elapsed > 0 else 0
-            print(f"Best move: {best_move}, Q: {Q:.3f}, N: {int(N)}, Time: {elapsed:.2f}s, NPS: {nps:.1f}")
+            if verbose:
+                print(f"Opening move: {best_move}")
+                if opening_move_index == len(opening_moves):
+                    print("Opening sequence complete. Switching to MCTS.")
+        else:
+            # Use MCTS to find the best move
+            start_time = time.perf_counter()
+            
+            with torch.no_grad():
+                root = MCTS.Root(board, current_model)
+                
+                for i in range(rollouts):
+                    root.parallelRollouts(board.copy(), current_model, threads)
+            
+            elapsed = time.perf_counter() - start_time
+            
+            # Get the best move
+            edge = root.maxNSelect()
+            best_move = edge.getMove()
+            
+            if verbose:
+                Q = root.getQ()
+                N = root.getN()
+                nps = N / elapsed if elapsed > 0 else 0
+                print(f"Best move: {best_move}, Q: {Q:.3f}, N: {int(N)}, Time: {elapsed:.2f}s, NPS: {nps:.1f}")
         
         # Make the move
         board.push(best_move)
@@ -188,6 +213,7 @@ def main():
     parser.add_argument('--pgn', help='Save games to PGN file')
     parser.add_argument('--alternate', action='store_true', help='Alternate which model plays white')
     parser.add_argument('--json', help='Output results in JSON format to specified file')
+    parser.add_argument('--no-openings', action='store_true', help='Disable chess openings and play from starting position')
     
     args = parser.parse_args()
     
@@ -204,6 +230,10 @@ def main():
     print(f"Threads per rollout: {args.threads}")
     if args.alternate:
         print("Models will alternate playing as white")
+    if not args.no_openings:
+        print(f"Using {get_total_openings()} different chess openings (cycling through)")
+    else:
+        print("Playing from standard starting position (no openings)")
     print("-" * 60)
     
     # Track results
@@ -224,9 +254,10 @@ def main():
         # Determine which model plays white
         if args.alternate and game_num % 2 == 1:
             # Swap models for odd-numbered games
+            opening_idx = None if args.no_openings else game_num
             result, pgn_game, move_count = play_game(
                 model2, device2, model1, device1, 
-                args.rollouts, args.threads, args.verbose
+                args.rollouts, args.threads, args.verbose, opening_index=opening_idx
             )
             # Adjust result interpretation since models are swapped
             if result == '1-0':
@@ -244,9 +275,10 @@ def main():
             pgn_game.headers["Black"] = "Model 1"
         else:
             # Normal game order
+            opening_idx = None if args.no_openings else game_num
             result, pgn_game, move_count = play_game(
                 model1, device1, model2, device2, 
-                args.rollouts, args.threads, args.verbose
+                args.rollouts, args.threads, args.verbose, opening_index=opening_idx
             )
             if result == '1-0':
                 results['model1_wins'] += 1
