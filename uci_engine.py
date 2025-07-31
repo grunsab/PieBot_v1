@@ -496,6 +496,7 @@ class UCIEngine:
             print(f"bestmove {self.best_move}")
         else:
             # Fallback: pick first legal move that doesn't cause threefold repetition
+            print("FALLING BACK TO RANDOM MOVE BECAUSE SEARCH IS BROKEN")
             legal_moves = list(self.board.legal_moves)
             fallback_move = None
             
