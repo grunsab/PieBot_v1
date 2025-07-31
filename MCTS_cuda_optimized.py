@@ -152,8 +152,9 @@ class CudaNode:
         
         # Store edge data as tensors for GPU operations
         if self.num_edges > 0:
+            # move_probabilities is already an array of probabilities for legal moves
             self.edge_P = torch.tensor(
-                [move_probabilities[i] for i in range(self.num_edges)], 
+                move_probabilities[:self.num_edges], 
                 dtype=torch.float32
             )
             self.edge_N = torch.zeros(self.num_edges, dtype=torch.float32)
