@@ -7,7 +7,7 @@ chess engine, enabling it to communicate with chess GUI applications and online
 chess platforms like Lichess.
 
 Time management: Dynamically adjusts the number of MCTS rollouts based on available
-time, using the baseline that 1500 rollouts take approximately 1 second on 300 threads.
+time, using the baseline that 800 rollouts take approximately 1 second on 1000 threads.
 """
 
 import sys
@@ -19,7 +19,7 @@ import time
 import threading
 from queue import Queue
 import AlphaZeroNetwork
-import MCTS_profiling_speedups as MCTS
+import MCTS
 from device_utils import get_optimal_device, optimize_for_device
 from quantization_utils import load_quantized_model
 
@@ -43,11 +43,11 @@ class TimeManager:
         self.threads = threads
         # Adjust for the fact that parallelRollouts does 'threads' rollouts per call
         # So actual time per rollout is different
-        # My Macbook M4 Runs around 1300 rollouts per second, and my RTX 4080 does about 3500.
+        # My Macbook Mini M4 Runs around 800 rollouts per second, and my RTX 4080 does about 2800-3500.
         if device.type == "mps":
-            self.rollouts_per_second = 1500
+            self.rollouts_per_second = 800
         else:
-            self.rollouts_per_second = 4500
+            self.rollouts_per_second = 2700  # Average for RTX 4080
         
         # Track actual performance
         self.measured_rollouts_per_second = None
@@ -172,7 +172,7 @@ class UCIEngine:
         try:
             if not self.model_path:
                 # Use default model if none specified
-                self.model_path = "AlphaZeroNet_20x256_distributed_fp16.pt"
+                self.model_path = "AlphaZeroNet_20x256_distributed.pt"
             
             # Try to find the model file
             if not os.path.isabs(self.model_path):
@@ -569,8 +569,6 @@ class UCIEngine:
                 elif command == "ucinewgame":
                     # Reset board for new game
                     self.board = chess.Board()
-                    if self.mcts_engine:
-                        self.mcts_engine.clear_caches()
                 elif self.verbose:
                     print(f"info string Unknown command: {command}")
                     sys.stdout.flush()
@@ -594,7 +592,7 @@ def main():
         description="UCI Protocol wrapper for AlphaZero chess engine"
     )
     parser.add_argument("--model", help="Path to model file", 
-                       default="AlphaZeroNet_20x256_distributed_fp16.pt")
+                       default="AlphaZeroNet_20x256_distributed.pt")
     parser.add_argument("--threads", type=int, help="Number of threads", 
                        default=128)
     parser.add_argument("--verbose", action="store_true", 
