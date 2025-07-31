@@ -304,8 +304,6 @@ class UCIEngine:
         """
         self.stop_search.clear()
         self.best_move = None
-
-        print("INSIDE SEARCH_POSITION")
         
         try:
             # Check if we have a model
@@ -373,7 +371,8 @@ class UCIEngine:
 
                 same_paths = getattr(self.mcts_engine, 'same_paths', 0)
                 if same_paths > 0:
-                    print("Same Paths is: ", same_paths)
+                    pass
+                    #print("Same Paths is: ", same_paths)
                 
         except Exception as e:
             print(f"Error during search: {e}")
