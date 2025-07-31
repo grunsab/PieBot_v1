@@ -239,8 +239,16 @@ class CudaNode:
     def update_edge_stats(self, edge_idx, child_Q, child_N):
         """Update edge statistics from child."""
         if edge_idx < self.num_edges:
-            self.edge_Q[edge_idx] = 1.0 - child_Q
-            self.edge_N[edge_idx] = child_N
+            # Handle scalar values properly
+            q_val = float(1.0 - child_Q) if hasattr(child_Q, '__float__') else 1.0 - child_Q
+            n_val = float(child_N) if hasattr(child_N, '__float__') else child_N
+            
+            if torch.is_tensor(self.edge_Q):
+                self.edge_Q[edge_idx] = q_val
+                self.edge_N[edge_idx] = n_val
+            else:
+                self.edge_Q[edge_idx] = q_val
+                self.edge_N[edge_idx] = n_val
 
 class CudaRoot(CudaNode):
     """Root node with additional functionality for parallel rollouts."""
