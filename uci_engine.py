@@ -24,6 +24,7 @@ import MCTS
 from device_utils import get_optimal_device, optimize_for_device
 from quantization_utils import load_quantized_model
 
+import sys
 
 class TimeManager:
     """Manages time allocation for moves based on game time constraints."""
@@ -37,12 +38,17 @@ class TimeManager:
             base_time: Time in seconds for base_rollouts
             threads: Number of threads available
         """
+        device, device_str = get_optimal_device()
         self.base_rollouts = base_rollouts
         self.base_time = base_time
         self.threads = threads
         # Adjust for the fact that parallelRollouts does 'threads' rollouts per call
         # So actual time per rollout is different
-        self.rollouts_per_second = base_rollouts / base_time
+        # My Macbook M4 Runs around 1300 rollouts per second, and my RTX 4080 does about 3500.
+        if device.type == "mps":
+            self.rollouts_per_second = 1300
+        else:
+            self.rollouts_per_second = 4000
         
         # Track actual performance
         self.measured_rollouts_per_second = None
@@ -359,9 +365,6 @@ class UCIEngine:
                 
             with torch.no_grad():
                 self.mcts_engine = MCTS.Root(self.board, self.model)
-                # Perform rollouts
-                # parallelRollouts performs 'threads' rollouts per call
-                # So we need to call it rollouts/threads times
                 num_iterations = max(1, rollouts // self.threads)
                 remainder = rollouts % self.threads
                 
@@ -491,7 +494,7 @@ class UCIEngine:
             time_sec = movetime / 1000.0
             # Account for move overhead
             time_sec = max(0.1, time_sec - self.move_overhead / 1000.0)
-            rollouts = int(self.time_manager.rollouts_per_second * time_sec * 0.95)
+            rollouts = int(self.time_manager.get_rollouts_per_second() * time_sec * 0.95)
         else:
             # Calculate based on game time
             # Adjust time for move overhead
