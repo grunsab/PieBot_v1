@@ -27,8 +27,8 @@ import sys
 device, device_str = get_optimal_device()
 
 # if device.type == "mps":
-#import MCTS_profiling_speedups_v2 as MCTS
-import MCTS
+import MCTS_profiling_speedups_v2 as MCTS
+# import MCTS
 # else:
 #     import MCTS_cuda_optimized as MCTS
 #     print("USING CUDA!")
@@ -180,7 +180,7 @@ class UCIEngine:
         try:
             if not self.model_path:
                 # Use default model if none specified
-                self.model_path = "AlphaZeroNet_20x256_distributed_fp16.pt"
+                self.model_path = "AlphaZeroNet_20x256_distributed.pt"
             
             # Try to find the model file
             if not os.path.isabs(self.model_path):
@@ -248,7 +248,7 @@ class UCIEngine:
         print("id name AlphaZero UCI Engine")
         print("id author Rishi Sachdev")
         print("option name Threads type spin default 8 min 1 max 128")
-        print("option name Model type string default AlphaZeroNet_20x256_distributed_fp16.pt")
+        print("option name Model type string default AlphaZeroNet_20x256_distributed.pt")
         print("option name Verbose type check default false")
         print("option name Move Overhead type spin default 30 min 0 max 5000")
         print("uciok")
@@ -588,7 +588,7 @@ def main():
         description="UCI Protocol wrapper for AlphaZero chess engine"
     )
     parser.add_argument("--model", help="Path to model file", 
-                       default="AlphaZeroNet_20x256_distributed_fp16.pt")
+                       default="AlphaZeroNet_20x256_distributed.pt")
     parser.add_argument("--threads", type=int, help="Number of threads", 
                        default=64)
     parser.add_argument("--verbose", action="store_true", 
