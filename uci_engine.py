@@ -19,7 +19,7 @@ import time
 import threading
 from queue import Queue
 import AlphaZeroNetwork
-import MCTS
+import MCTS_profiling_speedups_v2 as MCTS
 from device_utils import get_optimal_device, optimize_for_device
 from quantization_utils import load_quantized_model
 
@@ -351,6 +351,8 @@ class UCIEngine:
                         
                 # Clean up
                 self.mcts_engine.cleanup()
+                MCTS.clear_caches()
+                MCTS.clear_pools()
                 
         except Exception as e:
             print(f"info string Error during search: {e}")

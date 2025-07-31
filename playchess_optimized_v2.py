@@ -1,6 +1,6 @@
 import argparse
 import chess
-import MCTS_profiling_speedups as MCTS
+import MCTS_profiling_speedups_v2 as MCTS
 import torch
 import AlphaZeroNetwork
 import time
@@ -22,7 +22,7 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
     if verbose:
         print(f"DEBUG: Model device: {device}")
         print(f"DEBUG: Model type: {type(alphaZeroNet)}")
-        print("DEBUG: Using OPTIMIZED MCTS implementation")
+        print("DEBUG: Using OPTIMIZED MCTS v2 implementation with progressive batching")
         import sys
         sys.stdout.flush()
     
@@ -93,7 +93,9 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
                 root = MCTS.Root( board, alphaZeroNet )
                 
                 if verbose:
-                    print(f"DEBUG: Starting {num_rollouts} rollouts with {num_threads} threads")
+                    print(f"DEBUG: Starting {num_rollouts} rollouts with {num_threads} parallel threads")
+                    if num_threads > 200:
+                        print(f"DEBUG: Using progressive batching for high parallelism")
             
                 for i in range( num_rollouts ):
                     root.parallelRollouts( board.copy(), alphaZeroNet, num_threads )
@@ -109,11 +111,15 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
             nps = N / elapsed
 
             same_paths = root.same_paths
+            
+            # Calculate duplicate path percentage
+            duplicate_percentage = (same_paths / N) * 100 if N > 0 else 0
        
             if verbose:
                 #In verbose mode, print some statistics
                 print( root.getStatisticsString() )
-                print( 'total rollouts {} Q {:0.3f} duplicate paths {} elapsed {:0.2f} nps {:0.2f}'.format( int( N ), Q, same_paths, elapsed, nps ) )
+                print( 'total rollouts {} Q {:0.3f} duplicate paths {} ({:.1f}%) elapsed {:0.2f} nps {:0.2f}'.format( 
+                    int( N ), Q, same_paths, duplicate_percentage, elapsed, nps ) )
                 
                 # Print cache statistics
                 print(f'Cache stats - Positions: {len(MCTS.position_cache)}, Legal moves: {len(MCTS.legal_moves_cache)}')
@@ -143,7 +149,7 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
             break
 
 if __name__=='__main__':
-    parser = argparse.ArgumentParser(usage='Play chess against the computer or watch self play games (OPTIMIZED VERSION).')
+    parser = argparse.ArgumentParser(usage='Play chess against the computer or watch self play games (OPTIMIZED VERSION v2).')
     parser.add_argument( '--model', help='Path to model (.pt) file.' )
     parser.add_argument( '--mode', help='Operation mode: \'s\' self play, \'p\' profile, \'h\' human' )
     parser.add_argument( '--color', help='Your color w or b' )
