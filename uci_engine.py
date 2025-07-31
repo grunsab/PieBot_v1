@@ -46,9 +46,9 @@ class TimeManager:
         # So actual time per rollout is different
         # My Macbook M4 Runs around 1300 rollouts per second, and my RTX 4080 does about 3500.
         if device.type == "mps":
-            self.rollouts_per_second = 1300
+            self.rollouts_per_second = 1500
         else:
-            self.rollouts_per_second = 4000
+            self.rollouts_per_second = 4500
         
         # Track actual performance
         self.measured_rollouts_per_second = None
