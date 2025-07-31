@@ -341,10 +341,9 @@ class UCIEngine:
                 
                 edge = self.mcts_engine.maxNSelect()
                 move = edge.getMove()
-                score = int(edge.getQ() * 1000 - 500)
                 elapsed = time.time() - start_time
                 nps = int(actual_rollouts / elapsed) if elapsed > 0 else 0
-                print(f"info depth {actual_rollouts} score cp {score} nodes {actual_rollouts} nps {nps} pv {move} ")
+                print(f"info depth {actual_rollouts} nodes {actual_rollouts} nps {nps} pv {move} ")
                 sys.stdout.flush()
 
                 bestmove = move   
