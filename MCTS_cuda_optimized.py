@@ -159,35 +159,40 @@ class CudaNode:
             )
             self.edge_N = torch.zeros(self.num_edges, dtype=torch.float32)
             self.edge_Q = torch.zeros(self.num_edges, dtype=torch.float32)
+            self.edge_virtual_losses = torch.zeros(self.num_edges, dtype=torch.float32)
             self.children = [None] * self.num_edges
             
             if CUDA_AVAILABLE and USE_GPU_TREE:
                 self.edge_P = self.edge_P.cuda()
                 self.edge_N = self.edge_N.cuda()
                 self.edge_Q = self.edge_Q.cuda()
+                self.edge_virtual_losses = self.edge_virtual_losses.cuda()
         else:
             self.edge_P = None
             self.edge_N = None
             self.edge_Q = None
+            self.edge_virtual_losses = None
             self.children = []
     
     def select_edge(self):
-        """Select best edge using UCT."""
+        """Select best edge using UCT with virtual losses."""
         if self.num_edges == 0:
             return None, -1
+        
+        # Include virtual losses in N calculation
+        N_with_virtual = self.edge_N + self.edge_virtual_losses
         
         if CUDA_AVAILABLE and USE_GPU_TREE and self.num_edges > 10:
             # Use GPU for larger edge sets
             Q_values = self.edge_Q
-            N_values = self.edge_N
             P_values = self.edge_P
             
-            uct_values = mcts_cuda.calc_uct(Q_values, N_values, P_values, self.N, 1.5)
+            uct_values = mcts_cuda.calc_uct(Q_values, N_with_virtual, P_values, self.N, 1.5)
             best_idx = torch.argmax(uct_values).item()
         elif CPP_AVAILABLE:
             # Use C++ implementation
             Q_values = self.edge_Q.cpu() if self.edge_Q.is_cuda else self.edge_Q
-            N_values = self.edge_N.cpu() if self.edge_N.is_cuda else self.edge_N
+            N_values = N_with_virtual.cpu() if N_with_virtual.is_cuda else N_with_virtual
             P_values = self.edge_P.cpu() if self.edge_P.is_cuda else self.edge_P
             
             uct_values = mcts_cpp.calc_uct_vectorized(Q_values, N_values, P_values, self.N, 1.5)
@@ -199,7 +204,7 @@ class CudaNode:
             
             for i in range(self.num_edges):
                 Q = self.edge_Q[i].item()
-                N_c = self.edge_N[i].item()
+                N_c = N_with_virtual[i].item()
                 P = self.edge_P[i].item()
                 
                 if math.isnan(P):
@@ -249,6 +254,16 @@ class CudaNode:
             else:
                 self.edge_Q[edge_idx] = q_val
                 self.edge_N[edge_idx] = n_val
+    
+    def add_virtual_loss(self, edge_idx, scale_factor=1.0):
+        """Add virtual loss to an edge with scaling."""
+        if edge_idx < self.num_edges and self.edge_virtual_losses is not None:
+            self.edge_virtual_losses[edge_idx] += scale_factor
+    
+    def clear_virtual_loss(self, edge_idx):
+        """Clear virtual loss for an edge."""
+        if edge_idx < self.num_edges and self.edge_virtual_losses is not None:
+            self.edge_virtual_losses[edge_idx] = 0.0
 
 class CudaRoot(CudaNode):
     """Root node with additional functionality for parallel rollouts."""
@@ -275,6 +290,9 @@ class CudaRoot(CudaNode):
         # Pre-allocate tensors for batch operations
         self.batch_positions = None
         self.batch_masks = None
+        
+        # Track parallelism level for adaptive virtual loss
+        self.current_parallelism = 0
     
     def _call_neural_network(self, board, neuralNetwork):
         """Call neural network with caching and batching."""
@@ -317,12 +335,16 @@ class CudaRoot(CudaNode):
         return value, move_probabilities
     
     def parallel_rollouts_cuda(self, board, num_rollouts, num_threads=1):
-        """GPU-accelerated parallel rollouts."""
+        """GPU-accelerated parallel rollouts with dynamic virtual loss scaling."""
         if not CUDA_AVAILABLE or not USE_GPU_TREE:
             # Fallback to regular rollouts
             for _ in range(num_rollouts):
                 self.rollout(board.copy())
             return
+        
+        # Calculate virtual loss scale based on parallelism
+        # Higher parallelism = higher virtual loss to discourage path collision
+        virtual_loss_scale = math.sqrt(num_rollouts / 10.0)  # Adaptive scaling
         
         # Batch selection phase
         boards = [board.copy() for _ in range(num_rollouts)]
@@ -341,6 +363,9 @@ class CudaRoot(CudaNode):
                 edge, edge_idx = current.select_edge()
                 if edge is None:
                     break
+                
+                # Add scaled virtual loss
+                current.add_virtual_loss(edge_idx, virtual_loss_scale)
                 
                 move = edge.getMove()
                 path.append((current, edge_idx))
@@ -408,7 +433,9 @@ class CudaRoot(CudaNode):
                     
                     move_probs = policies[leaf_idx]
                     
-                    parent.expand_edge(edge_idx, leaf_boards[leaf_idx], Q, move_probs)
+                    is_unexpanded = parent.expand_edge(edge_idx, leaf_boards[leaf_idx], Q, move_probs)
+                    if not is_unexpanded:
+                        self.same_paths += 1
                     
                     # Backpropagate
                     for j in range(len(path) - 1, -1, -1):
@@ -429,6 +456,11 @@ class CudaRoot(CudaNode):
                             )
                 
                 leaf_idx += 1
+        
+        # Clear virtual losses after all rollouts complete
+        for path in paths:
+            for node, edge_idx in path:
+                node.clear_virtual_loss(edge_idx)
     
     def rollout(self, board):
         """Single rollout implementation."""
@@ -482,9 +514,44 @@ class CudaRoot(CudaNode):
             parent.update_edge_stats(parent_edge_idx, 1.0 - Q, 1)
             Q = 1.0 - Q
     
+    def parallel_rollouts_progressive(self, board, total_rollouts, 
+                                    initial_batch_size=50, max_batch_size=200):
+        """
+        Progressive batching to reduce path collisions while maintaining high throughput.
+        
+        Args:
+            board (chess.Board) the chess position
+            total_rollouts (int) total number of rollouts to perform
+            initial_batch_size (int) starting batch size
+            max_batch_size (int) maximum batch size
+        """
+        remaining = total_rollouts
+        batch_size = initial_batch_size
+        batch_count = 0
+        
+        while remaining > 0:
+            current_batch = min(batch_size, remaining)
+            
+            # Run batch with current parallelism level
+            self.current_parallelism = current_batch
+            self.parallel_rollouts_cuda(board, current_batch)
+            
+            remaining -= current_batch
+            batch_count += 1
+            
+            # Gradually increase batch size to maintain efficiency
+            # but cap it to prevent too many collisions
+            if batch_count % 5 == 0:  # Every 5 batches
+                batch_size = min(int(batch_size * 1.5), max_batch_size)
+    
     def parallelRollouts(self, board, neuralNetwork, num_threads):
-        """Parallel rollouts with GPU acceleration."""
-        self.parallel_rollouts_cuda(board, num_threads)
+        """Parallel rollouts with GPU acceleration and progressive batching for high parallelism."""
+        # For very high parallelism, use progressive batching
+        if num_threads > 200:
+            self.parallel_rollouts_progressive(board, num_threads)
+        else:
+            # For lower parallelism, use the standard optimized version
+            self.parallel_rollouts_cuda(board, num_threads)
     
     def maxNSelect(self):
         """Select move with highest visit count."""
@@ -516,6 +583,7 @@ class CudaRoot(CudaNode):
             return "No legal moves"
         
         lines = ['|{: ^10}|{: ^10}|{: ^10}|{: ^10}|'.format('move', 'P', 'N', 'Q')]
+        lines.append(f'Same paths: {self.same_paths}')
         
         # Get indices sorted by N
         N_values = self.edge_N.cpu().numpy() if torch.is_tensor(self.edge_N) else self.edge_N
