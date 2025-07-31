@@ -34,7 +34,7 @@ else:
 class TimeManager:
     """Manages time allocation for moves based on game time constraints."""
     
-    def __init__(self, base_rollouts=10000, base_time=1.0, threads=250):
+    def __init__(self, base_rollouts=10000, base_time=1.0, threads=64):
         """
         Initialize time manager.
         
@@ -158,9 +158,9 @@ class UCIEngine:
         self.model_path = model_path
         self.device, self.device_str = get_optimal_device() 
         if self.device.type == "mps":
-            self.threads = 250
+            self.threads = 64
         else:
-            self.threads = 250
+            self.threads = 64
 
         self.verbose = verbose
         self.board = chess.Board()
@@ -503,9 +503,9 @@ class UCIEngine:
         if name == "threads":
             try:
                 if self.device.type == "mps":
-                    self.threads = 250
+                    self.threads = 64
                 else:
-                    self.threads = 250
+                    self.threads = 64
                 self.time_manager.threads = self.threads
             except:
                 pass
