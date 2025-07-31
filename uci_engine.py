@@ -371,7 +371,7 @@ class UCIEngine:
 
 
                 same_paths = getattr(self.mcts_engine, 'same_paths', 0)
-                if same_paths > 0:
+                if same_paths * 10 > actual_rollouts:
                     pass
                     print("Same Paths is: ", same_paths)
                 
