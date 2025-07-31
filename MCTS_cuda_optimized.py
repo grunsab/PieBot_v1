@@ -382,9 +382,9 @@ class CudaRoot(CudaNode):
                 values = []
                 policies = []
                 for b in leaf_boards:
-                    value, policy = self._call_neural_network(b, self.neuralNetwork)
+                    value, move_probs = self._call_neural_network(b, self.neuralNetwork)
                     values.append(value)
-                    move_probs = encoder.decodePolicyOutput(b, policy)
+                    # _call_neural_network already returns decoded move probabilities
                     policies.append(move_probs)
                 values = np.array(values)
         
