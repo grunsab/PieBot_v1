@@ -364,6 +364,10 @@ class UCIEngine:
                 if hasattr(MCTS, 'clear_batch_queue'):
                     MCTS.clear_batch_queue()
 
+
+                same_paths = getattr(self.mcts_engine, 'same_paths', 0)
+                if same_paths > 0:
+                    print("Same Paths is: ", same_paths)
                 
         except Exception as e:
             print(f"Error during search: {e}")
