@@ -27,7 +27,7 @@ from quantization_utils import load_quantized_model
 class TimeManager:
     """Manages time allocation for moves based on game time constraints."""
     
-    def __init__(self, base_rollouts=1500, base_time=1.0, threads=12):
+    def __init__(self, base_rollouts=1500, base_time=1.0, threads=300):
         """
         Initialize time manager.
         
