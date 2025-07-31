@@ -501,7 +501,7 @@ class UCIEngine:
                 if self.device.type == "mps":
                     self.threads = int(value) * 8
                 else:
-                    self.threads = int(value) * 32
+                    self.threads = int(value) * 8
                 self.time_manager.threads = self.threads
             except:
                 pass
