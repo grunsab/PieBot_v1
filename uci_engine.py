@@ -27,7 +27,8 @@ import sys
 device, device_str = get_optimal_device()
 
 # if device.type == "mps":
-import MCTS_profiling_speedups_v2 as MCTS
+#import MCTS_profiling_speedups_v2 as MCTS
+import MCTS
 # else:
 #     import MCTS_cuda_optimized as MCTS
 #     print("USING CUDA!")
@@ -372,7 +373,7 @@ class UCIEngine:
                 same_paths = getattr(self.mcts_engine, 'same_paths', 0)
                 if same_paths > 0:
                     pass
-                    #print("Same Paths is: ", same_paths)
+                    print("Same Paths is: ", same_paths)
                 
         except Exception as e:
             print(f"Error during search: {e}")
