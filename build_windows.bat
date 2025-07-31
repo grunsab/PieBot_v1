@@ -36,6 +36,9 @@ REM Create directories if needed
 if not exist cpp_extensions mkdir cpp_extensions
 if not exist cuda_extensions mkdir cuda_extensions
 
+REM Set required environment variable for Windows builds
+set DISTUTILS_USE_SDK=1
+
 REM Build extensions
 echo.
 echo Building extensions...
