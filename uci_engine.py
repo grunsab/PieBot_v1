@@ -151,7 +151,12 @@ class UCIEngine:
             verbose: Whether to output debug information
         """
         self.model_path = model_path
-        self.threads = threads * 16
+        device, device_str = get_optimal_device() 
+        if device.type == "mps":
+            self.threads = threads * 8
+        else:
+            self.threads = threads * 16
+
         self.verbose = verbose
         self.board = chess.Board()
         self.model = None
@@ -168,7 +173,7 @@ class UCIEngine:
         try:
             if not self.model_path:
                 # Use default model if none specified
-                self.model_path = "AlphaZeroNet_20x256_distributed.pt"
+                self.model_path = "AlphaZeroNet_20x256_distributed_fp16.pt"
             
             # Try to find the model file
             if not os.path.isabs(self.model_path):
@@ -198,68 +203,6 @@ class UCIEngine:
                 print(f"info string Loading model on device: {device_str}")
                 sys.stdout.flush()
                 
-            # # Always load to CPU first to check model type
-            
-            # # Check if it's a static quantized model first
-            # # Static quantized models have 'quant.scale' and 'base_model.*' keys
-            # is_static_quantized = (isinstance(weights, dict) and 
-            #                      'quant.scale' in weights and 
-            #                      any(k.startswith('base_model.') for k in weights.keys()))
-            
-            # if is_static_quantized or (isinstance(weights, dict) and weights.get('model_type') == 'static_quantized'):
-            #     # Static quantized models run on CPU
-            #     cpu_device = torch.device('cpu')
-            #     try:
-            #         # Try loading as TorchScript
-            #         self.model = torch.jit.load(full_path, map_location=cpu_device)
-            #         self.model.eval()
-            #         if self.verbose:
-            #             print(f"info string Loaded static quantized model (TorchScript) on CPU")
-            #         # Update device to CPU for static quantized models
-            #         self.device = cpu_device
-            #         device_str = 'CPU (static quantized model)'
-            #     except Exception as e:
-            #         if self.verbose:
-            #             print(f"info string Warning: Could not load as TorchScript: {e}")
-            #         try:
-            #             # Try using quantization_utils
-            #             self.model = load_quantized_model(full_path, cpu_device, 20, 256)
-            #             if self.verbose:
-            #                 print(f"info string Loaded static quantized model on CPU")
-            #             # Update device to CPU for static quantized models
-            #             self.device = cpu_device
-            #             device_str = 'CPU (static quantized model)'
-            #         except Exception as e2:
-            #             if self.verbose:
-            #                 print(f"info string Warning: Static quantization not supported on this platform: {e2}")
-            #                 print("info string Falling back to loading as regular model...")
-            #             # Fall back to loading as regular non-quantized model
-            #             # Extract the base model weights from the quantized state dict
-            #             self.model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
-            #             # Create a new state dict with dequantized weights
-            #             new_state_dict = {}
-            #             for key, value in weights.items():
-            #                 if key.startswith('base_model.'):
-            #                     new_key = key.replace('base_model.', '')
-            #                     # Skip quantization-specific keys
-            #                     if any(x in new_key for x in ['.scale', '.zero_point', '_packed_params']):
-            #                         continue
-            #                     # Dequantize if needed
-            #                     if hasattr(value, 'dequantize'):
-            #                         new_state_dict[new_key] = value.dequantize()
-            #                     else:
-            #                         new_state_dict[new_key] = value
-            #             self.model.load_state_dict(new_state_dict, strict=False)
-            #             # Move to original device since we're using a regular model now
-            #             self.model.to(self.device)
-            #             self.model.eval()
-            #             if self.verbose:
-            #                 print(f"info string Loaded dequantized model on {device_str}")
-            #     if self.verbose:
-            #         print(f"info string Using device: {device_str}")
-            #         sys.stdout.flush()
-            # else:
-            #     # Create regular model
             self.model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
             weights = torch.load(full_path, map_location=self.device)
             
@@ -650,7 +593,7 @@ def main():
         description="UCI Protocol wrapper for AlphaZero chess engine"
     )
     parser.add_argument("--model", help="Path to model file", 
-                       default="AlphaZeroNet_20x256_distributed.pt")
+                       default="AlphaZeroNet_20x256_distributed_fp16.pt")
     parser.add_argument("--threads", type=int, help="Number of threads", 
                        default=128)
     parser.add_argument("--verbose", action="store_true", 
