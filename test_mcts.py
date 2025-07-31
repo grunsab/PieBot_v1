@@ -9,6 +9,7 @@ from datetime import datetime
 import importlib.util
 import sys
 import os
+from chess_openings import get_opening, get_total_openings
 
 def load_mcts_module(mcts_file):
     """
@@ -80,7 +81,7 @@ def load_model(model_file):
     print(f"Loaded model from {model_file} on {device_str}")
     return model, device
 
-def play_game(mcts1_module, mcts2_module, model, device, rollouts=100, threads=1, verbose=False):
+def play_game(mcts1_module, mcts2_module, model, device, rollouts=100, threads=1, verbose=False, opening_index=None):
     """
     Play a single game between two MCTS implementations.
     
@@ -92,6 +93,7 @@ def play_game(mcts1_module, mcts2_module, model, device, rollouts=100, threads=1
         rollouts: Number of MCTS rollouts per move
         threads: Number of threads for MCTS
         verbose: Print move details
+        opening_index: Index of the opening to use (None for no opening)
     
     Returns:
         result: Game result ('1-0', '0-1', '1/2-1/2')
@@ -108,8 +110,20 @@ def play_game(mcts1_module, mcts2_module, model, device, rollouts=100, threads=1
     pgn_game.headers["White"] = "MCTS 1"
     pgn_game.headers["Black"] = "MCTS 2"
     
+    # Add opening information if using one
+    opening_moves = []
+    opening_name = None
+    if opening_index is not None:
+        opening_data = get_opening(opening_index)
+        opening_moves = opening_data["moves"]
+        opening_name = opening_data["name"]
+        pgn_game.headers["Opening"] = opening_name
+        if verbose:
+            print(f"Using opening: {opening_name}")
+    
     node = pgn_game
     move_count = 0
+    opening_move_index = 0
     
     # Track timing statistics
     time_stats = {
@@ -136,28 +150,39 @@ def play_game(mcts1_module, mcts2_module, model, device, rollouts=100, threads=1
             print(f"\nMove {move_count}. {player_name}'s turn")
             print(board)
         
-        # Use MCTS to find the best move
-        start_time = time.perf_counter()
-        
-        with torch.no_grad():
-            root = current_mcts.Root(board, model)
+        # Check if we should use opening moves
+        if opening_moves and opening_move_index < len(opening_moves):
+            # Use opening move
+            best_move = chess.Move.from_uci(opening_moves[opening_move_index])
+            opening_move_index += 1
             
-            for i in range(rollouts):
-                root.parallelRollouts(board.copy(), model, threads)
-        
-        elapsed = time.perf_counter() - start_time
-        time_stats[f'{time_key}_total'] += elapsed
-        time_stats[f'{time_key}_moves'] += 1
-        
-        # Get the best move
-        edge = root.maxNSelect()
-        best_move = edge.getMove()
-        
-        if verbose:
-            Q = root.getQ()
-            N = root.getN()
-            nps = N / elapsed if elapsed > 0 else 0
-            print(f"Best move: {best_move}, Q: {Q:.3f}, N: {int(N)}, Time: {elapsed:.2f}s, NPS: {nps:.1f}")
+            if verbose:
+                print(f"Opening move: {best_move}")
+                if opening_move_index == len(opening_moves):
+                    print("Opening sequence complete. Switching to MCTS.")
+        else:
+            # Use MCTS to find the best move
+            start_time = time.perf_counter()
+            
+            with torch.no_grad():
+                root = current_mcts.Root(board, model)
+                
+                for i in range(rollouts):
+                    root.parallelRollouts(board.copy(), model, threads)
+            
+            elapsed = time.perf_counter() - start_time
+            time_stats[f'{time_key}_total'] += elapsed
+            time_stats[f'{time_key}_moves'] += 1
+            
+            # Get the best move
+            edge = root.maxNSelect()
+            best_move = edge.getMove()
+            
+            if verbose:
+                Q = root.getQ()
+                N = root.getN()
+                nps = N / elapsed if elapsed > 0 else 0
+                print(f"Best move: {best_move}, Q: {Q:.3f}, N: {int(N)}, Time: {elapsed:.2f}s, NPS: {nps:.1f}")
         
         # Make the move
         board.push(best_move)
@@ -185,6 +210,7 @@ def main():
     parser.add_argument('--pgn', help='Save games to PGN file')
     parser.add_argument('--alternate', action='store_true', help='Alternate which MCTS plays white')
     parser.add_argument('--json', help='Output results in JSON format to specified file')
+    parser.add_argument('--no-openings', action='store_true', help='Disable chess openings and play from starting position')
     
     args = parser.parse_args()
     
@@ -205,6 +231,10 @@ def main():
     print(f"Threads per rollout: {args.threads}")
     if args.alternate:
         print("MCTS implementations will alternate playing as white")
+    if not args.no_openings:
+        print(f"Using {get_total_openings()} different chess openings (cycling through)")
+    else:
+        print("Playing from standard starting position (no openings)")
     print("-" * 60)
     
     # Track results
@@ -229,9 +259,10 @@ def main():
         # Determine which MCTS plays white
         if args.alternate and game_num % 2 == 1:
             # Swap MCTS for odd-numbered games
+            opening_idx = None if args.no_openings else game_num
             result, pgn_game, move_count, time_stats = play_game(
                 mcts2_module, mcts1_module, model, device,
-                args.rollouts, args.threads, args.verbose
+                args.rollouts, args.threads, args.verbose, opening_index=opening_idx
             )
             # Adjust result interpretation since MCTS are swapped
             if result == '1-0':
@@ -255,9 +286,10 @@ def main():
             pgn_game.headers["Black"] = "MCTS 1"
         else:
             # Normal game order
+            opening_idx = None if args.no_openings else game_num
             result, pgn_game, move_count, time_stats = play_game(
                 mcts1_module, mcts2_module, model, device,
-                args.rollouts, args.threads, args.verbose
+                args.rollouts, args.threads, args.verbose, opening_index=opening_idx
             )
             if result == '1-0':
                 results['mcts1_wins'] += 1
