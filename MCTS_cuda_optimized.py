@@ -645,6 +645,23 @@ def build_extensions():
     
     return True
 
+# Edge class for compatibility with test framework
+class Edge:
+    """Edge class compatible with MCTS.py interface."""
+    def __init__(self, move, move_probability):
+        self.move = move
+        self.P = move_probability if not math.isnan(move_probability) and move_probability >= 0 else 1.0 / 200.0
+        self.child = None
+        self.virtualLosses = 0.0
+        from threading import Lock
+        self._lock = Lock()
+    
+    def has_child(self):
+        return self.child is not None
+    
+    def getMove(self):
+        return self.move
+
 # Alias for compatibility
 Root = CudaRoot
 Node = CudaNode
