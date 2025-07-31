@@ -415,8 +415,56 @@ class CudaRoot(CudaNode):
                 leaf_idx += 1
     
     def rollout(self, board):
-        """Single rollout for compatibility."""
-        self.parallel_rollouts_cuda(board, 1)
+        """Single rollout implementation."""
+        # Selection phase
+        node = self
+        path = []
+        
+        while not board.is_game_over():
+            edge, edge_idx = node.select_edge()
+            if edge is None:
+                break
+                
+            move = edge.getMove()
+            board.push(move)
+            path.append((node, edge_idx))
+            
+            # Check if we need to expand
+            if edge_idx < len(node.children) and node.children[edge_idx] is not None:
+                node = node.children[edge_idx]
+            else:
+                # Leaf node - expand and evaluate
+                value, move_probs = self._call_neural_network(board, self.neuralNetwork)
+                Q = value / 2.0 + 0.5
+                
+                # Create new node
+                new_node = CudaNode(board, Q, move_probs)
+                node.children[edge_idx] = new_node
+                
+                # Backpropagate
+                for parent, parent_edge_idx in reversed(path):
+                    parent.N += 1
+                    parent.sum_Q += 1.0 - Q
+                    parent.update_edge_stats(parent_edge_idx, 1.0 - Q, 1)
+                    Q = 1.0 - Q
+                
+                return
+        
+        # Game over - backpropagate terminal value
+        result = board.result()
+        if result == "1-0":
+            Q = 1.0 if board.turn else 0.0
+        elif result == "0-1":
+            Q = 0.0 if board.turn else 1.0
+        else:
+            Q = 0.5
+            
+        # Backpropagate
+        for parent, parent_edge_idx in reversed(path):
+            parent.N += 1
+            parent.sum_Q += 1.0 - Q
+            parent.update_edge(parent_edge_idx, 1.0 - Q, 1)
+            Q = 1.0 - Q
     
     def parallelRollouts(self, board, neuralNetwork, num_threads):
         """Parallel rollouts with GPU acceleration."""
