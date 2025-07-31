@@ -359,7 +359,7 @@ class UCIEngine:
 
                 
         except Exception as e:
-            print(f"info string Error during search: {e}")
+            print(f"Error during search: {e}")
             import traceback
             traceback.print_exc()
             sys.stdout.flush()
