@@ -43,11 +43,11 @@ class TimeManager:
         self.threads = threads
         # Adjust for the fact that parallelRollouts does 'threads' rollouts per call
         # So actual time per rollout is different
-        # My Macbook Mini M4 Runs around 800 rollouts per second, and my RTX 4080 does about 2800-3500.
+        # My Macbook Mini M4 Runs around 450 rollouts per second, and my RTX 4080 does about 1200.
         if device.type == "mps":
-            self.rollouts_per_second = 800
+            self.rollouts_per_second = 450
         else:
-            self.rollouts_per_second = 2700  # Average for RTX 4080
+            self.rollouts_per_second = 1200  # Average for RTX 4080
         
         # Track actual performance
         self.measured_rollouts_per_second = None
@@ -154,7 +154,7 @@ class UCIEngine:
         if self.device.type == "mps":
             self.threads = threads * 8
         else:
-            self.threads = threads * 32
+            self.threads = threads * 8
 
         self.verbose = verbose
         self.board = chess.Board()
@@ -172,7 +172,7 @@ class UCIEngine:
         try:
             if not self.model_path:
                 # Use default model if none specified
-                self.model_path = "AlphaZeroNet_20x256_distributed.pt"
+                self.model_path = "AlphaZeroNet_20x256_distributed_fp16.pt"
             
             # Try to find the model file
             if not os.path.isabs(self.model_path):
@@ -240,7 +240,7 @@ class UCIEngine:
         print("id name AlphaZero UCI Engine")
         print("id author Rishi Sachdev")
         print("option name Threads type spin default 8 min 1 max 128")
-        print("option name Model type string default AlphaZeroNet_20x256_distributed.pt")
+        print("option name Model type string default AlphaZeroNet_20x256_distributed_fp16.pt")
         print("option name Verbose type check default false")
         print("option name Move Overhead type spin default 30 min 0 max 5000")
         print("uciok")
@@ -346,7 +346,7 @@ class UCIEngine:
                 self.best_move = bestmove.uci()
                 print(f"info string Completed {actual_rollouts} rollouts in {elapsed_time:.2f}s")
                 print(f"info string Rollouts per second: {actual_rollouts/elapsed_time:.1f}")
-                print(self.mcts_engine.getStatisticsString())
+                # print(self.mcts_engine.getStatisticsString())
                 sys.stdout.flush()
                         
                 # Clean up
@@ -567,7 +567,7 @@ def main():
         description="UCI Protocol wrapper for AlphaZero chess engine"
     )
     parser.add_argument("--model", help="Path to model file", 
-                       default="AlphaZeroNet_20x256_distributed.pt")
+                       default="AlphaZeroNet_20x256_distributed_fp16.pt")
     parser.add_argument("--threads", type=int, help="Number of threads", 
                        default=128)
     parser.add_argument("--verbose", action="store_true", 
