@@ -20,7 +20,6 @@ import threading
 from queue import Queue
 import AlphaZeroNetwork
 import MCTS_profiling_speedups as MCTS
-#import MCTS
 from device_utils import get_optimal_device, optimize_for_device
 from quantization_utils import load_quantized_model
 
@@ -239,7 +238,7 @@ class UCIEngine:
     def uci(self):
         """Handle 'uci' command."""
         print("id name AlphaZero UCI Engine")
-        print("id author AlphaZero Bot")
+        print("id author Rishi Sachdev")
         print("option name Threads type spin default 8 min 1 max 128")
         print("option name Model type string default AlphaZeroNet_20x256_distributed.pt")
         print("option name Verbose type check default false")
@@ -379,7 +378,6 @@ class UCIEngine:
                         
                 # Clean up
                 self.mcts_engine.cleanup()
-                self.mcts_engine.clear_cache()
                 
         except Exception as e:
             print(f"info string Error during search: {e}")
