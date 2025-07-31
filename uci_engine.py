@@ -155,7 +155,7 @@ class UCIEngine:
         if device.type == "mps":
             self.threads = threads * 8
         else:
-            self.threads = threads * 16
+            self.threads = threads * 32
 
         self.verbose = verbose
         self.board = chess.Board()
