@@ -19,7 +19,8 @@ import time
 import threading
 from queue import Queue
 import AlphaZeroNetwork
-import MCTS
+import MCTS_profiling_speedups as MCTS
+#import MCTS
 from device_utils import get_optimal_device, optimize_for_device
 from quantization_utils import load_quantized_model
 
@@ -570,6 +571,8 @@ class UCIEngine:
                 elif command == "ucinewgame":
                     # Reset board for new game
                     self.board = chess.Board()
+                    if self.mcts_engine:
+                        self.mcts_engine.clear_caches()
                 elif self.verbose:
                     print(f"info string Unknown command: {command}")
                     sys.stdout.flush()
