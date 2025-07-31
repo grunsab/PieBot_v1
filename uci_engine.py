@@ -30,6 +30,7 @@ if device.type == "mps":
     import MCTS_profiling_speedups_v2 as MCTS
 else:
     import MCTS_cuda_optimized as MCTS
+    print("USING CUDA!")
 
 class TimeManager:
     """Manages time allocation for moves based on game time constraints."""
@@ -335,9 +336,8 @@ class UCIEngine:
                 # Update time manager with actual performance
                 if elapsed_time > 0:
                     self.time_manager.update_performance(actual_rollouts, elapsed_time)
+                
                 edge = self.mcts_engine.maxNSelect()
-
-
                 move = edge.getMove()
                 score = int(edge.getQ() * 1000 - 500)
                 elapsed = time.time() - start_time
@@ -352,7 +352,6 @@ class UCIEngine:
                 # Clean up
                 self.mcts_engine.cleanup()
                 MCTS.clear_caches()
-                MCTS.clear_pools()
                 if hasattr(MCTS, 'clear_batch_queue'):
                     MCTS.clear_batch_queue()
 
