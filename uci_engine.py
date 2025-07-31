@@ -278,7 +278,7 @@ class UCIEngine:
                 param.requires_grad = False
             
             # Initialize MCTS
-            self.mcts_engine = MCTS.Root()
+            self.mcts_engine = MCTS.Root(self.board, self.model)
                 
             if self.verbose:
                 print(f"info string Model loaded successfully")
