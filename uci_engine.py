@@ -54,7 +54,7 @@ class TimeManager:
         if device.type == "mps":
             self.rollouts_per_second = 450
         else:
-            self.rollouts_per_second = 1200  # Average for RTX 4080
+            self.rollouts_per_second = 3000  # Average for RTX 5080
         
         # Track actual performance
         self.measured_rollouts_per_second = None
@@ -304,6 +304,8 @@ class UCIEngine:
         """
         self.stop_search.clear()
         self.best_move = None
+
+        print("INSIDE SEARCH_POSITION")
         
         try:
             # Check if we have a model
