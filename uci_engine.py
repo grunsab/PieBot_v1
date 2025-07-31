@@ -26,11 +26,11 @@ import sys
 
 device, device_str = get_optimal_device()
 
-if device.type == "mps":
-    import MCTS_profiling_speedups_v2 as MCTS
-else:
-    import MCTS_cuda_optimized as MCTS
-    print("USING CUDA!")
+# if device.type == "mps":
+import MCTS_profiling_speedups_v2 as MCTS
+# else:
+#     import MCTS_cuda_optimized as MCTS
+#     print("USING CUDA!")
 
 class TimeManager:
     """Manages time allocation for moves based on game time constraints."""
@@ -360,9 +360,13 @@ class UCIEngine:
                 sys.stdout.flush()
                         
                 # Clean up
-                MCTS.clear_caches()
+                if hasattr(MCTS, 'clear_caches'):
+                    MCTS.clear_caches()
                 if hasattr(MCTS, 'clear_batch_queue'):
                     MCTS.clear_batch_queue()
+                if hasattr(self.mcts_engine, 'cleanup'):
+                    self.mcts_engine.cleanup()
+                    
 
 
                 same_paths = getattr(self.mcts_engine, 'same_paths', 0)
