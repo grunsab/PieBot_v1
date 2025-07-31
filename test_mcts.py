@@ -177,9 +177,14 @@ def play_game(mcts1_module, mcts2_module, model, device, rollouts=100, threads=1
             # Get the best move
             edge = root.maxNSelect()
             best_move = edge.getMove()
-            
+
             if verbose:
                 Q = root.getQ()
+                # Ensure Q is a scalar value
+                if hasattr(Q, 'item'):
+                    Q = Q.item()
+                elif hasattr(Q, '__len__'):
+                    Q = float(Q)
                 N = root.getN()
                 nps = N / elapsed if elapsed > 0 else 0
                 print(f"Best move: {best_move}, Q: {Q:.3f}, N: {int(N)}, Time: {elapsed:.2f}s, NPS: {nps:.1f}")
