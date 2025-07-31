@@ -362,15 +362,18 @@ class Edge:
 
         return self.move
 
-    def addVirtualLoss( self ):
+    def addVirtualLoss( self, scale_factor=1.0 ):
         """
         When doing multiple rollouts in parallel,
         we can discourage threads from taking
         the same path by adding fake losses
         to visited nodes.
+        
+        Args:
+            scale_factor (float): Scale factor for virtual loss based on parallelism
         """
         with self._lock:
-            self.virtualLosses += 1
+            self.virtualLosses += scale_factor
 
     def clearVirtualLoss( self ):
         with self._lock:
@@ -414,10 +417,13 @@ class Root( Node ):
         
         # Position encoding cache for this tree
         self.position_cache_local = {}
+        
+        # Track parallelism level for adaptive virtual loss
+        self.current_parallelism = 0
 
-    def selectTask( self, board, node_path, edge_path ):
+    def selectTask( self, board, node_path, edge_path, virtual_loss_scale=1.0 ):
         """
-        Do the selection stage of MCTS.
+        Do the selection stage of MCTS with scaled virtual losses.
 
         Args/Returns:
             board (chess.Board) the root position on input,
@@ -425,6 +431,7 @@ class Root( Node ):
                 or the last node visited, if that is terminal
             node_path (list of Node) ordered list of nodes traversed
             edge_path (list of Edge) ordered list of edges traversed
+            virtual_loss_scale (float) scale factor for virtual losses
         """
 
         cNode = self
@@ -446,7 +453,7 @@ class Root( Node ):
 
                 break
             
-            cEdge.addVirtualLoss()
+            cEdge.addVirtualLoss(virtual_loss_scale)
 
             board.push( cEdge.getMove() )
 
@@ -516,6 +523,7 @@ class Root( Node ):
     def parallelRolloutsOptimized( self, board, neuralNetwork, num_parallel_rollouts ):
         """
         Optimized parallel rollouts using thread pool and batch processing.
+        Now with adaptive virtual loss scaling based on parallelism level.
 
         Args:
             board (chess.Board) the chess position
@@ -527,6 +535,10 @@ class Root( Node ):
         if self.thread_pool is None:
             self.thread_pool = ThreadPoolExecutor(max_workers=self.max_workers)
 
+        # Calculate virtual loss scale based on parallelism
+        # Higher parallelism = higher virtual loss to discourage path collision
+        virtual_loss_scale = math.sqrt(num_parallel_rollouts / 10.0)  # Adaptive scaling
+
         boards = []
         node_paths = []
         edge_paths = []
@@ -537,10 +549,12 @@ class Root( Node ):
             node_paths.append( [] )
             edge_paths.append( [] )
 
-        # Submit all selection tasks to thread pool
+        # Submit all selection tasks to thread pool with scaled virtual loss
         futures = []
         for i in range( num_parallel_rollouts ):
-            future = self.thread_pool.submit(self.selectTask, boards[i], node_paths[i], edge_paths[i])
+            future = self.thread_pool.submit(
+                self.selectTask, boards[i], node_paths[i], edge_paths[i], virtual_loss_scale
+            )
             futures.append(future)
         
         # Wait for all selections to complete
@@ -590,11 +604,47 @@ class Root( Node ):
                 if edge != None:
                     edge.clearVirtualLoss()
 
+    def parallelRolloutsProgressive( self, board, neuralNetwork, total_rollouts, 
+                                   initial_batch_size=50, max_batch_size=200 ):
+        """
+        Progressive batching to reduce path collisions while maintaining high throughput.
+        
+        Args:
+            board (chess.Board) the chess position
+            neuralNetwork (torch.nn.Module) the neural network
+            total_rollouts (int) total number of rollouts to perform
+            initial_batch_size (int) starting batch size
+            max_batch_size (int) maximum batch size
+        """
+        remaining = total_rollouts
+        batch_size = initial_batch_size
+        batch_count = 0
+        
+        while remaining > 0:
+            current_batch = min(batch_size, remaining)
+            
+            # Run batch with current parallelism level
+            self.current_parallelism = current_batch
+            self.parallelRolloutsOptimized(board, neuralNetwork, current_batch)
+            
+            remaining -= current_batch
+            batch_count += 1
+            
+            # Gradually increase batch size to maintain efficiency
+            # but cap it to prevent too many collisions
+            if batch_count % 5 == 0:  # Every 5 batches
+                batch_size = min(int(batch_size * 1.5), max_batch_size)
+
     def parallelRollouts( self, board, neuralNetwork, num_parallel_rollouts ):
         """
-        Wrapper to use optimized version while maintaining compatibility.
+        Wrapper that uses progressive batching for very high parallelism.
         """
-        return self.parallelRolloutsOptimized(board, neuralNetwork, num_parallel_rollouts)
+        # For very high parallelism, use progressive batching
+        if num_parallel_rollouts > 200:
+            return self.parallelRolloutsProgressive(board, neuralNetwork, num_parallel_rollouts)
+        else:
+            # For lower parallelism, use the standard optimized version
+            return self.parallelRolloutsOptimized(board, neuralNetwork, num_parallel_rollouts)
 
     def getVisitCounts(self, board):
         """
