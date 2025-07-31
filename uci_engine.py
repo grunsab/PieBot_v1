@@ -318,16 +318,6 @@ class UCIEngine:
                     self.mcts_engine.parallelRollouts(self.board.copy(), self.model, self.threads)
                     
                     # Output progress periodically
-                    if (i + 1) % max(1, num_iterations // 10) == 0 or i == num_iterations - 1:
-                        current_rollouts = (i + 1) * self.threads
-                        current_edge = self.mcts_engine.maxNSelect()
-                        if current_edge:
-                            move = current_edge.getMove()
-                            score = int(current_edge.getQ() * 1000 - 500)
-                            elapsed = time.time() - start_time
-                            nps = int(current_rollouts / elapsed) if elapsed > 0 else 0
-                            print(f"info depth {current_rollouts} score cp {score} nodes {current_rollouts} nps {nps} pv {move}")
-                            sys.stdout.flush()
                 
                 # Handle remainder rollouts if any
                 if remainder > 0 and not self.stop_search.is_set():
@@ -335,19 +325,23 @@ class UCIEngine:
                 
                 elapsed_time = time.time() - start_time
                 actual_rollouts = num_iterations * self.threads + (remainder if remainder > 0 else 0)
-                # print(actual_rollouts, "rollouts completed in", elapsed_time, "seconds")
                 
                 # Update time manager with actual performance
                 if elapsed_time > 0:
                     self.time_manager.update_performance(actual_rollouts, elapsed_time)
                 edge = self.mcts_engine.maxNSelect()
 
+
+                move = edge.getMove()
+                score = int(edge.getQ() * 1000 - 500)
+                elapsed = time.time() - start_time
+                nps = int(actual_rollouts / elapsed) if elapsed > 0 else 0
+                print(f"info depth {actual_rollouts} score cp {score} nodes {actual_rollouts} nps {nps} pv {move} ")
+                sys.stdout.flush()
+
+
                 bestmove = edge.getMove()        
                 self.best_move = bestmove.uci()
-                print(f"info string Completed {actual_rollouts} rollouts in {elapsed_time:.2f}s")
-                print(f"info string Rollouts per second: {actual_rollouts/elapsed_time:.1f}")
-                # print(self.mcts_engine.getStatisticsString())
-                print("Same Paths: ", self.mcts_engine.same_paths)
                 sys.stdout.flush()
                         
                 # Clean up
