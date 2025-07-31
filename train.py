@@ -12,7 +12,7 @@ import argparse
 import re
 
 #Training params (defaults)
-default_epochs = 40
+default_epochs = 100
 default_blocks = 20
 default_filters = 256
 default_lr = 0.0005

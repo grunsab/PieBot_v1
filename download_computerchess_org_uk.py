@@ -134,9 +134,9 @@ def filter_games_by_rating_and_time_control(input_file, output_directory, min_ra
 
 def main():
     parser = argparse.ArgumentParser(description="Download and filter grandmaster-level games from ComputerChess.org.uk")
-    parser.add_argument('--offset', type=int, help='Skip the processing of the first N games')
+    parser.add_argument('--offset', type=int, default=0, help='Skip the processing of the first N games')
     parser.add_argument('--min-rating', type=int, default=3000, help='Minimum rating for both players (default: 3000)')
-    parser.add_argument('--output-dir', default='games_training_data/reformatted', help='Output directory (default: games_training_data/reformatted)')
+    parser.add_argument('--output-dir', default='games_training_data/reformatted_new', help='Output directory (default: games_training_data/reformatted)')
     parser.add_argument('--skip-download', action='store_true', help='Skip download and only filter existing files')
     parser.add_argument('--output-dir-downloads', default='games_training_data/CCRL_computerchess_org/', help='Output directory to store LiChess Databases (default: games_training_data)')
 
