@@ -182,11 +182,12 @@ def main():
     parser.add_argument('--model1', required=True, help='Path to first model (.pt) file')
     parser.add_argument('--model2', required=True, help='Path to second model (.pt) file')
     parser.add_argument('--games', type=int, default=10, help='Number of games to play (default: 10)')
-    parser.add_argument('--rollouts', type=int, default=1, help='Number of MCTS rollouts per thread (default: 1)')
-    parser.add_argument('--threads', type=int, default=2000, help='Number of threads for MCTS (default: 2000)')
+    parser.add_argument('--rollouts', type=int, default=50, help='Number of MCTS rollouts per thread (default: 50)')
+    parser.add_argument('--threads', type=int, default=60, help='Number of threads for MCTS (default: 60)')
     parser.add_argument('--verbose', action='store_true', help='Print detailed move information')
     parser.add_argument('--pgn', help='Save games to PGN file')
     parser.add_argument('--alternate', action='store_true', help='Alternate which model plays white')
+    parser.add_argument('--json', help='Output results in JSON format to specified file')
     
     args = parser.parse_args()
     
@@ -295,6 +296,28 @@ def main():
                 print(game, file=f)
                 print("", file=f)  # Empty line between games
         print(f"\nGames saved to {args.pgn}")
+    
+    # Save JSON results if requested
+    if args.json:
+        json_results = {
+            'model1': args.model1,
+            'model2': args.model2,
+            'games': args.games,
+            'model1_wins': results['model1_wins'],
+            'model2_wins': results['model2_wins'],
+            'draws': results['draws'],
+            'model1_win_rate': results['model1_wins'] / args.games,
+            'model2_win_rate': results['model2_wins'] / args.games,
+            'draw_rate': results['draws'] / args.games,
+            'average_game_length': results['total_moves'] / args.games,
+            'total_time': total_time,
+            'time_per_game': total_time / args.games,
+            'winner': 'model1' if results['model1_wins'] > results['model2_wins'] else ('model2' if results['model2_wins'] > results['model1_wins'] else 'draw')
+        }
+        import json
+        with open(args.json, 'w') as f:
+            json.dump(json_results, f, indent=2)
+        print(f"\nJSON results saved to {args.json}")
 
 if __name__ == '__main__':
     main()

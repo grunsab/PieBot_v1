@@ -10,6 +10,7 @@ import argparse
 import time
 import json
 from datetime import datetime
+import tempfile
 
 def log(message):
     """Log message with timestamp"""
@@ -137,13 +138,83 @@ def phase3_reinforcement(args, model_path, iteration):
     log(f"Phase 3 Complete: {output_model}")
     return output_model
 
-def evaluate_model(model_path, reference_model=None):
-    """Simple evaluation by playing games against reference"""
-    # This is a placeholder - implement actual evaluation
+def evaluate_model(model_path, reference_model=None, games=100, rollouts=50, threads=40):
+    """
+    Evaluate a model by playing games against a reference model.
+    
+    Args:
+        model_path: Path to the model to evaluate
+        reference_model: Path to the reference model (if None, always returns True)
+        games: Number of games to play
+        rollouts: MCTS rollouts per move
+        threads: Threads for MCTS
+    
+    Returns:
+        tuple: (is_better, win_rate) - whether new model is better and its win rate
+    """
+    if reference_model is None:
+        log(f"No reference model provided, accepting new model: {model_path}")
+        return True, 1.0
+    
     log(f"Evaluating model: {model_path}")
-    # In practice, you would play games against reference engines
-    # and estimate ELO rating
-    return 2800  # Dummy rating
+    log(f"Against reference: {reference_model}")
+    log(f"Playing {games} games with {rollouts} rollouts")
+    
+    # Use JSON output for reliable parsing
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        json_file = f.name
+    
+    try:
+        # Run test_models.py to compare the models
+        cmd = f"""python3 test_models.py \
+            --model1 {model_path} \
+            --model2 {reference_model} \
+            --games {games} \
+            --rollouts {rollouts} \
+            --threads {threads} \
+            --alternate \
+            --json {json_file}"""
+        
+        # Capture output to show progress
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
+        
+        # Read JSON results
+        with open(json_file, 'r') as f:
+            results = json.load(f)
+        
+        model1_wins = results['model1_wins']
+        model2_wins = results['model2_wins']
+        draws = results['draws']
+        
+        # Calculate win rate for the new model (model1)
+        total_decisive = model1_wins + model2_wins
+        if total_decisive == 0:
+            # All draws, consider it slightly worse to be conservative
+            win_rate = 0.45
+        else:
+            win_rate = model1_wins / total_decisive
+        
+        # Consider draws as half points
+        score_rate = (model1_wins + 0.5 * draws) / games
+        
+        # New model is better if it wins more than it loses
+        is_better = model1_wins > model2_wins
+        
+        log(f"Evaluation complete: Wins: {model1_wins}, Losses: {model2_wins}, Draws: {draws}")
+        log(f"Win rate: {win_rate:.2%}, Score rate: {score_rate:.2%}")
+        log(f"New model is {'BETTER' if is_better else 'WORSE'} than reference")
+        
+        return is_better, win_rate
+        
+    except subprocess.CalledProcessError as e:
+        log(f"ERROR: Model evaluation failed: {e}")
+        log(f"STDERR: {e.stderr}")
+        # On error, conservatively keep the old model
+        return False, 0.0
+    finally:
+        # Clean up temporary JSON file
+        if os.path.exists(json_file):
+            os.remove(json_file)
 
 def save_training_state(args, iteration, current_model):
     """Save current training state for resumption"""
@@ -201,6 +272,11 @@ def main():
     # Resume training
     parser.add_argument('--resume-state', type=str, help='Resume from saved training state')
     
+    # Model evaluation
+    parser.add_argument('--eval-games', type=int, default=100, help='Number of games for model evaluation')
+    parser.add_argument('--eval-rollouts', type=int, default=50, help='MCTS rollouts per move during evaluation')
+    parser.add_argument('--skip-eval', action='store_true', help='Skip model evaluation (always accept new model)')
+    
     args = parser.parse_args()
     
     # Create output directory
@@ -239,11 +315,25 @@ def main():
         new_model = phase3_reinforcement(args, current_model, iteration + 1)
         
         # Evaluate new model
-        rating = evaluate_model(new_model, current_model)
-        log(f"Model rating: ~{rating} ELO")
-        
-        # Update current model
-        current_model = new_model
+        if args.skip_eval:
+            log("Skipping evaluation, accepting new model")
+            current_model = new_model
+        else:
+            is_better, win_rate = evaluate_model(
+                new_model, 
+                current_model,
+                games=args.eval_games,
+                rollouts=args.eval_rollouts,
+                threads=args.threads
+            )
+            
+            # Update current model only if new model is better
+            if is_better:
+                log(f"New model is better (win rate: {win_rate:.2%}), updating current model")
+                current_model = new_model
+            else:
+                log(f"New model is worse (win rate: {win_rate:.2%}), keeping current model")
+                log(f"Current model remains: {current_model}")
         
         # Save training state
         save_training_state(args, iteration + 1, current_model)
