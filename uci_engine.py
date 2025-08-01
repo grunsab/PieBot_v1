@@ -51,15 +51,18 @@ class TimeManager:
         self.threads = threads
         # Adjust for the fact that parallelRollouts does 'threads' rollouts per call
         # So actual time per rollout is different
-        # My Macbook Mini M4 Runs around 450 rollouts per second, and my RTX 4080 does about 1200.
+        # My Macbook Mini M4 Runs around 600 rollouts per second, and my RTX 4080 does about 1200.
         if device.type == "mps":
-            self.rollouts_per_second = 450
+            self.rollouts_per_second = 600
         else:
-            self.rollouts_per_second = 1900  # Average for RTX 5080
+            self.rollouts_per_second = 1200  # Average for RTX 4080
         
         # Track actual performance
         self.measured_rollouts_per_second = None
         self.measurement_count = 0
+        # Additional time we could use if we run into a move that leads to draw outcome
+        # Set in calculate_rollouts
+        self.spare_time = 0
         
     def update_performance(self, rollouts, elapsed_time):
         """Update measured performance based on actual timing."""
@@ -115,10 +118,13 @@ class TimeManager:
             # Use a fraction of remaining time, scaling down as time decreases
             if time_left_sec > 60:
                 time_fraction = 0.04  # Use 4% when we have plenty of time
+                self.spare_time = time_left_sec * time_fraction # Use additional 4% of time for draw aversion.
             elif time_left_sec > 10:
                 time_fraction = 0.06  # Use 6% when time is getting lower
+                self.spare_time = time_left_sec * time_fraction
             else:
                 time_fraction = 0.10  # Use 10% when very low on time
+                self.spare_time = time_left_sec * time_fraction
                 
             time_per_move = time_left_sec * time_fraction + increment_sec * 0.8
         
@@ -347,12 +353,27 @@ class UCIEngine:
                 elif hasattr(Q, '__len__'):
                     Q = float(Q)
 
+                test_board = self.board.copy()
+                test_board.push(move)
+                if test_board.can_claim_threefold_repetition() and self.time_manager.spare_time > 0:
+                    # Do more additional thinking if we have time to avoid making a threefold repetition.
+                    rps = self.time_manager.get_rollouts_per_second()
+                    additional_rollouts = int(rps * self.time_manager.spare_time)
+                    num_iterations = max(1, additional_rollouts // self.threads)
+                    remainder = additional_rollouts % self.threads
+                    for i in range(num_iterations):
+                        if self.stop_search.is_set():
+                            break
+                        self.mcts_engine.parallelRollouts(self.board.copy(), self.model, self.threads)
+                    if remainder > 0 and not self.stop_search.is_set():
+                        self.mcts_engine.parallelRollouts(self.board.copy(), self.model, remainder)
+                    edge = self.mcts_engine.maxNSelect()
+                    move = edge.getMove()
+                    Q = self.mcts_engine.getQ()
+                    # Finally set the spare time to zero so we don't reuse the spare time in future loops.
+                    self.time_manager.spare_time = 0
 
-                score = int(Q * 1000 - 500)
-                elapsed = time.time() - start_time
-                nps = int(actual_rollouts / elapsed) if elapsed > 0 else 0
-                print(f"info depth {actual_rollouts} score cp {score} nodes {actual_rollouts} nps {nps} pv {move} ")
-                sys.stdout.flush()
+
 
                 bestmove = move   
                 self.best_move = bestmove.uci()
@@ -368,6 +389,11 @@ class UCIEngine:
                 if hasattr(MCTS, 'clear_pools'):
                     MCTS.clear_pools()
 
+                score = int(Q * 1000 - 500)
+                elapsed = time.time() - start_time
+                nps = int(actual_rollouts / elapsed) if elapsed > 0 else 0
+                print(f"info depth {actual_rollouts} score cp {score} nodes {actual_rollouts} nps {nps} pv {move} ")
+                sys.stdout.flush()
 
 
                 same_paths = getattr(self.mcts_engine, 'same_paths', 0)
