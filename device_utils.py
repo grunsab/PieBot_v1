@@ -84,7 +84,7 @@ def optimize_for_device(model, device):
         
     return model
 
-def get_batch_size_for_device(base_batch_size=512):
+def get_batch_size_for_device(base_batch_size=1024):
     """
     Adjust batch size based on available device memory.
     

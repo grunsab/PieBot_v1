@@ -338,7 +338,7 @@ def main():
                         help='Temperature for label smoothing in mixed mode (default: 0.1)')
     parser.add_argument('--rl-weight-recent', action='store_true',
                         help='Weight recent games more heavily in RL mode (Leela approach)')
-    parser.add_argument('--rl-weight-decay', type=float, default=0.1,
+    parser.add_argument('--rl-weight-decay', type=float, default=0.05,
                         help='Weight decay factor for older games (default: 0.1)')
     
     # Multi-node training arguments

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Download and filter super-grandmaster-level chess games from ComputerChess.org.uk.
-Filters games where both players have ratings >= 3000 (super-grandmaster level).
+Filters games where both players have ratings >= 3300 (super-grandmaster level).
 """
 
 import requests
@@ -30,7 +30,7 @@ try:
 except ImportError:
     TQDM_AVAILABLE = False
 
-MIN_RATING = 3000
+MIN_RATING = 3300
 
 import uuid
 import py7zr
@@ -81,7 +81,117 @@ def download_file(url_filename_pairs, chunk_size=8192):
                 f.write(data)
 
 
-def filter_games_by_rating_and_time_control(input_file, output_directory, min_rating=3000, offset=0):
+def process_game_chunk(args):
+    """
+    Process a chunk of games for parallel filtering.
+    
+    Args:
+        args: Tuple of (input_file, output_dir, start_idx, end_idx, min_rating, offset, kept_counter, processed_counter, lock)
+    """
+    input_file, output_dir, start_idx, end_idx, min_rating, offset, kept_counter, processed_counter, lock = args
+    
+    local_kept = 0
+    local_processed = 0
+    
+    with open(input_file, 'r') as fh:
+        # Skip to the starting position
+        for _ in range(start_idx):
+            chess.pgn.skip_game(fh)
+        
+        # Process games in this chunk
+        for idx in range(start_idx, end_idx):
+            game = chess.pgn.read_game(fh)
+            if not game:
+                break
+            
+            local_processed += 1
+            
+            try:
+                if int(game.headers['WhiteElo']) >= min_rating and int(game.headers['BlackElo']) >= min_rating:
+                    # Calculate unique filename based on total kept games
+                    with lock:
+                        file_idx = kept_counter.value
+                        kept_counter.value += 1
+                    
+                    output_file = os.path.join(output_dir, f'{3000000 + offset + file_idx}.pgn')
+                    with open(output_file, 'w') as game_fh:
+                        print(game, file=game_fh, end='\n\n')
+                    local_kept += 1
+            except (KeyError, ValueError) as e:
+                # Skip games without valid ratings
+                pass
+            
+            # Update shared counters periodically
+            if local_processed % 100 == 0:
+                with lock:
+                    processed_counter.value += 100
+                    if processed_counter.value % 10000 == 0:
+                        print(f"Processed {processed_counter.value:,} games across all processes")
+                local_processed = 0
+    
+    # Final update
+    with lock:
+        processed_counter.value += local_processed
+    
+    return local_kept
+
+
+def filter_games_by_rating_and_time_control_parallel(input_file, output_directory, min_rating=3300, offset=0, num_processes=None):
+    """Filter games where both players have rating >= min_rating using parallel processing."""
+    
+    if num_processes is None:
+        num_processes = min(cpu_count(), 100)
+    
+    print(f"Filtering games with both players rated >= {min_rating} using {num_processes} processes...")
+    
+    # For small files or single process, use original function
+    if num_processes == 1:
+        return filter_games_by_rating_and_time_control(input_file, output_directory, min_rating, offset)
+    
+    # Setup shared counters
+    manager = Manager()
+    kept_counter = manager.Value('i', 0)
+    processed_counter = manager.Value('i', 0)
+    lock = manager.Lock()
+    
+    # Divide work among processes
+    total_games = 2140000  # Approximate number of games
+    games_per_process = total_games // num_processes
+    chunks = []
+    
+    for i in range(num_processes):
+        start_idx = i * games_per_process
+        if i == num_processes - 1:
+            end_idx = total_games
+        else:
+            end_idx = (i + 1) * games_per_process
+        
+        chunks.append((input_file, output_directory, start_idx, end_idx, min_rating, offset, 
+                      kept_counter, processed_counter, lock))
+    
+    # Process chunks in parallel
+    start_time = time.time()
+    
+    with Pool(num_processes) as pool:
+        results = pool.map(process_game_chunk, chunks)
+    
+    # Calculate totals
+    total_kept = sum(results)
+    total_processed = processed_counter.value
+    elapsed_time = time.time() - start_time
+    
+    print(f"\nFiltering complete!")
+    print(f"Total games processed: {total_processed:,}")
+    print(f"Games kept (both players >= {min_rating}): {total_kept:,}")
+    if total_processed > 0:
+        print(f"Percentage kept: {total_kept/total_processed*100:.1f}%")
+    print(f"Processing time: {elapsed_time:.2f} seconds")
+    print(f"Processing speed: {total_processed/elapsed_time:.2f} games/second")
+    
+    return total_kept, total_processed
+
+
+def filter_games_by_rating_and_time_control(input_file, output_directory, min_rating=3300, offset=0):
     """Filter games where both players have rating >= min_rating."""
     
     games_processed = 0
@@ -139,10 +249,11 @@ def filter_games_by_rating_and_time_control(input_file, output_directory, min_ra
 def main():
     parser = argparse.ArgumentParser(description="Download and filter grandmaster-level games from ComputerChess.org.uk")
     parser.add_argument('--offset', type=int, default=0, help='Skip the processing of the first N games')
-    parser.add_argument('--min-rating', type=int, default=3000, help='Minimum rating for both players (default: 3000)')
-    parser.add_argument('--output-dir', default='games_training_data/reformatted_new', help='Output directory (default: games_training_data/reformatted)')
+    parser.add_argument('--min-rating', type=int, default=3300, help='Minimum rating for both players (default: 3300)')
+    parser.add_argument('--output-dir', default='games_training_data/reformatted', help='Output directory (default: games_training_data/reformatted)')
     parser.add_argument('--skip-download', action='store_true', help='Skip download and only filter existing files')
     parser.add_argument('--output-dir-downloads', default='games_training_data/CCRL_computerchess_org/', help='Output directory to store LiChess Databases (default: games_training_data)')
+    parser.add_argument('--processes', type=int, default=None, help='Number of processes to use for parallel filtering (default: number of CPU cores, max 100)')
 
     args = parser.parse_args()
     
@@ -175,8 +286,11 @@ def main():
     total_kept = 0
     total_processed = 0
     
-    MIN_RATING = args.min_rating or 3000
+    MIN_RATING = args.min_rating or 3300
 
+    # Create output directory for filtered games
+    os.makedirs(args.output_dir, exist_ok=True)
+    
     # Process all .pgn files in the output directory
 
     fName_count = 0
@@ -186,7 +300,7 @@ def main():
             input_path_for_parsing = input_path_for_extraction
             output_directory = os.path.join(args.output_dir)
             print(f"\nProcessing {filename}...")
-            kept, processed = filter_games_by_rating_and_time_control(input_path_for_parsing, output_directory, args.min_rating, args.offset)
+            kept, processed = filter_games_by_rating_and_time_control_parallel(input_path_for_parsing, output_directory, args.min_rating, args.offset, args.processes)
             
             total_kept += kept
             total_processed += processed

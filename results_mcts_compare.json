@@ -1,0 +1,18 @@
+{
+  "mcts1": "MCTS.py",
+  "mcts2": "MCTS_profiling_speedups_v2.py",
+  "model": "AlphaZeroNet_20x256_distributed.pt",
+  "games": 40,
+  "mcts1_wins": 8,
+  "mcts2_wins": 8,
+  "draws": 24,
+  "mcts1_win_rate": 0.2,
+  "mcts2_win_rate": 0.2,
+  "draw_rate": 0.6,
+  "average_game_length": 110.075,
+  "total_time": 4006.502085208893,
+  "time_per_game": 100.16255213022232,
+  "mcts1_avg_time_per_move": 0.9894240009539229,
+  "mcts2_avg_time_per_move": 0.9695124041948116,
+  "winner": "draw"
+}

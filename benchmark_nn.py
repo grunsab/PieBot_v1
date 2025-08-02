@@ -158,7 +158,7 @@ def benchmark_neural_network(model_path, num_positions=10000, batch_size=None, s
 
     # Determine batch size
     if batch_size is None:
-        batch_size = get_batch_size_for_device(base_batch_size=4096)
+        batch_size = get_batch_size_for_device(base_batch_size=1024)
     print(f"Using batch size: {batch_size}")
     
     # Generate positions
