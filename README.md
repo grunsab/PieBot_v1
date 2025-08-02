@@ -29,9 +29,9 @@ The current position is displayed with an ascii chess board. Enter your moves in
 
 Download the 2.5MM games [CCRL Dataset](https://lczero.org/blog/2018/09/a-standard-dataset/), reformat it using `reformat.py`and run `train.py`.
 
-Use download_computerchess_org_uk.py program to download another 2MM games. This file will filter out games that are 3000+ ELO, which number approximately 1MM in this set of games.
+Use download_computerchess_org_uk.py program to download another 2MM games. This file will filter out games that are 3300+ ELO, which number approximately 500k in this set of games.
 
-This should give you approximately 3.5MM games in total to train on, which should give you a good starting point for an engine that plays at over 2800 ELO.
+This should give you approximately 3.0MM games in total to train on, which should give you a good starting point for an engine that plays at over 2800 ELO.
 
 Use download_lichess_games.py to download more 3000+ ELO games. Note that there are approximately 400k such games spread across all LiChess's many years of operating, so it might not be that efficient to use download_lichess_games.py.
 
