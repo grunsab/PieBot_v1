@@ -20,7 +20,7 @@ Standard python libraries. See requirements.txt.
 
 The entry point to the chess engine is the python file playchess.py. Good parameters for strong, long-thinking moves would be:
 ```
-python3 playchess.py --model AlphaZeroNet_20x256_distributed.pt --verbose --rollouts 10 --threads 1000 --mode h
+python3 playchess.py --model PieBot_20x256_v0.pt --verbose --rollouts 500 --threads 20 --mode h
 ```
 The current position is displayed with an ascii chess board. Enter your moves in long algebraic notation. Note that running the engine requires a weights file.  
 
@@ -64,9 +64,9 @@ The algorithm is based on [this paper](https://arxiv.org/pdf/1712.01815.pdf). On
 
 ## Strength
 
-Note that there are multiple models included in the repository. AlphaZeroNet_20x256_distributed.pt is currently the most refined of them, with a policy loss of approximately 1.5 and a value loss of approximately 0.4. It was trained across 250 epochs on a dataset of 2MM games from LCZero's standard dataset, using supervised learning.
+Note that there are multiple models included in the repository. PieBot_20x256_v0.pt is currently the most refined of them, with a policy loss of approximately 1.5 and a value loss of approximately 0.4. It was trained across 250 epochs on a dataset of 2MM games from LCZero's standard dataset, using supervised learning.
 
-The current best model performs at around 2400 ELO on LiChess (available to test on AlphaZeroNet_20x256_distributed.pt), on a Macbook Mini M4 at 400-500 nodes per second evaluated. It performs at a higher ELO of around 2500 on a Macbook Pro M4 Pro due to that device processing 800 nodes per second.
+The current best model performs at around 2400 ELO on LiChess (available to test on PieBot_20x256_v0.pt), on a Macbook Mini M4 at 400-500 nodes per second evaluated. It performs at a higher ELO of around 2500 on a Macbook Pro M4 Pro due to that device processing 800 nodes per second.
 
 I'm training a new model using a larger dataset including the ones from ComputerChess.org.uk, which should play much stronger once it's completed. That will train on approximately 3MM-3.5MM games in total.
 
