@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Download and filter super-grandmaster-level chess games from ComputerChess.org.uk.
-Filters games where both players have ratings >= 3300 (super-grandmaster level).
+Filters games where both players have ratings >= 3450 (significantly beyond human level).
 """
 
 import requests
@@ -30,7 +30,7 @@ try:
 except ImportError:
     TQDM_AVAILABLE = False
 
-MIN_RATING = 3300
+MIN_RATING = 3450
 
 import uuid
 import py7zr
@@ -136,7 +136,7 @@ def process_game_chunk(args):
     return local_kept
 
 
-def filter_games_by_rating_and_time_control_parallel(input_file, output_directory, min_rating=3300, offset=0, num_processes=None):
+def filter_games_by_rating_and_time_control_parallel(input_file, output_directory, min_rating=3450, offset=0, num_processes=None):
     """Filter games where both players have rating >= min_rating using parallel processing."""
     
     if num_processes is None:
@@ -191,7 +191,7 @@ def filter_games_by_rating_and_time_control_parallel(input_file, output_director
     return total_kept, total_processed
 
 
-def filter_games_by_rating_and_time_control(input_file, output_directory, min_rating=3300, offset=0):
+def filter_games_by_rating_and_time_control(input_file, output_directory, min_rating=3450, offset=0):
     """Filter games where both players have rating >= min_rating."""
     
     games_processed = 0
@@ -249,7 +249,7 @@ def filter_games_by_rating_and_time_control(input_file, output_directory, min_ra
 def main():
     parser = argparse.ArgumentParser(description="Download and filter grandmaster-level games from ComputerChess.org.uk")
     parser.add_argument('--offset', type=int, default=0, help='Skip the processing of the first N games')
-    parser.add_argument('--min-rating', type=int, default=3300, help='Minimum rating for both players (default: 3300)')
+    parser.add_argument('--min-rating', type=int, default=3450, help='Minimum rating for both players (default: 3450)')
     parser.add_argument('--output-dir', default='games_training_data/reformatted', help='Output directory (default: games_training_data/reformatted)')
     parser.add_argument('--skip-download', action='store_true', help='Skip download and only filter existing files')
     parser.add_argument('--output-dir-downloads', default='games_training_data/CCRL_computerchess_org/', help='Output directory to store LiChess Databases (default: games_training_data)')
@@ -286,7 +286,7 @@ def main():
     total_kept = 0
     total_processed = 0
     
-    MIN_RATING = args.min_rating or 3300
+    MIN_RATING = args.min_rating or 3450
 
     # Create output directory for filtered games
     os.makedirs(args.output_dir, exist_ok=True)
