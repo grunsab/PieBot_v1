@@ -11,10 +11,7 @@ from device_utils import get_optimal_device, optimize_for_device, get_gpu_count
 from RLDataset import SelfPlayDataCollector
 import numpy as np
 import encoder
-
-# Import MCTS module (standard or CUDA-optimized)
-MCTS = None
-USE_CUDA_MCTS = False
+import MCTS
 
 def tolist( move_generator ):
     """
@@ -94,24 +91,7 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
     return models, devices
 
 
-def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, output_directory, offset, file_base, games_to_play, gpu_ids=None, save_format='pgn', temperature=1.0, iteration=0, use_cuda_mcts=False ):
-    global MCTS, USE_CUDA_MCTS
-    
-    # Import appropriate MCTS module
-    if use_cuda_mcts:
-        try:
-            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            import MCTS_cuda_optimized as MCTS
-            USE_CUDA_MCTS = True
-            print("Using CUDA-optimized MCTS")
-        except ImportError:
-            print("WARNING: CUDA-optimized MCTS not available, falling back to standard MCTS")
-            import MCTS
-            USE_CUDA_MCTS = False
-    else:
-        import MCTS
-        USE_CUDA_MCTS = False
-
+def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, output_directory, offset, file_base, games_to_play, gpu_ids=None, save_format='pgn', temperature=1.0, iteration=0 ):
     def get_fileName(games_played, offset, file_base, extension='pgn'):
         return f'{output_directory}/{file_base}_{games_played + offset}.{extension}'
 
@@ -135,8 +115,8 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, outpu
 
 
     games_played = 0
+    total_positions = 0
     
-    first_random_moves = 10
     
     # Initialize data collector if saving in HDF5 format
     if save_format == 'h5':
@@ -168,7 +148,7 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, outpu
                 game.headers["Result"] = board.result()
 
                 file_name = get_fileName(games_played, offset, file_base)
-                with open(file_name, "w") as f:
+                with open(file_name, "w+") as f:
                     exporter = chess.pgn.FileExporter(f)
                     game.export(exporter)
             
@@ -226,6 +206,7 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, outpu
             visit_counts = root.getVisitCounts(board)
             legal_move_mask = encoder.getLegalMoveMask(board)
             current_collector.add_position(board, visit_counts, legal_move_mask)
+            total_positions += 1
         
         # Select move based on visit counts (with temperature for exploration)
         if temperature > 0:
@@ -247,6 +228,13 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, outpu
         print( 'best move {}'.format( str( bestmove ) ) )
     
         board.push( bestmove )
+        
+        # Count position for all formats
+        if save_format == 'pgn':
+            total_positions += 1
+    
+    # Print total positions at the end
+    print(f"TOTAL_POSITIONS: {total_positions}")
 
 
 def parseColor( colorString ):
@@ -270,7 +258,7 @@ if __name__=='__main__':
     parser = argparse.ArgumentParser(usage='Create self play games.')
     parser.add_argument( '--mode', help='Operation mode: \'u\' unlimited self-play , \'s\' stop self-play creation at 1MM games,')
     parser.add_argument( '--model', default="AlphaZeroNet_20x256_distributed.pt", help='Path to model (.pt) file.' )
-    parser.add_argument( '--rollouts', type=int, help='The number of rollouts on computers turn' )
+    parser.add_argument( '--rollouts', type=int, help='The number of rollouts on computers turn. Total rollouts is this times number of threads.' )
     parser.add_argument( '--games-to-play', type=int, default=25000, help='The number of games to play' )
     parser.add_argument( '--offset', type=int, default=0, help='The offset to use for the file number in the PGN' )
     parser.add_argument( '--file-base', default='self_play', help='The file base name for the PGN (changing this will allow you to avoid looking up offset)' )
@@ -282,7 +270,6 @@ if __name__=='__main__':
     parser.add_argument('--save-format', choices=['pgn', 'h5'], default='pgn', help='Output format: pgn for games, h5 for training data (default: pgn)')
     parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for move selection (0 for greedy, >0 for exploration, default: 1.0)')
     parser.add_argument('--iteration', type=int, default=0, help='Training iteration number for metadata (default: 0)')
-    parser.add_argument('--use-cuda-mcts', action='store_true', help='Use CUDA-optimized MCTS implementation')
     parser.set_defaults( verbose=False, mode='s', color='w', rollouts=10, threads=20)
     parser = parser.parse_args()
     
@@ -292,5 +279,5 @@ if __name__=='__main__':
         gpu_ids = [int(gpu_id.strip()) for gpu_id in parser.gpus.split(',')]
 
     main( parser.model, parser.mode, parseColor( parser.color ), parser.rollouts, parser.threads, parser.fen, parser.verbose, parser.output_dir, 
-        parser.offset, parser.file_base, parser.games_to_play, gpu_ids, parser.save_format, parser.temperature, parser.iteration, parser.use_cuda_mcts )
+        parser.offset, parser.file_base, parser.games_to_play, gpu_ids, parser.save_format, parser.temperature, parser.iteration )
 
