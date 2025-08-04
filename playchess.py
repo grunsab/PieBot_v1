@@ -7,7 +7,6 @@ import AlphaZeroNetwork
 import time
 from device_utils import get_optimal_device, optimize_for_device, get_gpu_count
 from quantization_utils import load_quantized_model
-import MCTS_multiprocess
 
 def tolist( move_generator ):
     """
