@@ -46,7 +46,7 @@ class InferenceServer:
         
         Args:
             model: Neural network model
-            device: Torch device (cuda/cpu)
+            device: Torch device (cuda/MPS/cpu)
             batch_size: Maximum batch size
             timeout_ms: Timeout in milliseconds to wait for batch
         """
@@ -250,6 +250,9 @@ def start_inference_server_from_state(model_state, model_config, device_type,
     # Create device
     if device_type == 'cuda' and torch.cuda.is_available():
         device = torch.device('cuda')
+
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            device = torch.device('mps')
     else:
         device = torch.device('cpu')
     

@@ -17,7 +17,7 @@ import ctypes
 MAX_NODES = 2000000  # Maximum nodes in tree
 MAX_EDGES_PER_NODE = 256  # Maximum legal moves in chess position
 EDGE_SIZE = 32  # Bytes per edge (move, P, child_idx, virtual_loss)
-NODE_SIZE = 64  # Bytes per node (N, sum_Q, edges_start, edges_count, lock)
+NODE_SIZE = 72  # Bytes per node (N, sum_Q, edges_start, edges_count, terminal_flag, lock)
 
 class SharedEdge:
     """Edge representation in shared memory."""
@@ -112,7 +112,7 @@ class SharedNode:
             return 0.0
         return self.get_sum_Q() / N
     
-    def update_stats(self, value, from_child_perspective):
+    def update_stats(self, value):
         """Thread-safe update of node statistics."""
         with self._lock:
             # Read current values
@@ -121,10 +121,7 @@ class SharedNode:
             
             # Update
             N += 1
-            if from_child_perspective:
-                sum_Q += 1.0 - value
-            else:
-                sum_Q += value
+            sum_Q += value
                 
             # Write back
             data = struct.pack('dd', N, sum_Q)
@@ -157,6 +154,16 @@ class SharedNode:
             edge_offset = (edges_start + i) * EDGE_SIZE
             edges.append(SharedEdge(edges_shared_mem, edge_offset))
         return edges
+
+    def is_terminal(self):
+        """Check if the node is terminal."""
+        data = self.shared_mem.buf[self.offset + 24:self.offset + 25]
+        return struct.unpack('?', data)[0]
+
+    def set_terminal(self, is_terminal):
+        """Set the terminal flag."""
+        data = struct.pack('?', is_terminal)
+        self.shared_mem.buf[self.offset + 24:self.offset + 25] = data
 
 
 class SharedTree:
@@ -193,8 +200,8 @@ class SharedTree:
         # Initialize counters
         struct.pack_into('qq', self.counters_shm.buf, 0, 0, 0)
         
-        # Lock for allocation
-        self.alloc_lock = mp.Lock()
+        # Lock for allocation (will be set externally for multiprocessing)
+        self.alloc_lock = None
         
     def allocate_node(self):
         """Allocate a new node, returns node index."""
@@ -209,9 +216,9 @@ class SharedTree:
             
             # Initialize node data
             offset = node_idx * NODE_SIZE
-            # N=0, sum_Q=0, edges_start=-1, edges_count=0
-            data = struct.pack('ddii', 0.0, 0.0, -1, 0)
-            self.nodes_shm.buf[offset:offset + 24] = data
+            # N=0, sum_Q=0, edges_start=-1, edges_count=0, terminal=False
+            data = struct.pack('ddii?', 0.0, 0.0, -1, 0, False)
+            self.nodes_shm.buf[offset:offset + 25] = data
             
             return node_idx
     
@@ -241,7 +248,8 @@ class SharedTree:
         node = self.get_node(node_idx)
         
         # Initialize root with initial visit
-        node.update_stats(value, False)
+        node.update_stats(value)
+        node.set_terminal(board.is_game_over())
         
         # Add edges for legal moves
         legal_moves = list(board.legal_moves)
@@ -271,7 +279,8 @@ class SharedTree:
         node = self.get_node(node_idx)
         
         # Initialize with first visit
-        node.update_stats(value, False)
+        node.update_stats(value)
+        node.set_terminal(board.is_game_over())
         
         # Add edges for legal moves
         legal_moves = list(board.legal_moves)
@@ -315,12 +324,81 @@ class SharedTreeClient:
         self.edges_shm = shared_memory.SharedMemory(name=f"{name_prefix}_edges")
         self.counters_shm = shared_memory.SharedMemory(name=f"{name_prefix}_counters")
         
+        # Lock for allocation (will be set externally)
+        self.alloc_lock = None
+        
     def get_node(self, node_idx):
         """Get node by index."""
         if node_idx < 0:
             return None
         offset = node_idx * NODE_SIZE
         return SharedNode(self.nodes_shm, offset, node_idx)
+    
+    def allocate_node(self):
+        """Allocate a new node, returns node index."""
+        with self.alloc_lock:
+            node_count, edge_count = struct.unpack('qq', self.counters_shm.buf[:16])
+            if node_count >= MAX_NODES:
+                raise RuntimeError("Maximum nodes reached")
+            
+            node_idx = node_count
+            node_count += 1
+            struct.pack_into('qq', self.counters_shm.buf, 0, node_count, edge_count)
+            
+            # Initialize node data
+            offset = node_idx * NODE_SIZE
+            # N=0, sum_Q=0, edges_start=-1, edges_count=0, terminal=False
+            data = struct.pack('ddii?', 0.0, 0.0, -1, 0, False)
+            self.nodes_shm.buf[offset:offset + 25] = data
+            
+            return node_idx
+    
+    def allocate_edges(self, count):
+        """Allocate edges, returns start index."""
+        with self.alloc_lock:
+            node_count, edge_count = struct.unpack('qq', self.counters_shm.buf[:16])
+            if edge_count + count > MAX_NODES * MAX_EDGES_PER_NODE:
+                raise RuntimeError("Maximum edges reached")
+                
+            edge_start = edge_count
+            edge_count += count
+            struct.pack_into('qq', self.counters_shm.buf, 0, node_count, edge_count)
+            
+            return edge_start
+    
+    def expand_node(self, parent_edge, board, value, move_probabilities):
+        """Expand a node (create child)."""
+        # Check if already expanded
+        if parent_edge.get_child_idx() >= 0:
+            return False
+            
+        # Allocate new node
+        node_idx = self.allocate_node()
+        node = self.get_node(node_idx)
+        
+        # Initialize with first visit
+        node.update_stats(value)
+        node.set_terminal(board.is_game_over())
+        
+        # Add edges for legal moves
+        legal_moves = list(board.legal_moves)
+        if legal_moves:
+            edges_start = self.allocate_edges(len(legal_moves))
+            node.set_edges_info(edges_start, len(legal_moves))
+            
+            # Initialize edges
+            for i, move in enumerate(legal_moves):
+                edge_offset = (edges_start + i) * EDGE_SIZE
+                edge = SharedEdge(self.edges_shm, edge_offset)
+                edge.set_move(move)
+                edge.set_P(move_probabilities[i])
+                edge.set_child_idx(-1)
+                edge.set_virtual_loss(0.0)
+        
+        # Link parent to child
+        parent_edge.set_child_idx(node_idx)
+        
+        return True
     
     def cleanup(self):
         """Clean up client connections."""

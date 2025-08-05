@@ -1,6 +1,6 @@
 torch>=2.0.0
 chess>=1.10.0
-numpy>=1.21.0
+#numpy>=1.21.0
 flask>=2.0.0
 atomic-py>=1.0.0
 py7zr>=0.20.0

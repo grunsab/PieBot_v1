@@ -1,12 +1,13 @@
 """
-Multi-process MCTS implementation for AlphaZero chess engine.
+High-performance, multi-process MCTS implementation for AlphaZero chess engine.
 
-This module provides a multi-process version of MCTS that can utilize
-multiple CPU cores effectively by running tree search in parallel processes.
+This module provides a multi-process version of MCTS that utilizes
+multiple CPU cores effectively by running tree search in parallel, persistent
+worker processes.
 """
 
 import multiprocessing as mp
-from multiprocessing import Queue, Process, Event, Manager
+from multiprocessing import Process, Event, Lock, Manager
 import numpy as np
 import chess
 import torch
@@ -15,63 +16,64 @@ import time
 import os
 from collections import deque
 import uuid
+import queue
 
 import encoder
-from shared_tree import SharedTree, SharedTreeClient, SharedNode, SharedEdge
+from shared_tree import SharedTree, SharedTreeClient
 from inference_server import InferenceRequest, InferenceResult, start_inference_server, start_inference_server_from_state
 import MCTS_profiling_speedups_v2 as MCTS  # For UCT calculation and other utilities
 
+# A task for a worker to perform a set of rollouts
+class RolloutTask:
+    def __init__(self, task_id, tree_name, root_idx, root_board, num_rollouts):
+        self.task_id = task_id
+        self.tree_name = tree_name
+        self.root_idx = root_idx
+        self.root_board = root_board
+        self.num_rollouts = num_rollouts
 
-def run_worker(worker_id, tree_name, inference_queue, result_queue, stop_event,
-               root_idx, root_board, num_rollouts):
+# A result message from a worker
+class WorkerResult:
+    def __init__(self, worker_id, task_id, rollouts_completed, same_paths):
+        self.worker_id = worker_id
+        self.task_id = task_id
+        self.rollouts_completed = rollouts_completed
+        self.same_paths = same_paths
+
+def run_worker(worker_id, task_queue, completion_queue, inference_queue, stop_event, alloc_lock):
     """
-    Worker process entry point.
-    
-    Args:
-        worker_id: Worker ID
-        tree_name: Name of shared tree
-        inference_queue: Queue for inference requests
-        result_queue: Queue for receiving results
-        stop_event: Event to signal shutdown
-        root_idx: Root node index
-        root_board: Root board position
-        num_rollouts: Number of rollouts to perform
+    Worker process entry point. Loops indefinitely, waiting for rollout tasks.
     """
-    worker = MCTSWorker(worker_id, tree_name, inference_queue, result_queue, stop_event)
+    worker = MCTSWorker(worker_id, inference_queue, stop_event)
     
-    # Create SharedTree instance for expansion
-    shared_tree = SharedTreeClient(tree_name)
-    
-    try:
-        worker.run(root_idx, root_board, shared_tree, num_rollouts)
-    finally:
-        shared_tree.cleanup()
+    while not stop_event.is_set():
+        try:
+            # Wait for a task. Using a timeout allows checking the stop_event periodically.
+            task = task_queue.get(timeout=0.1)
+        except queue.Empty:
+            continue
+
+        # Create a client for the specific shared tree for this task
+        shared_tree_client = SharedTreeClient(task.tree_name)
+        shared_tree_client.alloc_lock = alloc_lock
+
+        try:
+            rollouts_completed, same_paths = worker.run_task(task, shared_tree_client)
+            # Report completion
+            completion_queue.put(WorkerResult(worker_id, task.task_id, rollouts_completed, same_paths))
+        finally:
+            # Clean up the client connection to the shared memory
+            shared_tree_client.cleanup()
 
 
 class MCTSWorker:
     """Worker process for MCTS rollouts."""
     
-    def __init__(self, worker_id, tree_name, inference_queue, result_queue, stop_event):
-        """
-        Initialize MCTS worker.
-        
-        Args:
-            worker_id: Unique worker ID
-            tree_name: Name of shared tree
-            inference_queue: Queue for inference requests
-            result_queue: Queue for receiving results
-            stop_event: Event to signal shutdown
-        """
+    def __init__(self, worker_id, inference_queue, stop_event):
         self.worker_id = worker_id
-        self.tree_name = tree_name
         self.inference_queue = inference_queue
-        self.result_queue = result_queue
         self.stop_event = stop_event
-        self.tree_client = None
-        
-        # Statistics
-        self.rollouts_completed = 0
-        self.same_paths = 0
+        self.result_queue = Manager().Queue() # Each worker has its own result queue from inference
         
     def calc_uct(self, edge, parent_N):
         """Calculate UCT value for edge."""
@@ -79,7 +81,6 @@ class MCTSWorker:
         N = edge.get_N()
         P = edge.get_P()
         
-        # Handle NaN
         if math.isnan(P):
             P = 1.0 / 200.0
             
@@ -91,23 +92,23 @@ class MCTSWorker:
             
         return UCT
     
-    def get_edge_stats(self, edge):
+    def get_edge_stats(self, edge, tree_client):
         """Get edge statistics (N and Q)."""
         child_idx = edge.get_child_idx()
         virtual_loss = edge.get_virtual_loss()
         
         if child_idx >= 0:
-            child = self.tree_client.get_node(child_idx)
+            child = tree_client.get_node(child_idx)
             child_N = child.get_N()
             child_sum_Q = child.get_sum_Q()
             
-            # Include virtual loss in calculations
             total_N = child_N + virtual_loss
-            total_sum_Q = child_sum_Q + virtual_loss
-            
             # Q from parent's perspective (1 - child's Q)
             if total_N > 0:
-                Q = 1.0 - (total_sum_Q / total_N)
+                # The value of a node is from the perspective of the player whose turn it is.
+                # The Q value for an edge should be from the perspective of the parent node.
+                # If it's the child's turn, the parent sees the value as 1 - child_value.
+                Q = 1.0 - (child.get_sum_Q() / total_N)
             else:
                 Q = 0.0
                 
@@ -115,9 +116,9 @@ class MCTSWorker:
         else:
             return virtual_loss, 0.0
     
-    def select_best_edge(self, node, edges_shm):
+    def select_best_edge(self, node, tree_client):
         """Select best edge using UCT."""
-        edges = node.get_edges(edges_shm)
+        edges = node.get_edges(tree_client.edges_shm)
         if not edges:
             return None
             
@@ -126,8 +127,7 @@ class MCTSWorker:
         best_uct = -float('inf')
         
         for edge in edges:
-            # Calculate UCT with virtual loss
-            N, Q = self.get_edge_stats(edge)
+            N, Q = self.get_edge_stats(edge, tree_client)
             P = edge.get_P()
             
             if math.isnan(P):
@@ -145,278 +145,204 @@ class MCTSWorker:
                 
         return best_edge
     
-    def select_path(self, root_idx, root_board, edges_shm, virtual_loss_scale=1.0):
-        """
-        Select path from root to leaf.
-        
-        Returns:
-            board: Board at leaf position
-            node_path: List of (node_idx, node) tuples
-            edge_path: List of edges
-            is_terminal: Whether leaf is terminal
-        """
+    def select_path(self, root_idx, root_board, tree_client, virtual_loss_scale=1.0):
+        """Select path from root to leaf."""
         board = root_board.copy()
         node_path = []
         edge_path = []
         
         current_idx = root_idx
-        current_node = self.tree_client.get_node(current_idx)
         
         while True:
+            current_node = tree_client.get_node(current_idx)
             node_path.append((current_idx, current_node))
             
-            # Select best edge
-            best_edge = self.select_best_edge(current_node, edges_shm)
+            if current_node.is_terminal():
+                return board, node_path, edge_path, True
+
+            best_edge = self.select_best_edge(current_node, tree_client)
             
             if best_edge is None:
-                # Terminal node
+                # Should not happen for non-terminal nodes, but handle defensively
                 return board, node_path, edge_path, True
                 
             edge_path.append(best_edge)
-            
-            # Add virtual loss
             best_edge.add_virtual_loss(virtual_loss_scale)
             
-            # Make move
             move = best_edge.get_move()
             board.push(move)
             
-            # Check if edge has child
             child_idx = best_edge.get_child_idx()
             if child_idx < 0:
-                # Unexpanded node
                 return board, node_path, edge_path, False
                 
-            # Move to child
             current_idx = child_idx
-            current_node = self.tree_client.get_node(current_idx)
     
-    def run_rollout(self, root_idx, root_board, shared_tree, edges_shm, virtual_loss_scale=1.0):
+    def run_rollout(self, root_idx, root_board, shared_tree_client, virtual_loss_scale=1.0):
         """Execute one MCTS rollout."""
         # Selection phase
         board, node_path, edge_path, is_terminal = self.select_path(
-            root_idx, root_board, edges_shm, virtual_loss_scale
+            root_idx, root_board, shared_tree_client, virtual_loss_scale
         )
         
+        leaf_node = node_path[-1][1]
+
         if is_terminal:
-            # Terminal node - evaluate based on game result
-            winner = encoder.parseResult(board.result())
-            if not board.turn:
-                winner *= -1
-            value = float(winner) / 2.0 + 0.5
+            result_str = board.result(claim_draw=True)
+            winner = encoder.parseResult(result_str)
+            # Value is from the perspective of the current player at the leaf
+            value = float(winner)
         else:
             # Request neural network evaluation
-            request_id = f"{self.worker_id}_{self.rollouts_completed}"
+            request_id = f"{self.worker_id}_{uuid.uuid4().hex[:8]}"
             request = InferenceRequest(request_id, board.fen(), self.worker_id)
             self.inference_queue.put((request, self.result_queue))
             
             # Wait for result
             result = self.result_queue.get()
-            value = result.value / 2.0 + 0.5
+            value = result.value
             
             # Expand node if needed
-            if len(edge_path) > 0:
-                last_edge = edge_path[-1]
-                expanded = shared_tree.expand_node(last_edge, board, value, result.move_probabilities)
+            last_edge = edge_path[-1] if edge_path else None
+            if last_edge and last_edge.get_child_idx() < 0:
+                expanded = shared_tree_client.expand_node(last_edge, board, value, result.move_probabilities)
                 if not expanded:
-                    self.same_paths += 1
-                    
-            # Flip value for backpropagation
-            value = 1.0 - value
+                    # Another worker expanded this node first.
+                    # We still use the NN eval for backpropagation.
+                    pass
         
         # Backpropagation
-        last_node_idx = len(node_path) - 1
-        for i in range(last_node_idx, -1, -1):
+        # The value is from the perspective of the player at the leaf node.
+        # We need to flip the value at each step up the tree.
+        current_value = value
+        for i in range(len(node_path) - 1, -1, -1):
             node_idx, node = node_path[i]
-            is_from_child = (last_node_idx - i) % 2 == 1
-            node.update_stats(value, is_from_child)
+            node.update_stats(current_value)
+            current_value *= -1
             
         # Clear virtual losses
         for edge in edge_path:
             edge.clear_virtual_loss()
             
-        self.rollouts_completed += 1
-    
-    def run(self, root_idx, root_board, shared_tree, num_rollouts):
+    def run_task(self, task, shared_tree_client):
         """
-        Main worker loop.
-        
-        Args:
-            root_idx: Root node index
-            root_board: Root board position
-            shared_tree: SharedTree instance
-            num_rollouts: Number of rollouts to perform
+        Run a specific rollout task.
         """
-        # Connect to shared tree
-        self.tree_client = SharedTreeClient(self.tree_name)
-        edges_shm = self.tree_client.edges_shm
+        num_workers = mp.cpu_count() - 2
+        virtual_loss_scale = math.sqrt(num_workers / 10.0) if num_workers > 0 else 1.0
         
-        # Calculate virtual loss scale based on number of workers
-        # This is a heuristic - more workers = higher virtual loss
-        num_workers = mp.cpu_count() - 2  # Reserve cores for main and inference
-        virtual_loss_scale = math.sqrt(num_workers / 10.0)
+        rollouts_completed = 0
+        for _ in range(task.num_rollouts):
+            if self.stop_event.is_set():
+                break
+            self.run_rollout(task.root_idx, task.root_board, shared_tree_client, virtual_loss_scale)
+            rollouts_completed += 1
         
-        try:
-            for _ in range(num_rollouts):
-                if self.stop_event.is_set():
-                    break
-                    
-                self.run_rollout(root_idx, root_board, shared_tree, edges_shm, virtual_loss_scale)
-                
-        finally:
-            self.tree_client.cleanup()
+        return rollouts_completed, 0 # same_paths not tracked anymore
 
 
 class MultiprocessMCTS:
-    """Multi-process MCTS implementation."""
+    """Persistent Multi-process MCTS implementation."""
     
-    def __init__(self, num_processes=None, inference_batch_size=64, inference_timeout_ms=5):
-        """
-        Initialize multi-process MCTS.
-        
-        Args:
-            num_processes: Number of worker processes (None = auto)
-            inference_batch_size: Batch size for inference
-            inference_timeout_ms: Timeout for batching
-        """
+    def __init__(self, model, num_processes=None, inference_batch_size=64, inference_timeout_ms=5):
         if num_processes is None:
-            # Use all cores minus 2 (one for main, one for inference)
             num_processes = max(1, mp.cpu_count() - 2)
             
         self.num_processes = num_processes
         self.inference_batch_size = inference_batch_size
         self.inference_timeout_ms = inference_timeout_ms
+        self.model = model
         
-        # Manager for shared resources
+        # Use a manager for creating shared objects like queues
         self.manager = Manager()
-        
-        # Shared resources
-        self.shared_tree = None
+        self.task_queue = self.manager.Queue()
+        self.completion_queue = self.manager.Queue()
         self.inference_queue = self.manager.Queue()
-        self.result_queues = {}  # Will create per-worker result queues
         self.stop_event = self.manager.Event()
+        self.alloc_lock = self.manager.Lock()
+        
         self.processes = []
+        self.shared_tree = None
         
-        # Statistics
-        self.total_rollouts = 0
-        self.total_time = 0.0
+        self.start_persistent_processes()
         
-    def create_root(self, board, model):
-        """Create root node and initialize tree."""
-        # Clean up any existing tree
-        if self.shared_tree:
-            self.shared_tree.cleanup()
-            
-        # Create new shared tree
-        tree_name = f"mcts_tree_{uuid.uuid4().hex[:8]}"
-        self.shared_tree = SharedTree(tree_name)
-        
-        # Evaluate root position
-        with torch.no_grad():
-            value, move_probabilities = MCTS.callNeuralNetworkOptimized(board, model)
-            
-        # Create root node
-        root_idx = self.shared_tree.create_root(board, value / 2.0 + 0.5, move_probabilities)
-        
-        return root_idx, tree_name
-    
-    def run_parallel_rollouts(self, board, model, num_rollouts):
-        """
-        Run parallel rollouts using multiple processes.
-        
-        Args:
-            board: Current board position
-            model: Neural network model
-            num_rollouts: Total number of rollouts
-        """
-        start_time = time.time()
-        
-        # Create root and tree
-        root_idx, tree_name = self.create_root(board, model)
-        
-        # Clear stop event
-        self.stop_event.clear()
-        
-        # Get device for model
-        device = next(model.parameters()).device
-        
-        # For MPS devices, we need to handle model sharing differently
+    def start_persistent_processes(self):
+        """Starts the inference server and worker processes."""
+        # Start Inference Server
+        device = next(self.model.parameters()).device
         if device.type == 'mps':
-            # Save model to CPU and reload in inference process
-            model_state = model.cpu().state_dict()
+            model_state = self.model.cpu().state_dict()
+            try:
+                conv1_out_channels = self.model.conv1.out_channels
+                num_blocks = len([m for m in self.model.modules() if hasattr(m, 'conv1') and hasattr(m, 'conv2')]) // 2
+                model_config = {'num_blocks': num_blocks, 'num_channels': conv1_out_channels}
+            except:
+                model_config = {'num_blocks': 20, 'num_channels': 256}
             
-            # Get model configuration
-            if hasattr(self, 'model_config'):
-                model_config = self.model_config
-            else:
-                # Try to infer from model
-                try:
-                    conv1_out_channels = model.conv1.out_channels
-                    num_blocks = len([m for m in model.modules() if hasattr(m, 'conv1') and hasattr(m, 'conv2')]) // 2
-                    model_config = {'num_blocks': num_blocks, 'num_channels': conv1_out_channels}
-                except:
-                    model_config = {'num_blocks': 20, 'num_channels': 256}
-            
-            # Start inference server process with model state instead of model
             inference_process = Process(
                 target=start_inference_server_from_state,
                 args=(model_state, model_config, 'cpu', self.inference_queue, self.stop_event,
                       self.inference_batch_size, self.inference_timeout_ms)
             )
-            
-            # Move model back to MPS for root evaluation
-            model = model.to(device)
         else:
-            # For CUDA/CPU, we can pass the model directly
             inference_process = Process(
                 target=start_inference_server,
-                args=(model, device, self.inference_queue, self.stop_event,
+                args=(self.model, device, self.inference_queue, self.stop_event,
                       self.inference_batch_size, self.inference_timeout_ms)
             )
         
         inference_process.start()
         self.processes.append(inference_process)
         
-        # Calculate rollouts per worker
+        # Start Worker Processes
+        for i in range(self.num_processes):
+            process = Process(
+                target=run_worker,
+                args=(i, self.task_queue, self.completion_queue, self.inference_queue, 
+                      self.stop_event, self.alloc_lock)
+            )
+            process.start()
+            self.processes.append(process)
+            
+    def run_parallel_rollouts(self, board, num_rollouts):
+        """
+        Run parallel rollouts using the persistent worker pool.
+        """
+        # 1. Create a new shared tree for this search
+        if self.shared_tree:
+            self.shared_tree.cleanup()
+        
+        tree_name = f"mcts_tree_{uuid.uuid4().hex[:8]}"
+        self.shared_tree = SharedTree(tree_name)
+        self.shared_tree.alloc_lock = self.alloc_lock
+        
+        # 2. Evaluate root position and create root node
+        with torch.no_grad():
+            value, move_probabilities = MCTS.callNeuralNetworkOptimized(board, self.model)
+        
+        root_idx = self.shared_tree.create_root(board, value, move_probabilities)
+        
+        # 3. Distribute rollouts among workers
+        task_id = uuid.uuid4().hex
         rollouts_per_worker = num_rollouts // self.num_processes
         remainder = num_rollouts % self.num_processes
         
-        # Start worker processes
-        workers = []
         for i in range(self.num_processes):
             worker_rollouts = rollouts_per_worker
             if i < remainder:
                 worker_rollouts += 1
-            
-            # Create a result queue for this worker
-            result_queue = self.manager.Queue()
-            self.result_queues[i] = result_queue
-                
-            # Start worker process
-            process = Process(
-                target=run_worker,
-                args=(i, tree_name, self.inference_queue, result_queue, 
-                      self.stop_event, root_idx, board, worker_rollouts)
-            )
-            process.start()
-            self.processes.append(process)
-            workers.append(process)
+            if worker_rollouts > 0:
+                task = RolloutTask(task_id, tree_name, root_idx, board, worker_rollouts)
+                self.task_queue.put(task)
         
-        # Wait for workers to complete
-        for process in workers:
-            process.join()
-            
-        # Stop inference server
-        self.stop_event.set()
-        inference_process.join()
-        
-        # Clear process list
-        self.processes.clear()
-        
-        # Update statistics
-        elapsed = time.time() - start_time
-        self.total_rollouts += num_rollouts
-        self.total_time += elapsed
+        # 4. Wait for all workers to complete this task
+        completed_workers = 0
+        total_rollouts_done = 0
+        while completed_workers < self.num_processes:
+            result = self.completion_queue.get()
+            if result.task_id == task_id:
+                completed_workers += 1
+                total_rollouts_done += result.rollouts_completed
         
         return root_idx
     
@@ -439,11 +365,13 @@ class MultiprocessMCTS:
         return None
     
     def get_edge_visit_count(self, edge):
-        """Get visit count for an edge."""
+        """Get visit count and Q value for an edge."""
         child_idx = edge.get_child_idx()
         if child_idx >= 0:
             child = self.shared_tree.get_node(child_idx)
-            return child.get_N(), child.get_Q()
+            # Q is from the parent's perspective, so it's 1 - child's Q
+            q_value = 1.0 - child.get_Q() if child.get_N() > 0 else 0.0
+            return child.get_N(), q_value
         return 0, 0.0
     
     def get_statistics_string(self, root_idx):
@@ -451,7 +379,6 @@ class MultiprocessMCTS:
         root = self.shared_tree.get_node(root_idx)
         edges = root.get_edges(self.shared_tree.edges_shm)
         
-        # Sort edges by visit count
         edge_stats = []
         for edge in edges:
             move = edge.get_move()
@@ -461,16 +388,9 @@ class MultiprocessMCTS:
             
         edge_stats.sort(key=lambda x: x[2], reverse=True)
         
-        # Format string
-        string = '|{: ^10}|{: ^10}|{: ^10}|{: ^10}|\n'.format(
-            'move', 'P', 'N', 'Q'
-        )
-        
-        for move, P, N, Q in edge_stats[:10]:  # Top 10 moves
-            string += '|{: ^10}|{:10.4f}|{:10.0f}|{:10.4f}|\n'.format(
-                str(move), P, N, Q
-            )
-            
+        string = '|{: ^10}|{: ^10}|{: ^10}|{: ^10}|\n'.format('move', 'P', 'N', 'Q')
+        for move, P, N, Q in edge_stats[:10]:
+            string += '|{: ^10}|{:10.4f}|{:10.0f}|{:10.4f}|\n'.format(str(move), P, N, Q)
         return string
     
     def get_root_q(self, root_idx):
@@ -479,61 +399,49 @@ class MultiprocessMCTS:
         return root.get_Q()
     
     def cleanup(self):
-        """Clean up resources."""
-        # Stop all processes
+        """Clean up resources by stopping all persistent processes."""
         self.stop_event.set()
-        for process in self.processes:
-            if process.is_alive():
-                process.terminate()
-                process.join()
-                
-        # Clean up shared tree
+        time.sleep(0.1) # Give processes time to see the event
+
+        # Empty the queues to prevent deadlocks
+        for q in [self.task_queue, self.completion_queue, self.inference_queue]:
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    break
+        
+        for p in self.processes:
+            if p.is_alive():
+                p.terminate() # Force terminate if it doesn't exit gracefully
+            p.join()
+            
         if self.shared_tree:
             self.shared_tree.cleanup()
             self.shared_tree = None
-            
-        # Clear queues
-        try:
-            while not self.inference_queue.empty():
-                self.inference_queue.get_nowait()
-        except:
-            pass
-            
-        # Shutdown manager
-        if hasattr(self, 'manager'):
-            self.manager.shutdown()
-
 
 # Compatibility class to match original MCTS interface
 class Root:
-    """Compatibility wrapper to match original MCTS Root interface."""
+    """Compatibility wrapper for the persistent multi-process MCTS engine."""
     
+    _mcts_engine = None
+    _mcts_lock = Lock()
+
     def __init__(self, board, neuralNetwork):
-        """Initialize root compatible with original MCTS."""
         self.board = board.copy()
         self.neuralNetwork = neuralNetwork
-        self.mcts = MultiprocessMCTS()
         self.root_idx = None
-        self.same_paths = 0
         
-        # Extract model configuration for MPS compatibility
-        # This assumes AlphaZeroNet structure - adjust if using different architecture
-        try:
-            # Try to infer model configuration from the model structure
-            conv1_out_channels = neuralNetwork.conv1.out_channels
-            num_blocks = len([m for m in neuralNetwork.modules() if hasattr(m, 'conv1') and hasattr(m, 'conv2')]) // 2
-            self.model_config = {'num_blocks': num_blocks, 'num_channels': conv1_out_channels}
-        except:
-            # Default configuration
-            self.model_config = {'num_blocks': 20, 'num_channels': 256}
-        
+        with Root._mcts_lock:
+            if Root._mcts_engine is None:
+                Root._mcts_engine = MultiprocessMCTS(neuralNetwork)
+
     def parallelRollouts(self, board, neuralNetwork, num_parallel_rollouts):
         """Run parallel rollouts (compatibility method)."""
-        # Pass model config to MCTS if available
-        if hasattr(self, 'model_config'):
-            self.mcts.model_config = self.model_config
-        self.root_idx = self.mcts.run_parallel_rollouts(
-            self.board, self.neuralNetwork, num_parallel_rollouts
+        # The board and neural network are now mainly for API compatibility.
+        # The engine uses the model it was initialized with.
+        self.root_idx = Root._mcts_engine.run_parallel_rollouts(
+            self.board, num_parallel_rollouts
         )
         
     def maxNSelect(self):
@@ -541,62 +449,55 @@ class Root:
         if self.root_idx is None:
             return None
             
-        root = self.mcts.shared_tree.get_node(self.root_idx)
-        edges = root.get_edges(self.mcts.shared_tree.edges_shm)
-        
-        best_edge = None
-        best_N = -1
-        
+        best_move = Root._mcts_engine.get_best_move(self.root_idx)
+        if not best_move:
+            return None
+
+        # For compatibility, we need to return an object with getMove(), getN(), getQ()
+        class EdgeWrapper:
+            def __init__(self, move, N, Q):
+                self.move = move
+                self.N = N
+                self.Q = Q
+            def getMove(self): return self.move
+            def getN(self): return self.N
+            def getQ(self): return self.Q
+
+        root = Root._mcts_engine.shared_tree.get_node(self.root_idx)
+        edges = root.get_edges(Root._mcts_engine.shared_tree.edges_shm)
         for edge in edges:
-            child_idx = edge.get_child_idx()
-            if child_idx >= 0:
-                child = self.mcts.shared_tree.get_node(child_idx)
-                N = child.get_N()
-                if N > best_N:
-                    best_N = N
-                    best_edge = edge
-                    
-        # Create a simple edge wrapper for compatibility
-        if best_edge:
-            class EdgeWrapper:
-                def __init__(self, move, N, Q):
-                    self.move = move
-                    self.N = N
-                    self.Q = Q
-                def getMove(self):
-                    return self.move
-                def getN(self):
-                    return self.N
-                def getQ(self):
-                    return self.Q
-                    
-            child = self.mcts.shared_tree.get_node(best_edge.get_child_idx())
-            return EdgeWrapper(best_edge.get_move(), child.get_N(), child.get_Q())
-            
+            if edge.get_move() == best_move:
+                N, Q = Root._mcts_engine.get_edge_visit_count(edge)
+                return EdgeWrapper(best_move, N, Q)
         return None
     
     def getQ(self):
         """Get Q value at root (compatibility method)."""
         if self.root_idx is None:
             return 0.5
-        return self.mcts.get_root_q(self.root_idx)
+        return Root._mcts_engine.get_root_q(self.root_idx)
     
     def getStatisticsString(self):
         """Get statistics string (compatibility method)."""
         if self.root_idx is None:
             return ""
-        return self.mcts.get_statistics_string(self.root_idx)
+        return Root._mcts_engine.get_statistics_string(self.root_idx)
     
-    def cleanup(self):
-        """Clean up resources."""
-        self.mcts.cleanup()
-
+    @staticmethod
+    def cleanup_engine():
+        """Static method to clean up the shared MCTS engine."""
+        with Root._mcts_lock:
+            if Root._mcts_engine:
+                Root._mcts_engine.cleanup()
+                Root._mcts_engine = None
 
 # Module-level functions for compatibility
 def clear_caches():
-    """Clear caches (compatibility function)."""
-    pass  # Caches are per-process in multiprocess version
+    pass
 
 def clear_pools():
-    """Clear object pools (compatibility function)."""
-    pass  # Not used in multiprocess version
+    pass
+
+# It's good practice to ensure cleanup happens on exit
+import atexit
+atexit.register(Root.cleanup_engine)
