@@ -251,9 +251,9 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
     #play chess moves
     while True:
 
-        if board.is_game_over():
+        if board.is_game_over(claim_draw=True):
             #If the game is over, output the winner and wait for user input to continue
-            print( 'Game over. Winner: {}'.format( board.result() ) )
+            print( 'Game over. Winner: {}'.format( board.result(claim_draw=True) ) )
             board.reset_board()
             c = input( 'Enter any key to continue ' )
 
@@ -295,23 +295,14 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
             with torch.no_grad():
                 if verbose:
                     print(f"DEBUG: Creating MCTS root")
-                
-                if num_processes > 1:
-                    # Use multiprocessing version
-                    if verbose:
-                        print(f"DEBUG: Using multiprocessing with {num_processes} processes")
+
+                root = MCTS.Root( board, alphaZeroNet )
                     
-                    root = MCTS_multiprocess.create_multiprocess_root(board, alphaZeroNet, modelFile)
-                    root.multiprocess_rollouts(board, modelFile, num_rollouts, num_processes, num_threads)
-                else:
-                    # Use regular single-process version
-                    root = MCTS.Root( board, alphaZeroNet )
-                    
-                    if verbose:
-                        print(f"DEBUG: Starting {num_rollouts} rollouts with {num_threads} threads")
-                
-                    for i in range( num_rollouts ):
-                        root.parallelRollouts( board.copy(), alphaZeroNet, num_threads )
+                if verbose:
+                    print(f"DEBUG: Starting {num_rollouts} rollouts with {num_threads} threads")
+            
+                for i in range( num_rollouts ):
+                    root.parallelRollouts( board.copy(), alphaZeroNet, num_threads )
 
             endtime = time.perf_counter()
 

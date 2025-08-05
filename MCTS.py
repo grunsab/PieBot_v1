@@ -65,9 +65,10 @@ class Node:
 
         self.edges = []
 
-        for idx, move in enumerate( board.legal_moves ):
-            edge = Edge( move, move_probabilities[ idx ] )
-            self.edges.append( edge )
+        if not board.is_game_over(claim_draw=True):
+            for idx, move in enumerate( board.legal_moves ):
+                edge = Edge( move, move_probabilities[ idx ] )
+                self.edges.append( edge )
 
     def getN( self ):
         """
@@ -398,7 +399,7 @@ class Root( Node ):
             new_Q = 1. - new_Q
 
         else:
-            winner = encoder.parseResult( board.result() )
+            winner = encoder.parseResult( board.result(claim_draw=True) )
 
             if not board.turn:
                 winner *= -1
@@ -477,7 +478,7 @@ class Root( Node ):
                 new_Q = 1. - new_Q
                 
             else:
-                winner = encoder.parseResult( board.result() )
+                winner = encoder.parseResult( board.result(claim_draw=True) )
 
                 if not board.turn:
                     winner *= -1

@@ -150,7 +150,7 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, outpu
                 file_name = get_fileName(games_played, offset, file_base)
                 with open(file_name, "w+") as f:
                     exporter = chess.pgn.FileExporter(f)
-                    game.export(exporter)
+                    game.accept(exporter)
             
             elif save_format == 'h5' and current_collector:
                 # Finalize and save HDF5 data

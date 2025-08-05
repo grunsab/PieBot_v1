@@ -60,9 +60,6 @@ class TimeManager:
         # Track actual performance
         self.measured_rollouts_per_second = None
         self.measurement_count = 0
-        # Additional time we could use if we run into a move that leads to draw outcome
-        # Set in calculate_rollouts
-        self.spare_time = 0
         
     def update_performance(self, rollouts, elapsed_time):
         """Update measured performance based on actual timing."""
@@ -118,13 +115,10 @@ class TimeManager:
             # Use a fraction of remaining time, scaling down as time decreases
             if time_left_sec > 60:
                 time_fraction = 0.04  # Use 4% when we have plenty of time
-                self.spare_time = time_left_sec * time_fraction # Use additional 4% of time for draw aversion.
             elif time_left_sec > 10:
                 time_fraction = 0.06  # Use 6% when time is getting lower
-                self.spare_time = time_left_sec * time_fraction
             else:
                 time_fraction = 0.10  # Use 10% when very low on time
-                self.spare_time = time_left_sec * time_fraction
                 
             time_per_move = time_left_sec * time_fraction + increment_sec * 0.8
         
@@ -353,28 +347,6 @@ class UCIEngine:
                 elif hasattr(Q, '__len__'):
                     Q = float(Q)
 
-                test_board = self.board.copy()
-                test_board.push(move)
-                if test_board.can_claim_threefold_repetition() and self.time_manager.spare_time > 0:
-                    # Do more additional thinking if we have time to avoid making a threefold repetition.
-                    rps = self.time_manager.get_rollouts_per_second()
-                    additional_rollouts = int(rps * self.time_manager.spare_time)
-                    num_iterations = max(1, additional_rollouts // self.threads)
-                    remainder = additional_rollouts % self.threads
-                    for i in range(num_iterations):
-                        if self.stop_search.is_set():
-                            break
-                        self.mcts_engine.parallelRollouts(self.board.copy(), self.model, self.threads)
-                    if remainder > 0 and not self.stop_search.is_set():
-                        self.mcts_engine.parallelRollouts(self.board.copy(), self.model, remainder)
-                    edge = self.mcts_engine.maxNSelect()
-                    move = edge.getMove()
-                    Q = self.mcts_engine.getQ()
-                    # Finally set the spare time to zero so we don't reuse the spare time in future loops.
-                    self.time_manager.spare_time = 0
-
-
-
                 bestmove = move   
                 self.best_move = bestmove.uci()
                 sys.stdout.flush()
@@ -485,19 +457,10 @@ class UCIEngine:
         if self.best_move:
             print(f"bestmove {self.best_move}")
         else:
-            # Fallback: pick first legal move that doesn't cause threefold repetition
             print("FALLING BACK TO RANDOM MOVE BECAUSE SEARCH IS BROKEN")
             legal_moves = list(self.board.legal_moves)
             fallback_move = None
             
-            for move in legal_moves:
-                test_board = self.board.copy()
-                test_board.push(move)
-                if not test_board.can_claim_threefold_repetition():
-                    fallback_move = move
-                    break
-            
-            # If all moves lead to threefold repetition, use the first legal move
             if fallback_move is None and legal_moves:
                 fallback_move = legal_moves[0]
                 
