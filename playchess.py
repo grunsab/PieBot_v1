@@ -1,7 +1,8 @@
 
 import argparse
 import chess
-import MCTS
+#import MCTS_profiling_speedups_v2 as MCTS
+import MCTS_multiprocess as MCTS
 import torch
 import AlphaZeroNetwork
 import time
@@ -301,8 +302,7 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
                 if verbose:
                     print(f"DEBUG: Starting {num_rollouts} rollouts with {num_threads} threads")
             
-                for i in range( num_rollouts ):
-                    root.parallelRollouts( board.copy(), alphaZeroNet, num_threads )
+                root.parallelRollouts( board.copy(), alphaZeroNet, num_threads * num_rollouts)
 
             endtime = time.perf_counter()
 

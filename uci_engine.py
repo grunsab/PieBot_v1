@@ -18,6 +18,7 @@ import argparse
 import time
 import threading
 from queue import Queue
+import multiprocessing as mp
 import AlphaZeroNetwork
 from device_utils import get_optimal_device, optimize_for_device
 from quantization_utils import load_quantized_model
@@ -26,12 +27,8 @@ import sys
 
 device, device_str = get_optimal_device()
 
-# if device.type == "mps":
 import MCTS_profiling_speedups_v2 as MCTS
-# import MCTS
-# else:
-#     import MCTS_cuda_optimized as MCTS
-#     print("USING CUDA!")
+import MCTS_multiprocess as MCTS_MP
 
 class TimeManager:
     """Manages time allocation for moves based on game time constraints."""
@@ -148,7 +145,7 @@ class TimeManager:
 class UCIEngine:
     """UCI Protocol handler for AlphaZero chess engine."""
     
-    def __init__(self, model_path=None, threads=64, verbose=False):
+    def __init__(self, model_path=None, threads=64, verbose=False, use_multiprocess=False):
         """
         Initialize UCI engine.
         
@@ -156,6 +153,7 @@ class UCIEngine:
             model_path: Path to the neural network model file
             threads: Number of threads to use for MCTS
             verbose: Whether to output debug information
+            use_multiprocess: Whether to use multi-process MCTS
         """
         self.model_path = model_path
         self.device, self.device_str = get_optimal_device() 
@@ -174,6 +172,7 @@ class UCIEngine:
         self.stop_search = threading.Event()
         self.best_move = None
         self.move_overhead = 30  # Default move overhead in milliseconds
+        self.use_multiprocess = use_multiprocess
         
     def load_model(self):
         """Load the neural network model."""
@@ -251,6 +250,7 @@ class UCIEngine:
         print("option name Model type string default AlphaZeroNet_20x256_distributed.pt")
         print("option name Verbose type check default false")
         print("option name Move Overhead type spin default 30 min 0 max 5000")
+        print("option name UseMultiprocess type check default false")
         print("uciok")
         sys.stdout.flush()
         
@@ -314,25 +314,36 @@ class UCIEngine:
                 return
                 
             with torch.no_grad():
-                self.mcts_engine = MCTS.Root(self.board, self.model)
-                num_iterations = max(1, rollouts // self.threads)
-                remainder = rollouts % self.threads
-                
+                if self.use_multiprocess:
+                    self.mcts_engine = MCTS_MP.Root(self.board, self.model)
+                else:
+                    self.mcts_engine = MCTS.Root(self.board, self.model)
+                    
                 start_time = time.time()
                 
-                for i in range(num_iterations):
-                    if self.stop_search.is_set():
-                        break
-                    self.mcts_engine.parallelRollouts(self.board.copy(), self.model, self.threads)
+                if self.use_multiprocess:
+                    # Multi-process version handles rollouts differently
+                    self.mcts_engine.parallelRollouts(self.board.copy(), self.model, rollouts)
+                    actual_rollouts = rollouts
+                else:
+                    # Original threaded version
+                    num_iterations = max(1, rollouts // self.threads)
+                    remainder = rollouts % self.threads
                     
-                    # Output progress periodically
-                
-                # Handle remainder rollouts if any
-                if remainder > 0 and not self.stop_search.is_set():
-                    self.mcts_engine.parallelRollouts(self.board.copy(), self.model, remainder)
+                    for i in range(num_iterations):
+                        if self.stop_search.is_set():
+                            break
+                        self.mcts_engine.parallelRollouts(self.board.copy(), self.model, self.threads)
+                        
+                        # Output progress periodically
+                    
+                    # Handle remainder rollouts if any
+                    if remainder > 0 and not self.stop_search.is_set():
+                        self.mcts_engine.parallelRollouts(self.board.copy(), self.model, remainder)
+                    
+                    actual_rollouts = num_iterations * self.threads + (remainder if remainder > 0 else 0)
                 
                 elapsed_time = time.time() - start_time
-                actual_rollouts = num_iterations * self.threads + (remainder if remainder > 0 else 0)
                 
                 # Update time manager with actual performance
                 if elapsed_time > 0:
@@ -352,14 +363,18 @@ class UCIEngine:
                 sys.stdout.flush()
                         
                 # Clean up
-                if hasattr(MCTS, 'clear_caches'):
-                    MCTS.clear_caches()
-                if hasattr(MCTS, 'clear_batch_queue'):
-                    MCTS.clear_batch_queue()
-                if hasattr(self.mcts_engine, 'cleanup'):
-                    self.mcts_engine.cleanup()
-                if hasattr(MCTS, 'clear_pools'):
-                    MCTS.clear_pools()
+                if self.use_multiprocess:
+                    if hasattr(self.mcts_engine, 'cleanup'):
+                        self.mcts_engine.cleanup()
+                else:
+                    if hasattr(MCTS, 'clear_caches'):
+                        MCTS.clear_caches()
+                    if hasattr(MCTS, 'clear_batch_queue'):
+                        MCTS.clear_batch_queue()
+                    if hasattr(self.mcts_engine, 'cleanup'):
+                        self.mcts_engine.cleanup()
+                    if hasattr(MCTS, 'clear_pools'):
+                        MCTS.clear_pools()
 
                 score = int(Q * 1000 - 500)
                 elapsed = time.time() - start_time
@@ -525,6 +540,8 @@ class UCIEngine:
                 self.move_overhead = int(value)
             except:
                 pass
+        elif name == "usemultiprocess":
+            self.use_multiprocess = value.lower() in ["true", "yes", "1"]
             
     def run(self):
         """Main UCI protocol loop."""
@@ -573,6 +590,9 @@ def main():
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(line_buffering=True)
     
+    # Set multiprocessing start method to spawn for compatibility
+    mp.set_start_method('spawn', force=True)
+    
     parser = argparse.ArgumentParser(
         description="UCI Protocol wrapper for AlphaZero chess engine"
     )
@@ -582,13 +602,16 @@ def main():
                        default=64)
     parser.add_argument("--verbose", action="store_true", 
                        help="Enable verbose output")
+    parser.add_argument("--multiprocess", action="store_true",
+                       help="Use multi-process MCTS")
     
     args = parser.parse_args()
     
     engine = UCIEngine(
         model_path=args.model,
         threads=args.threads,
-        verbose=args.verbose
+        verbose=args.verbose,
+        use_multiprocess=args.multiprocess
     )
     
     try:
