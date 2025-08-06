@@ -2,7 +2,8 @@
 import argparse
 import chess
 #import MCTS_profiling_speedups_v2 as MCTS
-import MCTS_multiprocess as MCTS
+#import MCTS_multiprocess as MCTS
+import MCTS_root_parallel as MCTS  # Use new root parallelization
 import torch
 import AlphaZeroNetwork
 import time
