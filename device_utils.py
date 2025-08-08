@@ -19,7 +19,7 @@ def get_optimal_device():
         
         # Print GPU memory info for debugging
         total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
-        print(f"GPU Memory: {total_memory:.1f}GB")
+        #print(f"GPU Memory: {total_memory:.1f}GB")
         
         return device, device_str
     

@@ -490,7 +490,7 @@ class RootParallelMCTS:
             inference_timeout_ms: Timeout for batching inference requests
         """
         if num_workers is None:
-            num_workers = 6
+            num_workers = 4
         
         self.num_workers = num_workers
         self.epsilon = epsilon
