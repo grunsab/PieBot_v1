@@ -334,7 +334,7 @@ def process_terminal_node(rollout_data):
     Clear virtual losses after completion.
     """
     board = rollout_data['board']
-    winner = encoder.parseResult(board.result(claim_draw=True))
+    winner = encoder.parseResult(board.result())
     if not board.turn:
         winner *= -1
     new_Q = float(winner) / 2.0 + 0.5
@@ -446,7 +446,7 @@ def run_single_rollout(root, board, worker_id, inference_queue, result_queue):
         new_Q = 1.0 - new_Q
     else:
         # Terminal node
-        winner = encoder.parseResult(board.result(claim_draw=True))
+        winner = encoder.parseResult(board.result())
         if not board.turn:
             winner *= -1
         new_Q = float(winner) / 2.0 + 0.5
