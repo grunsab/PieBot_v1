@@ -136,7 +136,7 @@ class TimeManager:
         rollouts = max(100, rollouts)
         
         # Cap maximum rollouts to prevent excessive thinking
-        rollouts = min(100000, rollouts)
+        rollouts = min(200000, rollouts)
         
         return rollouts
 
