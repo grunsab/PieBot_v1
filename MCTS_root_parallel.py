@@ -707,13 +707,13 @@ class Root:
     def parallelRollouts(self, board, neuralNetwork, num_parallel_rollouts):
         """Run parallel rollouts (compatibility method)."""
         self.stats = Root._mcts_engine.run_parallel_search(
-            self.board, num_parallel_rollouts
+            board, num_parallel_rollouts
         )
 
     def parallelRolloutsTotal(self, board, neuralNetwork, total_rollouts, num_parallel_rollouts):
         """Run total parallel rollouts (compatibility method)."""
         self.stats = Root._mcts_engine.run_parallel_search(
-            self.board, total_rollouts
+            board, total_rollouts
         )
     
     def maxNSelect(self):
