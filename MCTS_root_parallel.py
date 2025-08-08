@@ -470,7 +470,7 @@ class RootParallelMCTS:
     """
     
     def __init__(self, model, num_workers=None, epsilon=0.25, alpha=0.3,
-                 inference_batch_size=4096, inference_timeout_ms=0.25):
+                 inference_batch_size=1024, inference_timeout_ms=20):
         """
         Initialize root parallel MCTS.
         
@@ -483,7 +483,6 @@ class RootParallelMCTS:
             inference_timeout_ms: Timeout for batching inference requests
         """
         if num_workers is None:
-            #num_workers = max(1, mp.cpu_count() - 2)
             num_workers = 8
         
         self.num_workers = num_workers
