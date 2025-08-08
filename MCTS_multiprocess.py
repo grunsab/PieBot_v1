@@ -244,7 +244,7 @@ class MCTSWorker:
 class MultiprocessMCTS:
     """Persistent Multi-process MCTS implementation."""
     
-    def __init__(self, model, num_processes=None, inference_batch_size=64, inference_timeout_ms=5):
+    def __init__(self, model, num_processes=None, inference_batch_size=128, inference_timeout_ms=50):
         if num_processes is None:
             num_processes = max(1, mp.cpu_count() - 2)
             

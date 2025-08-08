@@ -39,7 +39,7 @@ def load_mcts_module(mcts_file):
     spec.loader.exec_module(mcts_module)
     
     # Verify the module has the required components
-    required_attrs = ['Root', 'Node', 'Edge']
+    required_attrs = ['Root', ]
     for attr in required_attrs:
         if not hasattr(mcts_module, attr):
             raise AttributeError(f"MCTS module {mcts_file} missing required attribute: {attr}")
@@ -167,8 +167,7 @@ def play_game(mcts1_module, mcts2_module, model, device, rollouts=100, threads=1
             with torch.no_grad():
                 root = current_mcts.Root(board, model)
                 
-                for i in range(rollouts):
-                    root.parallelRollouts(board.copy(), model, threads)
+                root.parallelRolloutsTotal(board.copy(), model, threads*rollouts)
             
             elapsed = time.perf_counter() - start_time
             time_stats[f'{time_key}_total'] += elapsed

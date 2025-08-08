@@ -40,7 +40,7 @@ class InferenceResult:
 class InferenceServer:
     """Server process for neural network inference."""
     
-    def __init__(self, model, device, batch_size=64, timeout_ms=5):
+    def __init__(self, model, device, batch_size=64, timeout_ms=150):
         """
         Initialize inference server.
         
@@ -139,22 +139,26 @@ class InferenceServer:
         # Flatten masks
         masks_flat = masks.view(masks.shape[0], -1)
         
+        #print(inputs)
+
         # Run inference
         with torch.no_grad():
             values, policies = self.model(inputs, policyMask=masks_flat)
         
-        # Process results
-        values = values.cpu().numpy().reshape((unique_count,))
+        # Process results - use flatten() instead of reshape to handle (batch_size, 1) shape
+        values = values.cpu().numpy().flatten()
         policies = policies.cpu().numpy()
-        
+
+        move_probabilities = np.zeros( ( len(unique_boards), 200 ), dtype=np.float32 )
         # Distribute results to all requests
         for i, (board_hash, board) in enumerate(unique_boards.items()):
             value = values[i]
-            move_probs = encoder.decodePolicyOutput(board, policies[i])
+            move_probabilities_tmp = encoder.decodePolicyOutput( board, policies[ i ] )
+            move_probabilities[ i, : move_probabilities_tmp.shape[0] ] = move_probabilities_tmp
             
             # Send to all requests for this position
             for req, result_queue in request_mapping[board_hash]:
-                result = InferenceResult(req.request_id, value, move_probs)
+                result = InferenceResult(req.request_id, value, move_probabilities[i])
                 result_queue.put(result)
         
         # Update statistics
@@ -183,8 +187,8 @@ class InferenceServer:
                 
                 try:
                     if timeout_remaining > 0:
-                        req_tuple = request_queue.get(timeout=timeout_remaining)
-                        request_tuples.append(req_tuple)
+                        req_tuple_list = request_queue.get(timeout=timeout_remaining)
+                        request_tuples.extend(req_tuple_list)
                     else:
                         break
                 except:
@@ -194,6 +198,7 @@ class InferenceServer:
             # Process batch if we have requests
             if request_tuples:
                 self.process_batch(request_tuples)
+                #print(f"Processed batch of {len(request_tuples)} requests with size {self.batch_size}")
                 
             # Print statistics periodically
             if self.total_batches > 0 and self.total_batches % 1000 == 0:
@@ -203,6 +208,8 @@ class InferenceServer:
                 print(f"Inference stats: {self.total_requests} requests, "
                       f"{self.total_batches} batches, "
                       f"avg batch size: {avg_batch_size:.1f}, "
+                      f"maximum batch size: {self.batch_size}, "
+                      f"timeout: {self.timeout_ms}ms, "
                       f"avg time: {avg_time*1000:.1f}ms, "
                       f"throughput: {throughput:.0f} req/s")
         
@@ -214,7 +221,7 @@ class InferenceServer:
 
 
 def start_inference_server(model, device, request_queue, stop_event, 
-                         batch_size=64, timeout_ms=5):
+                         batch_size=22, timeout_ms=30):
     """
     Start inference server in current process.
     
@@ -232,7 +239,7 @@ def start_inference_server(model, device, request_queue, stop_event,
 
 def start_inference_server_from_state(model_state, model_config, device_type, 
                                     request_queue, stop_event,
-                                    batch_size=64, timeout_ms=5):
+                                    batch_size=22, timeout_ms=30):
     """
     Start inference server from model state dict (for MPS compatibility).
     

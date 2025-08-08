@@ -106,6 +106,7 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
         else:
             # Create regular model
             model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
+            print(f"Loading regular model on {device_str}")
             
             # Handle different model formats
             if isinstance(weights, dict) and 'model_state_dict' in weights:
@@ -220,6 +221,7 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
         if devices[-1].type == 'cpu':
             print(f'Model using CPU (static quantized)')
         else:
+            model.to(device)
             print(f'Loaded model on GPU {gpu_id}: {torch.cuda.get_device_name(gpu_id)}')
     
     return models, devices

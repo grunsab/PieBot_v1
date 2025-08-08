@@ -1,10 +1,12 @@
 """
-Root Parallelization MCTS Implementation for AlphaZero Chess Engine.
+Optimized Root Parallelization MCTS with parallel inference servers.
 
-This module implements root parallelization where each worker builds an independent
-search tree from the same root position, with Dirichlet noise added at the root
-for exploration diversity. This approach is more effective than tree parallelization
-as it avoids synchronization overhead and provides better exploration.
+This is an enhanced version of MCTS_root_parallel.py that can use either:
+1. Single inference server (original)
+2. Multiple parallel inference servers (new optimization)
+
+The parallel inference servers eliminate the bottleneck of single-threaded
+batch processing, providing significant speedup for large-scale MCTS.
 """
 
 import multiprocessing as mp
@@ -18,17 +20,15 @@ import uuid
 import queue
 from collections import defaultdict
 
-# Set multiprocessing start method for CUDA compatibility
-if torch.cuda.is_available():
-    try:
-        mp.set_start_method('spawn', force=True)
-    except RuntimeError:
-        # Already set, ignore
-        pass
-
 import encoder
 from inference_server import InferenceRequest, InferenceResult, start_inference_server, start_inference_server_from_state
-import MCTS  # Use the original single-threaded MCTS for node/edge structures with virtual loss support
+try:
+    from inference_server_parallel_v2 import start_parallel_inference_servers_v2, start_parallel_inference_servers_from_state_v2
+    USE_V2 = True
+except ImportError:
+    from inference_server_parallel import start_parallel_inference_servers, start_parallel_inference_servers_from_state
+    USE_V2 = False
+import MCTS  # Use the original single-threaded MCTS for node/edge structures
 
 
 class WorkerTask:
@@ -91,7 +91,6 @@ def run_worker(worker_id, task_queue, result_queue, inference_queue, stop_event)
         try:
             task = task_queue.get(timeout=0.1)
         except queue.Empty:
-            print(f"Worker {worker_id} exiting due to empty task queue.")
             continue
         
         # Initialize random generator with unique seed
@@ -129,7 +128,7 @@ def run_independent_search(worker_id, board, num_rollouts, epsilon, alpha, rng,
     # Get initial neural network evaluation
     request_id = f"{worker_id}_root_{uuid.uuid4().hex[:8]}"
     request = InferenceRequest(request_id, board.fen(), worker_id)
-    inference_queue.put([(request, result_queue)] )
+    inference_queue.put((request, result_queue))
     
     result = result_queue.get()
     value = result.value
@@ -146,9 +145,10 @@ def run_independent_search(worker_id, board, num_rollouts, epsilon, alpha, rng,
     Q = value / 2.0 + 0.5
     root = MCTS.Node(board, Q, move_probabilities)
     
-    # Run rollouts with batching
-    run_parallel_rollouts(root, board, num_rollouts, worker_id, 
-                         inference_queue, result_queue, batch_size=128)
+    # Run rollouts independently
+    for _ in range(num_rollouts):
+        rollout_board = board.copy()
+        run_single_rollout(root, rollout_board, worker_id, inference_queue, result_queue)
     
     # Extract statistics from root
     stats = {}
@@ -158,216 +158,19 @@ def run_independent_search(worker_id, board, num_rollouts, epsilon, alpha, rng,
             'visits': edge.getN(),
             'q_value': edge.getQ()
         }
+    
     return stats
-
-
-def run_parallel_rollouts(root, base_board, num_rollouts, worker_id, 
-                         inference_queue, result_queue, batch_size=128):
-    """
-    Execute multiple MCTS rollouts with batched inference requests.
-    
-    Args:
-        root: Root node of the search tree
-        base_board: Base chess board position
-        num_rollouts: Number of rollouts to perform
-        worker_id: Worker process ID
-        inference_queue: Queue for sending inference requests
-        result_queue: Queue for receiving inference results
-        batch_size: Target batch size for inference requests (default 64)
-    """
-    rollout_batch = []
-    pending_evaluations = []
-    
-    # Prepare all rollouts
-    for rollout_idx in range(num_rollouts):
-        rollout_board = base_board.copy()
-        rollout_data = prepare_rollout(root, rollout_board, worker_id)
-        rollout_batch.append(rollout_data)
-        
-        # Process batch when we reach batch_size or last rollout
-        if len(rollout_batch) >= batch_size or rollout_idx == num_rollouts - 1:
-            # Collect all inference requests for this batch
-            batch_requests = []
-            batch_metadata = []
-            
-            for data in rollout_batch:
-                if data['needs_evaluation']:
-                    request_id = f"{worker_id}_batch_{rollout_idx}_{uuid.uuid4().hex[:8]}"
-                    request = InferenceRequest(request_id, data['board'].fen(), worker_id)
-                    batch_requests.append((request, result_queue))
-                    batch_metadata.append(data)
-            
-            inference_queue.put(batch_requests)
-            
-            # Collect all results
-            results = []
-            for _ in range(len(batch_requests)):
-                result = result_queue.get()
-                results.append(result)
-
-            # Apply results and backpropagate
-            for data, result in zip(batch_metadata, results):
-                apply_evaluation_and_backpropagate(data, result)
-            
-            # Process terminal nodes that didn't need evaluation
-            for data in rollout_batch:
-                if not data['needs_evaluation']:
-                    process_terminal_node(data)
-            
-            # Clear batch for next iteration
-            rollout_batch = []
-
-
-def prepare_rollout(root, board, worker_id):
-    """
-    Prepare a single rollout by traversing the tree until expansion or terminal.
-    Virtual losses are applied during selection to ensure diverse exploration.
-    
-    Returns:
-        Dict containing rollout data including paths and whether evaluation is needed
-    """
-    node_path = []
-    edge_path = []
-    current_node = root
-    
-    # Selection phase with virtual loss
-    while True:
-        node_path.append(current_node)
-        
-        if current_node.isTerminal():
-            edge_path.append(None)
-            break
-        
-        # Select best edge using UCT
-        edge = current_node.UCTSelect()
-        edge_path.append(edge)
-        
-        if edge is None:
-            break
-        
-        # Apply virtual loss to discourage other workers from taking the same path
-        edge.addVirtualLoss()
-        
-        board.push(edge.getMove())
-        
-        if not edge.has_child():
-            # Need to expand this node
-            break
-        
-        current_node = edge.getChild()
-    
-    # Determine if we need neural network evaluation
-    needs_evaluation = edge_path[-1] is not None
-    
-    return {
-        'board': board,
-        'node_path': node_path,
-        'edge_path': edge_path,
-        'needs_evaluation': needs_evaluation,
-        'worker_id': worker_id
-    }
-
-
-def apply_evaluation_and_backpropagate(rollout_data, result):
-    """
-    Apply neural network evaluation results and backpropagate.
-    Clear virtual losses after completion.
-    """
-    value = result.value
-    new_Q = value / 2.0 + 0.5
-    
-    # Ensure move_probabilities matches the board's legal moves
-    board = rollout_data['board']
-    num_legal_moves = len(list(board.legal_moves))
-    num_probs = len(result.move_probabilities)
-    
-    if num_legal_moves != num_probs:
-        # Re-decode probabilities for this specific board instance
-        import encoder
-        # Get fresh board from FEN to match what inference server saw
-        fresh_board = chess.Board(board.fen())
-        # The result.move_probabilities are already decoded for fresh_board
-        # We need to map them to our current board's move ordering
-        move_probs = np.zeros(num_legal_moves)
-        fresh_moves = list(fresh_board.legal_moves)
-        our_moves = list(board.legal_moves)
-        
-        for i, our_move in enumerate(our_moves):
-            try:
-                # Find this move in the fresh board's move list
-                fresh_idx = fresh_moves.index(our_move)
-                if fresh_idx < num_probs:
-                    move_probs[i] = result.move_probabilities[fresh_idx]
-                else:
-                    move_probs[i] = 1e-8  # Small probability for missing moves
-            except ValueError:
-                # Move not found in fresh board's list
-                move_probs[i] = 1e-8
-        
-        result.move_probabilities = move_probs
-    
-    # Expand node
-    rollout_data['edge_path'][-1].expand(
-        rollout_data['board'], new_Q, result.move_probabilities
-    )
-    new_Q = 1.0 - new_Q
-    
-    # Backpropagation
-    backpropagate(rollout_data['node_path'], new_Q)
-    
-    # Clear virtual losses now that rollout is complete
-    for edge in rollout_data['edge_path']:
-        if edge is not None:
-            edge.clearVirtualLoss()
-
-
-def process_terminal_node(rollout_data):
-    """
-    Process a terminal node that doesn't need neural network evaluation.
-    Clear virtual losses after completion.
-    """
-    board = rollout_data['board']
-    winner = encoder.parseResult(board.result(claim_draw=True))
-    if not board.turn:
-        winner *= -1
-    new_Q = float(winner) / 2.0 + 0.5
-    
-    # Backpropagation
-    backpropagate(rollout_data['node_path'], new_Q)
-    
-    # Clear virtual losses now that rollout is complete
-    for edge in rollout_data['edge_path']:
-        if edge is not None:
-            edge.clearVirtualLoss()
-
-
-def backpropagate(node_path, leaf_Q):
-    """
-    Backpropagate value through the node path.
-    """
-    last_node_idx = len(node_path) - 1
-    for i in range(last_node_idx, -1, -1):
-        node = node_path[i]
-        
-        if (last_node_idx - i) % 2 == 0:
-            # Same perspective as leaf
-            node.N += 1
-            node.sum_Q += leaf_Q
-        else:
-            # Opposite perspective
-            node.N += 1
-            node.sum_Q += 1.0 - leaf_Q
 
 
 def run_single_rollout(root, board, worker_id, inference_queue, result_queue):
     """
-    Execute a single MCTS rollout on the independent tree with virtual loss.
+    Execute a single MCTS rollout on the independent tree.
     """
     node_path = []
     edge_path = []
     current_node = root
     
-    # Selection phase with virtual loss
+    # Selection phase
     while True:
         node_path.append(current_node)
         
@@ -381,9 +184,6 @@ def run_single_rollout(root, board, worker_id, inference_queue, result_queue):
         
         if edge is None:
             break
-        
-        # Apply virtual loss to discourage other workers from taking the same path
-        edge.addVirtualLoss()
         
         board.push(edge.getMove())
         
@@ -398,41 +198,11 @@ def run_single_rollout(root, board, worker_id, inference_queue, result_queue):
         # Neural network evaluation
         request_id = f"{worker_id}_{uuid.uuid4().hex[:8]}"
         request = InferenceRequest(request_id, board.fen(), worker_id)
-        inference_queue.put([(request, result_queue)])
+        inference_queue.put((request, result_queue))
         
         result = result_queue.get()
         value = result.value
         new_Q = value / 2.0 + 0.5
-        
-        # Ensure move_probabilities matches the board's legal moves
-        num_legal_moves = len(list(board.legal_moves))
-        num_probs = len(result.move_probabilities)
-        
-        if num_legal_moves != num_probs:
-            print("Warning: Number of legal moves does not match number of probabilities.")
-            # This should not happen in a well-formed game, but handle gracefully
-            # Re-decode probabilities for this specific board instance
-            # Get fresh board from FEN to match what inference server saw
-            fresh_board = chess.Board(board.fen())
-            # The result.move_probabilities are already decoded for fresh_board
-            # We need to map them to our current board's move ordering
-            move_probs = np.zeros(num_legal_moves)
-            fresh_moves = list(fresh_board.legal_moves)
-            our_moves = list(board.legal_moves)
-            
-            for i, our_move in enumerate(our_moves):
-                try:
-                    # Find this move in the fresh board's move list
-                    fresh_idx = fresh_moves.index(our_move)
-                    if fresh_idx < num_probs:
-                        move_probs[i] = result.move_probabilities[fresh_idx]
-                    else:
-                        move_probs[i] = 1e-8  # Small probability for missing moves
-                except ValueError:
-                    # Move not found in fresh board's list
-                    move_probs[i] = 1e-8
-            
-            result.move_probabilities = move_probs
         
         # Expand node
         edge_path[-1].expand(board, new_Q, result.move_probabilities)
@@ -457,22 +227,18 @@ def run_single_rollout(root, board, worker_id, inference_queue, result_queue):
             # Opposite perspective
             node.N += 1
             node.sum_Q += 1.0 - new_Q
-    
-    # Clear virtual losses after rollout completion
-    for edge in edge_path:
-        if edge is not None:
-            edge.clearVirtualLoss()
 
 
-class RootParallelMCTS:
+class OptimizedRootParallelMCTS:
     """
-    Root parallelization MCTS with Dirichlet noise for exploration diversity.
+    Optimized root parallelization MCTS with parallel inference servers.
     """
     
     def __init__(self, model, num_workers=None, epsilon=0.25, alpha=0.3,
-                 inference_batch_size=4096, inference_timeout_ms=0.25):
+                 inference_batch_size=256, inference_timeout_ms=150,
+                 use_parallel_servers=True, num_inference_servers=2):
         """
-        Initialize root parallel MCTS.
+        Initialize optimized root parallel MCTS.
         
         Args:
             model: Neural network model
@@ -481,10 +247,11 @@ class RootParallelMCTS:
             alpha: Dirichlet concentration (0.3 for chess)
             inference_batch_size: Batch size for neural network inference
             inference_timeout_ms: Timeout for batching inference requests
+            use_parallel_servers: Use multiple parallel inference servers
+            num_inference_servers: Number of parallel inference servers (if enabled)
         """
         if num_workers is None:
-            #num_workers = max(1, mp.cpu_count() - 2)
-            num_workers = 8
+            num_workers = max(1, mp.cpu_count() - 2)
         
         self.num_workers = num_workers
         self.epsilon = epsilon
@@ -492,6 +259,8 @@ class RootParallelMCTS:
         self.inference_batch_size = inference_batch_size
         self.inference_timeout_ms = inference_timeout_ms
         self.model = model
+        self.use_parallel_servers = use_parallel_servers
+        self.num_inference_servers = num_inference_servers
         
         # Process management
         self.manager = Manager()
@@ -504,34 +273,83 @@ class RootParallelMCTS:
         self.start_processes()
     
     def start_processes(self):
-        """Start inference server and worker processes."""
-        # Start inference server
-        device = next(self.model.parameters()).device
+        """Start inference server(s) and worker processes."""
+        # Start inference server(s)
+        original_device = next(self.model.parameters()).device
         
-        # Use state dict approach for all devices to avoid multiprocessing issues
-        model_state = self.model.cpu().state_dict()
-        try:
-            # Get model architecture parameters
-            conv1_out_channels = self.model.convBlock1.conv1.out_channels
-            num_blocks = len(self.model.residualBlocks)
-            model_config = {'num_blocks': num_blocks, 'num_channels': conv1_out_channels}
-        except:
-            # Fallback to default config
-            model_config = {'num_blocks': 20, 'num_channels': 256}
-        
-        # Determine device type for inference server
-        if device.type == 'cuda':
-            device_type = 'cuda'
-        elif device.type == 'mps':
-            device_type = 'mps'
+        if self.use_parallel_servers:
+            print(f"Starting {self.num_inference_servers} parallel inference servers...")
+            
+            # Always use state dict serialization to avoid CUDA tensor issues
+            model_state = self.model.cpu().state_dict()
+            try:
+                # Get the actual model configuration
+                conv1_out_channels = self.model.convBlock1.conv1.out_channels
+                # Count residual blocks
+                num_blocks = len(self.model.residualBlocks)
+                model_config = {'num_blocks': num_blocks, 'num_channels': conv1_out_channels}
+                print(f"Detected model config: {num_blocks}x{conv1_out_channels}")
+            except Exception as e:
+                print(f"Warning: Could not detect model config: {e}")
+                model_config = {'num_blocks': 10, 'num_channels': 128}
+            
+            # Determine device type
+            if original_device.type == 'cuda':
+                device_type = 'cuda'
+            elif original_device.type == 'mps':
+                device_type = 'mps'
+            else:
+                device_type = 'cpu'
+            
+            if USE_V2:
+                inference_process = Process(
+                    target=start_parallel_inference_servers_from_state_v2,
+                    args=(model_state, model_config, device_type, self.inference_queue, 
+                          self.stop_event, self.num_inference_servers,
+                          self.inference_batch_size, self.inference_timeout_ms)
+                )
+            else:
+                inference_process = Process(
+                    target=start_parallel_inference_servers_from_state,
+                    args=(model_state, model_config, device_type, self.inference_queue, 
+                          self.stop_event, self.num_inference_servers,
+                          self.inference_batch_size, self.inference_timeout_ms)
+                )
+            
+            # Move model back to original device
+            self.model = self.model.to(original_device)
         else:
-            device_type = 'cpu'
-        
-        inference_process = Process(
-            target=start_inference_server_from_state,
-            args=(model_state, model_config, device_type, self.inference_queue, 
-                  self.stop_event, self.inference_batch_size, self.inference_timeout_ms)
-        )
+            print("Starting single inference server...")
+            
+            # Always use state dict serialization to avoid CUDA tensor issues
+            model_state = self.model.cpu().state_dict()
+            try:
+                # Get the actual model configuration
+                conv1_out_channels = self.model.convBlock1.conv1.out_channels
+                # Count residual blocks
+                num_blocks = len(self.model.residualBlocks)
+                model_config = {'num_blocks': num_blocks, 'num_channels': conv1_out_channels}
+                print(f"Detected model config: {num_blocks}x{conv1_out_channels}")
+            except Exception as e:
+                print(f"Warning: Could not detect model config: {e}")
+                model_config = {'num_blocks': 10, 'num_channels': 128}
+            
+            # Determine device type
+            if original_device.type == 'cuda':
+                device_type = 'cuda'
+            elif original_device.type == 'mps':
+                device_type = 'mps'
+            else:
+                device_type = 'cpu'
+            
+            inference_process = Process(
+                target=start_inference_server_from_state,
+                args=(model_state, model_config, device_type, self.inference_queue, 
+                      self.stop_event, self.inference_batch_size, self.inference_timeout_ms)
+            )
+            
+            # Move model back to original device
+            self.model = self.model.to(original_device)
         
         inference_process.start()
         self.processes.append(inference_process)
@@ -546,7 +364,6 @@ class RootParallelMCTS:
             process.start()
             self.processes.append(process)
             print(f"Started worker process {i + 1}/{self.num_workers}")
-
     
     def run_parallel_search(self, board, num_rollouts):
         """
@@ -577,8 +394,6 @@ class RootParallelMCTS:
                     noise_seed, self.epsilon, self.alpha
                 )
                 self.task_queue.put(task)
-                #print(f"Assigned {worker_rollouts} rollouts to worker {i + 1}/{self.num_workers} "
-                #      f"(seed {noise_seed})")
         
         # Collect results from all workers
         results = []
@@ -658,43 +473,46 @@ class RootParallelMCTS:
 # Compatibility wrapper to match original MCTS interface
 class Root:
     """
-    Compatibility wrapper for root parallel MCTS to match original interface.
+    Compatibility wrapper for optimized root parallel MCTS to match original interface.
     """
     
     _mcts_engine = None
     _mcts_lock = mp.Lock()
     
-    def __init__(self, board, neuralNetwork, epsilon=0.25):
+    def __init__(self, board, neuralNetwork, epsilon=0.0, use_parallel_servers=True):
         """
-        Initialize root with optional Dirichlet noise.
+        Initialize root with optional Dirichlet noise and parallel servers.
         
         Args:
             board: Chess board
             neuralNetwork: Neural network model
             epsilon: Dirichlet noise weight (0.0 for deterministic play)
+            use_parallel_servers: Use multiple parallel inference servers
         """
         self.board = board.copy()
         self.neuralNetwork = neuralNetwork
         self.stats = None
         self.same_paths = 0  # Compatibility attribute (not used in root parallel)
+        self.use_parallel_servers = use_parallel_servers
         
         with Root._mcts_lock:
             if Root._mcts_engine is None:
                 # Create engine with epsilon for noise control
-                Root._mcts_engine = RootParallelMCTS(neuralNetwork, epsilon=epsilon)
-            elif Root._mcts_engine.epsilon != epsilon:
-                # Recreate engine if epsilon changed
+                Root._mcts_engine = OptimizedRootParallelMCTS(
+                    neuralNetwork, epsilon=epsilon, 
+                    use_parallel_servers=use_parallel_servers
+                )
+            elif (Root._mcts_engine.epsilon != epsilon or 
+                  Root._mcts_engine.use_parallel_servers != use_parallel_servers):
+                # Recreate engine if configuration changed
                 Root._mcts_engine.cleanup()
-                Root._mcts_engine = RootParallelMCTS(neuralNetwork, epsilon=epsilon)
+                Root._mcts_engine = OptimizedRootParallelMCTS(
+                    neuralNetwork, epsilon=epsilon,
+                    use_parallel_servers=use_parallel_servers
+                )
     
     def parallelRollouts(self, board, neuralNetwork, num_parallel_rollouts):
         """Run parallel rollouts (compatibility method)."""
-        self.stats = Root._mcts_engine.run_parallel_search(
-            self.board, num_parallel_rollouts
-        )
-
-    def parallelRolloutsTotal(self, board, neuralNetwork, num_parallel_rollouts):
-        """Run total parallel rollouts (compatibility method)."""
         self.stats = Root._mcts_engine.run_parallel_search(
             self.board, num_parallel_rollouts
         )
