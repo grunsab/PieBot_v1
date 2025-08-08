@@ -212,7 +212,7 @@ def main():
         blunder_count, timeout_count = simulate_game(
             model, 
             max_moves=5000,  # Play 5000 moves (2500 per side)
-            rollouts_per_move=1000  # Use fewer rollouts for faster testing
+            rollouts_per_move=10000  # Use fewer rollouts for faster testing
         )
         
         # Analyze results

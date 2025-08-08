@@ -703,7 +703,7 @@ class RootParallelMCTS:
         if is_tactical:
             # Much more aggressive for tactical positions
             original_rollouts = num_rollouts
-            num_rollouts = int(num_rollouts * 3)  # Triple rollouts in tactical positions
+            num_rollouts = int(num_rollouts * 2)  # Triple rollouts in tactical positions
             effective_epsilon = 0.0  # No noise at all in tactical positions
             print(f"TACTICAL POSITION DETECTED: Increasing rollouts from {original_rollouts} to {num_rollouts}, epsilon=0")
         else:
@@ -735,7 +735,7 @@ class RootParallelMCTS:
         
         # Collect results
         results = []
-        timeout_per_worker = 30.0
+        timeout_per_worker = 100
         for i in range(tasks_created):
             try:
                 result = self.result_queue.get(timeout=timeout_per_worker)
