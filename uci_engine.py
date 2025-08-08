@@ -263,7 +263,7 @@ class UCIEngine:
                 self.board = chess.Board(fen)
                 moves_start = 7
             except ValueError:
-                print(f"info string Invalid FEN: {fen}")
+                print(f"ERROR Invalid FEN: {fen}")
                 return
         else:
             return
@@ -280,12 +280,13 @@ class UCIEngine:
                         
     def search_position(self, rollouts):
         """Search current position using MCTS."""
+        print("Got to search position")
         self.stop_search.clear()
         self.best_move = None
         
         try:
             if self.model is None:
-                print("info string ERROR: No model loaded")
+                print("ERROR: No model loaded")
                 sys.stdout.flush()
                 return
                 
@@ -315,7 +316,7 @@ class UCIEngine:
                 sys.stdout.flush()
                 
         except Exception as e:
-            print(f"info string Error during search: {e}")
+            print(f"Error during search: {e}")
             import traceback
             traceback.print_exc()
             sys.stdout.flush()
