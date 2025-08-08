@@ -323,7 +323,7 @@ class UCIEngine:
             sys.stdout.flush()
                 
         
-        self.mcts_engine.cleanup_engine()
+        self.mcts_engine.partial_cleanup_engine()
 
     def go(self, args):
         """Handle 'go' command."""

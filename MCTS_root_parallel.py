@@ -647,6 +647,14 @@ class RootParallelMCTS:
         # print(stats)
         return best_move
     
+    def partial_cleanup(self):
+        for q in [self.task_queue, self.result_queue, self.inference_queue]:
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    break
+
     def cleanup(self):
         """Clean up all processes."""
         self.stop_event.set()
@@ -796,6 +804,13 @@ class Root:
             if Root._mcts_engine:
                 Root._mcts_engine.cleanup()
                 Root._mcts_engine = None
+
+    @staticmethod
+    def partial_cleanup_engine():
+        with Root._mcts_lock:
+            if Root._mcts_engine:
+                Root._mcts_engine.partial_cleanup()
+
 
 
 # Module cleanup
