@@ -314,6 +314,7 @@ class UCIEngine:
                 nps = int(actual_rollouts / elapsed_time) if elapsed_time > 0 else 0
                 print(f"info depth {actual_rollouts} nodes {actual_rollouts} nps {nps} pv {best_move}")
                 sys.stdout.flush()
+
                 
         except Exception as e:
             print(f"Error during search: {e}")
@@ -321,6 +322,9 @@ class UCIEngine:
             traceback.print_exc()
             sys.stdout.flush()
                 
+        
+        self.mcts_engine.cleanup_engine()
+
     def go(self, args):
         """Handle 'go' command."""
         wtime, btime, winc, binc, movestogo, movetime, infinite = self.parse_go_args(args)
