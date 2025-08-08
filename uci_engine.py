@@ -268,6 +268,11 @@ class UCIEngine:
         else:
             return
             
+        if self.mcts_engine:
+            if self.verbose:
+                print("info string Resetting MCTS engine for new position")
+                sys.stdout.flush()
+            
         if len(args) > moves_start and args[moves_start] == "moves":
             for move_str in args[moves_start + 1:]:
                 try:
@@ -280,7 +285,9 @@ class UCIEngine:
                         
     def search_position(self, rollouts):
         """Search current position using MCTS."""
-        print("Got to search position")
+        if self.verbose:
+            print(f"info string Searching position: {self.board.fen()}")
+            sys.stdout.flush()
         self.stop_search.clear()
         self.best_move = None
         
@@ -293,8 +300,15 @@ class UCIEngine:
             with torch.no_grad():
                 start_time = time.time()
                 best_move = None
-                if not self.mcts_engine:
-                    self.mcts_engine = MCTS.Root(self.board, self.model)
+                
+                # Always create a fresh MCTS engine for each search to avoid state corruption
+                if self.verbose:
+                    print("info string Creating fresh MCTS engine for search")
+                    sys.stdout.flush()
+                
+                # Create a new MCTS engine with the current board position
+                # This ensures no stale tree state from previous positions
+                self.mcts_engine = MCTS.Root(self.board.copy(), self.model)
 
                 self.mcts_engine.parallelRolloutsTotal(self.board.copy(), self.model, rollouts, self.threads)
                 actual_rollouts = rollouts
@@ -306,11 +320,17 @@ class UCIEngine:
                 
                 edge = self.mcts_engine.maxNSelect()
                 if not edge:
+                    if self.verbose:
+                        print("info string Warning: No edge selected from MCTS")
+                        sys.stdout.flush()
                     return
 
                 best_move = edge.getMove()
                 self.best_move = best_move.uci()
                 
+                if self.verbose:
+                    print(f"info string Selected move: {self.best_move}")
+                    
                 nps = int(actual_rollouts / elapsed_time) if elapsed_time > 0 else 0
                 print(f"info depth {actual_rollouts} nodes {actual_rollouts} nps {nps} pv {best_move}")
                 sys.stdout.flush()
@@ -321,9 +341,6 @@ class UCIEngine:
             import traceback
             traceback.print_exc()
             sys.stdout.flush()
-                
-        
-        self.mcts_engine.partial_cleanup_engine()
 
     def go(self, args):
         """Handle 'go' command."""
@@ -478,6 +495,14 @@ class UCIEngine:
                 elif command == "ucinewgame":
                     # Reset board for new game
                     self.board = chess.Board()
+                    # Clean up MCTS engine for new game
+                    if self.mcts_engine:
+                        if self.verbose:
+                            print("info string Resetting engine for new game")
+                            sys.stdout.flush()
+                        import MCTS_root_parallel as MCTS
+                        MCTS.Root.cleanup_engine()
+                        self.mcts_engine = None
                 elif self.verbose:
                     print(f"info string Unknown command: {command}")
                     sys.stdout.flush()

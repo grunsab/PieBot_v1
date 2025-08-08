@@ -52,6 +52,81 @@ class WorkerResult:
         self.move_q_values = move_q_values  # Dict: move -> Q value
 
 
+def detect_tactical_position(board):
+    """
+    Detect if the current position is tactical and requires deeper search.
+    
+    Enhanced detection for better tactical awareness.
+    
+    Args:
+        board: Chess board position
+        
+    Returns:
+        bool: True if position is tactical
+    """
+    # Check if in check
+    if board.is_check():
+        return True
+    
+    # Check if any high-value pieces are under attack
+    for square in chess.SQUARES:
+        piece = board.piece_at(square)
+        if piece and piece.color == board.turn:
+            # Check if this is a valuable piece (not a pawn)
+            if piece.piece_type in [chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT]:
+                # Check if this piece is attacked by opponent
+                if board.is_attacked_by(not board.turn, square):
+                    # Check if the piece is defended
+                    defenders = len(board.attackers(board.turn, square))
+                    attackers = len(board.attackers(not board.turn, square))
+                    if attackers >= defenders:  # Under-defended or undefended
+                        return True
+    
+    # Check if opponent has hanging pieces we can capture
+    for square in chess.SQUARES:
+        piece = board.piece_at(square)
+        if piece and piece.color != board.turn:
+            if piece.piece_type >= chess.KNIGHT:  # Valuable piece
+                if board.is_attacked_by(board.turn, square):
+                    # Check if it's hanging (undefended or under-defended)
+                    defenders = len(board.attackers(not board.turn, square))
+                    attackers = len(board.attackers(board.turn, square))
+                    if attackers > defenders:
+                        return True
+    
+    # Check for capture moves that win material
+    for move in board.legal_moves:
+        if board.is_capture(move):
+            piece_captured = board.piece_at(move.to_square)
+            piece_moving = board.piece_at(move.from_square)
+            if piece_captured and piece_moving:
+                # Check if it's a favorable trade
+                # Piece values: None, Pawn, Knight, Bishop, Rook, Queen, King
+                piece_values = [0, 1, 3, 3, 5, 9, 100]
+                value_captured = piece_values[piece_captured.piece_type]
+                value_moving = piece_values[piece_moving.piece_type]
+                if value_captured > value_moving:  # Winning material
+                    return True
+                elif value_captured == value_moving:
+                    # Equal trade - check if the target square is defended
+                    if not board.is_attacked_by(not board.turn, move.to_square):
+                        return True  # Free capture
+    
+    # Check if the last move created threats
+    if board.move_stack:
+        last_move = board.move_stack[-1]
+        piece = board.piece_at(last_move.to_square)
+        if piece and piece.color != board.turn:
+            # Check if the piece that just moved is attacking our pieces
+            for attacked_square in board.attacks(last_move.to_square):
+                attacked_piece = board.piece_at(attacked_square)
+                if attacked_piece and attacked_piece.color == board.turn:
+                    if attacked_piece.piece_type >= chess.KNIGHT:
+                        return True
+    
+    return False
+
+
 def apply_dirichlet_noise(move_probabilities, legal_moves, epsilon, alpha, rng):
     """
     Apply Dirichlet noise to move probabilities at the root.
@@ -127,17 +202,25 @@ def run_independent_search(worker_id, board, num_rollouts, epsilon, alpha, rng,
     Returns:
         Dict mapping moves to their statistics (visits, Q-value)
     """
+    # Get legal moves first
+    legal_moves = list(board.legal_moves)
+    
     # Get initial neural network evaluation
     request_id = f"{worker_id}_root_{uuid.uuid4().hex[:8]}"
     request = InferenceRequest(request_id, board.fen(), worker_id)
     inference_queue.put([(request, result_queue)] )
     
-    result = result_queue.get()
-    value = result.value
-    move_probabilities = result.move_probabilities
+    try:
+        result = result_queue.get(timeout=5.0)  # 5 second timeout
+        value = result.value
+        move_probabilities = result.move_probabilities
+    except queue.Empty:
+        print(f"Warning: Timeout waiting for root evaluation in worker {worker_id}")
+        # Use neutral values if timeout
+        value = 0.0
+        move_probabilities = np.ones(len(legal_moves)) / len(legal_moves) if legal_moves else np.array([1.0])
     
     # Apply Dirichlet noise at root for this worker
-    legal_moves = list(board.legal_moves)
     if epsilon > 0 and len(legal_moves) > 0:
         move_probabilities = apply_dirichlet_noise(
             move_probabilities, legal_moves, epsilon, alpha, rng
@@ -204,11 +287,22 @@ def run_parallel_rollouts(root, base_board, num_rollouts, worker_id,
             inference_queue.put(batch_requests)
             TOTAL_REQUESTS_SENT_FOR_INFERENCE += len(batch_requests)
 
-            # Collect all results
+            # Collect all results with timeout protection
             results = []
-            for _ in range(len(batch_requests)):
-                result = result_queue.get()
-                results.append(result)
+            timeout_per_result = 5.0  # 5 seconds timeout per result
+            for i in range(len(batch_requests)):
+                try:
+                    result = result_queue.get(timeout=timeout_per_result)
+                    results.append(result)
+                except queue.Empty:
+                    print(f"Warning: Timeout waiting for inference result {i+1}/{len(batch_requests)} in worker {worker_id}")
+                    # Create a dummy result to avoid hanging
+                    # Use neutral values to minimize impact
+                    dummy_result = type('InferenceResult', (), {
+                        'value': 0.0,  # Neutral value
+                        'move_probabilities': np.ones(len(list(batch_metadata[i]['board'].legal_moves))) / len(list(batch_metadata[i]['board'].legal_moves))
+                    })()
+                    results.append(dummy_result)
 
             # Apply results and backpropagate
             for data, result in zip(batch_metadata, results):
@@ -280,52 +374,50 @@ def apply_evaluation_and_backpropagate(rollout_data, result):
     Apply neural network evaluation results and backpropagate.
     Clear virtual losses after completion.
     """
-    value = result.value
-    new_Q = value / 2.0 + 0.5
-    
-    # Ensure move_probabilities matches the board's legal moves
-    board = rollout_data['board']
-    num_legal_moves = len(list(board.legal_moves))
-    num_probs = len(result.move_probabilities)
-    
-    if num_legal_moves != num_probs:
-        # Re-decode probabilities for this specific board instance
-        import encoder
-        # Get fresh board from FEN to match what inference server saw
+    try:
+        value = result.value
+        new_Q = value / 2.0 + 0.5
+        
+        # Ensure move_probabilities matches the board's legal moves
+        board = rollout_data['board']
+        
+        # Create a fresh board from FEN to ensure consistency
+        # This avoids issues with board state corruption during parallel processing
         fresh_board = chess.Board(board.fen())
-        # The result.move_probabilities are already decoded for fresh_board
-        # We need to map them to our current board's move ordering
-        move_probs = np.zeros(num_legal_moves)
-        fresh_moves = list(fresh_board.legal_moves)
-        our_moves = list(board.legal_moves)
+        num_legal_moves = len(list(fresh_board.legal_moves))
+        num_probs = len(result.move_probabilities)
         
-        for i, our_move in enumerate(our_moves):
-            try:
-                # Find this move in the fresh board's move list
-                fresh_idx = fresh_moves.index(our_move)
-                if fresh_idx < num_probs:
-                    move_probs[i] = result.move_probabilities[fresh_idx]
-                else:
-                    move_probs[i] = 1e-8  # Small probability for missing moves
-            except ValueError:
-                # Move not found in fresh board's list
-                move_probs[i] = 1e-8
+        if num_legal_moves != num_probs:
+            # Re-decode probabilities for this specific board instance
+            import encoder
+            # The result.move_probabilities are already decoded for the board
+            # We need to map them to our current board's move ordering
+            move_probs = np.ones(num_legal_moves) * 1e-8  # Initialize with small probabilities
+            fresh_moves = list(fresh_board.legal_moves)
+            
+            # Only map the moves that exist in both lists
+            min_moves = min(num_legal_moves, num_probs)
+            for i in range(min_moves):
+                move_probs[i] = result.move_probabilities[i]
+            
+            # Normalize to ensure valid probability distribution
+            move_probs = move_probs / np.sum(move_probs)
+            result.move_probabilities = move_probs
         
-        result.move_probabilities = move_probs
-    
-    # Expand node
-    rollout_data['edge_path'][-1].expand(
-        rollout_data['board'], new_Q, result.move_probabilities
-    )
-    new_Q = 1.0 - new_Q
-    
-    # Backpropagation
-    backpropagate(rollout_data['node_path'], new_Q)
-    
-    # Clear virtual losses now that rollout is complete
-    for edge in rollout_data['edge_path']:
-        if edge is not None:
-            edge.clearVirtualLoss()
+        # Expand node
+        rollout_data['edge_path'][-1].expand(
+            fresh_board, new_Q, result.move_probabilities
+        )
+        new_Q = 1.0 - new_Q
+        
+        # Backpropagation
+        backpropagate(rollout_data['node_path'], new_Q)
+        
+    finally:
+        # Always clear virtual losses, even if an error occurred
+        for edge in rollout_data['edge_path']:
+            if edge is not None:
+                edge.clearVirtualLoss()
 
 
 def process_terminal_node(rollout_data):
@@ -333,19 +425,29 @@ def process_terminal_node(rollout_data):
     Process a terminal node that doesn't need neural network evaluation.
     Clear virtual losses after completion.
     """
-    board = rollout_data['board']
-    winner = encoder.parseResult(board.result())
-    if not board.turn:
-        winner *= -1
-    new_Q = float(winner) / 2.0 + 0.5
-    
-    # Backpropagation
-    backpropagate(rollout_data['node_path'], new_Q)
-    
-    # Clear virtual losses now that rollout is complete
-    for edge in rollout_data['edge_path']:
-        if edge is not None:
-            edge.clearVirtualLoss()
+    try:
+        board = rollout_data['board']
+        result = board.result()
+        
+        # Check if the game is actually over
+        if result == "*":
+            # Game is not over - this shouldn't happen for a true terminal node
+            # Use a neutral value as fallback
+            new_Q = 0.5
+        else:
+            winner = encoder.parseResult(result)
+            if not board.turn:
+                winner *= -1
+            new_Q = float(winner) / 2.0 + 0.5
+        
+        # Backpropagation
+        backpropagate(rollout_data['node_path'], new_Q)
+        
+    finally:
+        # Always clear virtual losses, even if an error occurred
+        for edge in rollout_data['edge_path']:
+            if edge is not None:
+                edge.clearVirtualLoss()
 
 
 def backpropagate(node_path, leaf_Q):
@@ -373,101 +475,120 @@ def run_single_rollout(root, board, worker_id, inference_queue, result_queue):
     node_path = []
     edge_path = []
     current_node = root
+    virtual_losses_applied = []  # Track edges with virtual losses
     
-    # Selection phase with virtual loss
-    while True:
-        node_path.append(current_node)
-        
-        if current_node.isTerminal():
-            edge_path.append(None)
-            break
-        
-        # Select best edge using UCT
-        edge = current_node.UCTSelect()
-        edge_path.append(edge)
-        
-        if edge is None:
-            break
-        
-        # Apply virtual loss to discourage other workers from taking the same path
-        edge.addVirtualLoss()
-        
-        board.push(edge.getMove())
-        
-        if not edge.has_child():
-            # Expand this node
-            break
-        
-        current_node = edge.getChild()
-    
-    # Evaluation phase
-    if edge_path[-1] is not None:
-        # Neural network evaluation
-        request_id = f"{worker_id}_{uuid.uuid4().hex[:8]}"
-        request = InferenceRequest(request_id, board.fen(), worker_id)
-        inference_queue.put([(request, result_queue)])
-        
-        result = result_queue.get()
-        value = result.value
-        new_Q = value / 2.0 + 0.5
-        
-        # Ensure move_probabilities matches the board's legal moves
-        num_legal_moves = len(list(board.legal_moves))
-        num_probs = len(result.move_probabilities)
-        
-        if num_legal_moves != num_probs:
-            # print("Warning: Number of legal moves does not match number of probabilities.")
-            # This should not happen in a well-formed game, but handle gracefully
-            # Re-decode probabilities for this specific board instance
-            # Get fresh board from FEN to match what inference server saw
-            fresh_board = chess.Board(board.fen())
-            # The result.move_probabilities are already decoded for fresh_board
-            # We need to map them to our current board's move ordering
-            move_probs = np.zeros(num_legal_moves)
-            fresh_moves = list(fresh_board.legal_moves)
-            our_moves = list(board.legal_moves)
+    try:
+        # Selection phase with virtual loss
+        while True:
+            node_path.append(current_node)
             
-            for i, our_move in enumerate(our_moves):
-                try:
-                    # Find this move in the fresh board's move list
-                    fresh_idx = fresh_moves.index(our_move)
-                    if fresh_idx < num_probs:
-                        move_probs[i] = result.move_probabilities[fresh_idx]
-                    else:
-                        move_probs[i] = 1e-8  # Small probability for missing moves
-                except ValueError:
-                    # Move not found in fresh board's list
-                    move_probs[i] = 1e-8
+            if current_node.isTerminal():
+                edge_path.append(None)
+                break
             
-            result.move_probabilities = move_probs
+            # Select best edge using UCT
+            edge = current_node.UCTSelect()
+            edge_path.append(edge)
+            
+            if edge is None:
+                break
+            
+            # Apply virtual loss to discourage other workers from taking the same path
+            edge.addVirtualLoss()
+            virtual_losses_applied.append(edge)  # Track for cleanup
+            
+            board.push(edge.getMove())
+            
+            if not edge.has_child():
+                # Expand this node
+                break
+            
+            current_node = edge.getChild()
         
-        # Expand node
-        edge_path[-1].expand(board, new_Q, result.move_probabilities)
-        new_Q = 1.0 - new_Q
-    else:
-        # Terminal node
-        winner = encoder.parseResult(board.result())
-        if not board.turn:
-            winner *= -1
-        new_Q = float(winner) / 2.0 + 0.5
-    
-    # Backpropagation phase
-    last_node_idx = len(node_path) - 1
-    for i in range(last_node_idx, -1, -1):
-        node = node_path[i]
-        
-        if (last_node_idx - i) % 2 == 0:
-            # Same perspective as leaf
-            node.N += 1
-            node.sum_Q += new_Q
+        # Evaluation phase
+        if edge_path[-1] is not None:
+            # Neural network evaluation
+            request_id = f"{worker_id}_{uuid.uuid4().hex[:8]}"
+            request = InferenceRequest(request_id, board.fen(), worker_id)
+            inference_queue.put([(request, result_queue)])
+            
+            try:
+                result = result_queue.get(timeout=5.0)  # 5 second timeout
+                value = result.value
+                new_Q = value / 2.0 + 0.5
+            except queue.Empty:
+                print(f"Warning: Timeout in single rollout for worker {worker_id}")
+                # Use neutral value if timeout
+                value = 0.0
+                new_Q = 0.5
+                result = type('InferenceResult', (), {
+                    'value': value,
+                    'move_probabilities': np.ones(len(list(board.legal_moves))) / len(list(board.legal_moves))
+                })()
+            
+            # Ensure move_probabilities matches the board's legal moves
+            num_legal_moves = len(list(board.legal_moves))
+            num_probs = len(result.move_probabilities)
+            
+            if num_legal_moves != num_probs:
+                # print("Warning: Number of legal moves does not match number of probabilities.")
+                # This should not happen in a well-formed game, but handle gracefully
+                # Re-decode probabilities for this specific board instance
+                # Get fresh board from FEN to match what inference server saw
+                fresh_board = chess.Board(board.fen())
+                # The result.move_probabilities are already decoded for fresh_board
+                # We need to map them to our current board's move ordering
+                move_probs = np.zeros(num_legal_moves)
+                fresh_moves = list(fresh_board.legal_moves)
+                our_moves = list(board.legal_moves)
+                
+                for i, our_move in enumerate(our_moves):
+                    try:
+                        # Find this move in the fresh board's move list
+                        fresh_idx = fresh_moves.index(our_move)
+                        if fresh_idx < num_probs:
+                            move_probs[i] = result.move_probabilities[fresh_idx]
+                        else:
+                            move_probs[i] = 1e-8  # Small probability for missing moves
+                    except ValueError:
+                        # Move not found in fresh board's list
+                        move_probs[i] = 1e-8
+                
+                result.move_probabilities = move_probs
+            
+            # Expand node
+            edge_path[-1].expand(board, new_Q, result.move_probabilities)
+            new_Q = 1.0 - new_Q
         else:
-            # Opposite perspective
-            node.N += 1
-            node.sum_Q += 1.0 - new_Q
+            # Terminal node
+            result = board.result()
+            if result == "*":
+                # Game is not over - use neutral value
+                new_Q = 0.5
+            else:
+                winner = encoder.parseResult(result)
+                if not board.turn:
+                    winner *= -1
+                new_Q = float(winner) / 2.0 + 0.5
+        
+        # Backpropagation phase
+        last_node_idx = len(node_path) - 1
+        for i in range(last_node_idx, -1, -1):
+            node = node_path[i]
+            
+            if (last_node_idx - i) % 2 == 0:
+                # Same perspective as leaf
+                node.N += 1
+                node.sum_Q += new_Q
+            else:
+                # Opposite perspective
+                node.N += 1
+                node.sum_Q += 1.0 - new_Q
     
-    # Clear virtual losses after rollout completion
-    for edge in edge_path:
-        if edge is not None:
+    finally:
+        # Always clear virtual losses after rollout completion
+        # Use the tracked list to ensure we only clear losses we applied
+        for edge in virtual_losses_applied:
             edge.clearVirtualLoss()
 
 
@@ -567,6 +688,8 @@ class RootParallelMCTS:
         """
         Run parallel search with independent trees.
         
+        Simplified approach with stronger tactical handling.
+        
         Args:
             board: Chess board position
             num_rollouts: Total number of rollouts to perform
@@ -574,65 +697,200 @@ class RootParallelMCTS:
         Returns:
             Aggregated move statistics
         """
+        # Detect tactical position and adjust parameters
+        is_tactical = detect_tactical_position(board)
+        
+        if is_tactical:
+            # Much more aggressive for tactical positions
+            original_rollouts = num_rollouts
+            num_rollouts = int(num_rollouts * 3)  # Triple rollouts in tactical positions
+            effective_epsilon = 0.0  # No noise at all in tactical positions
+            print(f"TACTICAL POSITION DETECTED: Increasing rollouts from {original_rollouts} to {num_rollouts}, epsilon=0")
+        else:
+            effective_epsilon = self.epsilon
+        
+        # Simple single-phase search for better convergence
         task_id = uuid.uuid4().hex
         rollouts_per_worker = num_rollouts // self.num_workers
         
-        # Create tasks with unique noise seeds for each worker
+        # Ensure at least one rollout per worker
+        if num_rollouts > 0 and rollouts_per_worker == 0:
+            rollouts_per_worker = 1
+        
+        # Create tasks
+        tasks_created = 0
         for i in range(self.num_workers):
             worker_rollouts = rollouts_per_worker
+            if i < (num_rollouts % self.num_workers):
+                worker_rollouts += 1
             
             if worker_rollouts > 0:
-                # Each worker gets a unique random seed for Dirichlet noise
                 noise_seed = np.random.randint(0, 2**16)
                 task = WorkerTask(
-                    task_id, board, worker_rollouts, 
-                    noise_seed, self.epsilon, self.alpha
+                    task_id, board, worker_rollouts,
+                    noise_seed, effective_epsilon, self.alpha
                 )
                 self.task_queue.put(task)
+                tasks_created += 1
         
-        # Collect results from all workers
+        # Collect results
         results = []
-        for _ in range(self.num_workers):
-            result = self.result_queue.get()
-            if result.task_id == task_id:
-                results.append(result)
+        timeout_per_worker = 30.0
+        for i in range(tasks_created):
+            try:
+                result = self.result_queue.get(timeout=timeout_per_worker)
+                if result.task_id == task_id:
+                    results.append(result)
+            except queue.Empty:
+                print(f"Warning: Timeout waiting for worker {i+1}/{tasks_created}")
         
         # Aggregate statistics across all trees
-        return self.aggregate_statistics(results)
+        return self.aggregate_statistics(results, is_tactical)
     
-    def aggregate_statistics(self, results):
+    def _run_search_phase(self, board, num_rollouts, epsilon, phase_id):
+        """Run a single phase of search with given rollouts."""
+        task_id = f"{uuid.uuid4().hex}_{phase_id}"
+        rollouts_per_worker = num_rollouts // self.num_workers
+        
+        # Ensure at least one rollout per worker
+        if num_rollouts > 0 and rollouts_per_worker == 0:
+            rollouts_per_worker = 1
+        
+        # Create tasks
+        tasks_created = 0
+        for i in range(self.num_workers):
+            worker_rollouts = rollouts_per_worker
+            if i < (num_rollouts % self.num_workers):
+                worker_rollouts += 1
+            
+            if worker_rollouts > 0:
+                noise_seed = np.random.randint(0, 2**16)
+                task = WorkerTask(
+                    task_id, board, worker_rollouts,
+                    noise_seed, epsilon, self.alpha
+                )
+                self.task_queue.put(task)
+                tasks_created += 1
+        
+        # Collect results
+        results = []
+        timeout_per_worker = 30.0
+        for i in range(tasks_created):
+            try:
+                result = self.result_queue.get(timeout=timeout_per_worker)
+                if result.task_id == task_id:
+                    results.append(result)
+            except queue.Empty:
+                print(f"Warning: Timeout in {phase_id} phase, worker {i+1}/{tasks_created}")
+        
+        return results
+    
+    def _calculate_move_variances(self, results):
+        """Calculate Q-value variance for each move across workers."""
+        if not results:
+            return {}
+        
+        move_q_values = defaultdict(list)
+        
+        # Collect Q-values from each worker
+        for result in results:
+            for move, visits in result.move_visits.items():
+                if visits > 0:
+                    move_q_values[move].append(result.move_q_values[move])
+        
+        # Calculate variance for each move
+        move_variances = {}
+        for move, q_values in move_q_values.items():
+            if len(q_values) > 1:
+                variance = np.var(q_values)
+                move_variances[move] = variance
+            else:
+                move_variances[move] = 0.0
+        
+        return move_variances
+    
+    def _run_variance_based_search(self, board, num_rollouts, epsilon, move_variances):
+        """Run search with rollouts allocated based on move variance."""
+        if not move_variances:
+            return []
+        
+        # Normalize variances to get allocation proportions
+        total_variance = sum(move_variances.values())
+        if total_variance == 0:
+            # Equal allocation if no variance
+            return self._run_search_phase(board, num_rollouts, epsilon, "focus")
+        
+        # For simplicity, we'll still use equal worker allocation
+        # but could extend this to focus workers on high-variance moves
+        # For now, just run with awareness that high-variance positions need more exploration
+        return self._run_search_phase(board, num_rollouts, epsilon, "focus")
+    
+    def aggregate_statistics(self, results, is_tactical=False):
         """
         Aggregate move statistics from all independent trees.
         
+        Fix 3: Use confidence-based weighting for better aggregation.
+        
         Args:
             results: List of WorkerResult objects
+            is_tactical: Whether the position is tactical
             
         Returns:
             Dict with aggregated statistics per move
         """
-        aggregated = defaultdict(lambda: {'total_visits': 0, 'weighted_q': 0})
+        if not results:
+            return {}
+            
+        # Collect per-worker statistics for each move
+        move_worker_stats = defaultdict(list)
         
         for result in results:
             for move, visits in result.move_visits.items():
                 if visits > 0:
                     q_value = result.move_q_values[move]
-                    aggregated[move]['total_visits'] += visits
-                    aggregated[move]['weighted_q'] += visits * q_value
+                    move_worker_stats[move].append({
+                        'visits': visits,
+                        'q_value': q_value,
+                        'confidence': np.sqrt(visits)  # Confidence weight
+                    })
         
-        # Calculate final Q values
+        # Aggregate with confidence weighting
         final_stats = {}
-        for move, stats in aggregated.items():
-            if stats['total_visits'] > 0:
-                final_stats[move] = {
-                    'visits': stats['total_visits'],
-                    'q_value': stats['weighted_q'] / stats['total_visits']
-                }
+        for move, worker_stats in move_worker_stats.items():
+            total_visits = sum(ws['visits'] for ws in worker_stats)
+            
+            if is_tactical:
+                # In tactical positions, also consider the maximum Q-value
+                max_q = max(ws['q_value'] for ws in worker_stats)
+                
+                # Weight by confidence (sqrt of visits)
+                total_confidence = sum(ws['confidence'] for ws in worker_stats)
+                if total_confidence > 0:
+                    weighted_q = sum(ws['q_value'] * ws['confidence'] for ws in worker_stats) / total_confidence
+                    # Blend weighted average with max Q (70% weighted, 30% max for tactical)
+                    final_q = 0.7 * weighted_q + 0.3 * max_q
+                else:
+                    final_q = max_q
+            else:
+                # Normal positions: pure confidence-weighted average
+                total_confidence = sum(ws['confidence'] for ws in worker_stats)
+                if total_confidence > 0:
+                    final_q = sum(ws['q_value'] * ws['confidence'] for ws in worker_stats) / total_confidence
+                else:
+                    # Fallback to simple average
+                    final_q = sum(ws['q_value'] for ws in worker_stats) / len(worker_stats)
+            
+            final_stats[move] = {
+                'visits': total_visits,
+                'q_value': final_q
+            }
         
         return final_stats
     
     def get_best_move(self, stats):
         """Get best move based on visit counts."""
         if not stats:
+            # No stats means no viable moves found (e.g., drawn position)
             return None
         
         best_move = None
@@ -643,8 +901,6 @@ class RootParallelMCTS:
                 best_visits = move_stats['visits']
                 best_move = move
         
-        # print(f"Best move selected: {best_move} with {best_visits} visits")
-        # print(stats)
         return best_move
     
     def partial_cleanup(self):
