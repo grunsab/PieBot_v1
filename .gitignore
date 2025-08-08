@@ -5,3 +5,4 @@ games_training_data/
 *.bz2
 __pycache__/
 .DS_Store
+build/

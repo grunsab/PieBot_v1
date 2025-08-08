@@ -12,11 +12,11 @@ import multiprocessing as mp
 # Global caches for optimization
 position_cache = {}  # Cache for position encodings
 legal_moves_cache = {}  # Cache for legal move generation
-CACHE_MAX_SIZE = 200000  # Maximum cache size to prevent memory issues
+CACHE_MAX_SIZE = 20  # Maximum cache size to prevent memory issues
 
 # Object pools for Node/Edge creation
-node_pool = deque(maxlen=50000)
-edge_pool = deque(maxlen=200000)
+node_pool = deque(maxlen=500)
+edge_pool = deque(maxlen=200)
 
 def get_position_hash(board):
     """Get a hash for the current board position."""

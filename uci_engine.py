@@ -27,8 +27,7 @@ import sys
 
 device, device_str = get_optimal_device()
 
-import MCTS_profiling_speedups_v2 as MCTS
-import MCTS_multiprocess as MCTS_MP
+import MCTS_multiprocess as MCTS
 
 class TimeManager:
     """Manages time allocation for moves based on game time constraints."""
@@ -216,13 +215,10 @@ class UCIEngine:
                 print("info string Model loaded successfully")
                 sys.stdout.flush()
 
-            # If using multiprocess, initialize the engine now
-            if self.use_multiprocess:
-                if self.verbose:
-                    print("info string Initializing persistent multi-process MCTS engine...")
-                    sys.stdout.flush()
-                # The MCTS_MP.Root will handle the creation of the persistent engine
-                self.mcts_engine = MCTS_MP.Root(self.board, self.model)
+            if self.verbose:
+                print("info string Initializing persistent multi-process MCTS engine...")
+                sys.stdout.flush()
+            self.mcts_engine = MCTS(model=self.model)
 
             return True
             
@@ -295,26 +291,17 @@ class UCIEngine:
                 
             with torch.no_grad():
                 start_time = time.time()
-                
+                best_move = None
                 if self.use_multiprocess:
                     # With the persistent engine, we just call the rollouts
-                    self.mcts_engine = MCTS_MP.Root(self.board, self.model)
-                    self.mcts_engine.parallelRollouts(self.board, self.model, rollouts)
+                    self.mcts_engine = MCTS(self.model)
+                    best_move = self.mcts_engine.search(self.board, num_simulations=rollouts)
                     actual_rollouts = rollouts
                 else:
                     # Original threaded version
-                    self.mcts_engine = MCTS.Root(self.board, self.model)
-                    num_iterations = max(1, rollouts // self.threads)
-                    remainder = rollouts % self.threads
-                    
-                    for i in range(num_iterations):
-                        if self.stop_search.is_set(): break
-                        self.mcts_engine.parallelRollouts(self.board, self.model, self.threads)
-                    
-                    if remainder > 0 and not self.stop_search.is_set():
-                        self.mcts_engine.parallelRollouts(self.board, self.model, remainder)
-                    
-                    actual_rollouts = (num_iterations * self.threads) + (remainder if not self.stop_search.is_set() else 0)
+                    self.mcts_engine = MCTS(self.model)
+                    best_move = self.mcts_engine.search(self.board, num_simulations=rollouts)
+                    actual_rollouts = rollouts
                 
                 elapsed_time = time.time() - start_time
                 
@@ -326,19 +313,11 @@ class UCIEngine:
                     print("info string No best move found!")
                     return
 
-                move = edge.getMove()
-                Q = self.mcts_engine.getQ()
-                
+                move = best_move
                 self.best_move = move.uci()
                 
-                # Cleanup for non-persistent MCTS
-                if not self.use_multiprocess:
-                    MCTS.clear_caches()
-                    MCTS.clear_pools()
-
-                score = int(self.mcts_engine.getQ() * 1000 - 500) if self.mcts_engine.getQ() is not None else 0
                 nps = int(actual_rollouts / elapsed_time) if elapsed_time > 0 else 0
-                print(f"info depth {actual_rollouts} score cp {score} nodes {actual_rollouts} nps {nps} pv {move}")
+                print(f"info depth {actual_rollouts} nodes {actual_rollouts} nps {nps} pv {move}")
                 sys.stdout.flush()
                 
         except Exception as e:
@@ -423,7 +402,6 @@ class UCIEngine:
             if self.verbose:
                 print("info string Shutting down multi-process engine...")
                 sys.stdout.flush()
-            MCTS_MP.Root.cleanup_engine()
         sys.exit(0)
         
     def setoption(self, args):

@@ -1,9 +1,7 @@
 
 import argparse
 import chess
-#import MCTS_profiling_speedups_v2 as MCTS
-#import MCTS_multiprocess as MCTS
-import MCTS_root_parallel as MCTS  # Use new root parallelization
+import MCTS_profiling_speedups_v2 as MCTS
 import torch
 import AlphaZeroNetwork
 import time
@@ -296,40 +294,29 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
             starttime = time.perf_counter()
 
             with torch.no_grad():
-                if verbose:
-                    print(f"DEBUG: Creating MCTS root")
-
-                root = MCTS.Root( board, alphaZeroNet )
-                    
+                total_simulations = num_threads * num_rollouts
+                root = MCTS.Root(board, alphaZeroNet)
+                root.parallelRolloutsTotal(board.copy(), alphaZeroNet, total_simulations, num_threads)
                 if verbose:
                     print(f"DEBUG: Starting {num_rollouts} rollouts with {num_threads} threads")
-            
-                root.parallelRollouts( board.copy(), alphaZeroNet, num_threads * num_rollouts)
+
 
             endtime = time.perf_counter()
 
             elapsed = endtime - starttime
 
-            Q = root.getQ()
-
-            N = root.getN()
-
-            nps = N / elapsed
-
-            same_paths = root.same_paths
-       
-            if verbose:
-                #In verbose mode, print some statistics
-                print( root.getStatisticsString() )
-                print( 'total rollouts {} Q {:0.3f} duplicate paths {} elapsed {:0.2f} nps {:0.2f}'.format( int( N ), Q, same_paths, elapsed, nps ) )
-     
             edge = root.maxNSelect()
+            best_move = edge.getMove()
 
-            bestmove = edge.getMove()
+            print( 'best move {}'.format( str( best_move ) ) )
 
-            print( 'best move {}'.format( str( bestmove ) ) )
+            print(f"Elapsed time is {elapsed}")
+
+            NPS = total_simulations/elapsed
+
+            print(f"NPS is {NPS}")
         
-            board.push( bestmove )
+            board.push( best_move )
 
         if mode == 'p':
             #In profile mode, exit after the first move
@@ -363,7 +350,7 @@ if __name__=='__main__':
     parser.add_argument( '--fen', help='Starting fen' )
     parser.add_argument( '--gpus', help='Comma-separated list of GPU IDs to use (e.g., "0,1,2")')
     parser.add_argument( '--processes', type=int, help='Number of processes for multiprocessing (default: 1)' )
-    parser.set_defaults( verbose=False, mode='p', color='w', rollouts=10, threads=1, processes=1 )
+    parser.set_defaults( verbose=False, mode='p', color='w', rollouts=100, threads=100, processes=1 )
     parser = parser.parse_args()
     
     # Parse GPU IDs if provided

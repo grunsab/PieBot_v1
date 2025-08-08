@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python test_mcts_multiprocess_debug.py:*)",
+      "Bash(python test:*)",
+      "Bash(python:*)",
+      "Bash(timeout:*)"
+    ],
+    "deny": []
+  }
+}
