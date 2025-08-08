@@ -476,7 +476,7 @@ class RootParallelMCTS:
     Root parallelization MCTS with Dirichlet noise for exploration diversity.
     """
     
-    def __init__(self, model, num_workers=None, epsilon=0.25, alpha=0.3,
+    def __init__(self, model, num_workers=None, epsilon=0.1, alpha=0.3,
                  inference_batch_size=1280, inference_timeout_ms=1):
         """
         Initialize root parallel MCTS.
@@ -681,7 +681,7 @@ class Root:
     _mcts_engine = None
     _mcts_lock = mp.Lock()
     
-    def __init__(self, board, neuralNetwork, epsilon=0.25):
+    def __init__(self, board, neuralNetwork, epsilon=0.1):
         """
         Initialize root with optional Dirichlet noise.
         
