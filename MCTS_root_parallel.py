@@ -576,13 +576,10 @@ class RootParallelMCTS:
         """
         task_id = uuid.uuid4().hex
         rollouts_per_worker = num_rollouts // self.num_workers
-        #remainder = num_rollouts % self.num_workers
         
         # Create tasks with unique noise seeds for each worker
         for i in range(self.num_workers):
             worker_rollouts = rollouts_per_worker
-            #if i < remainder:
-            #    worker_rollouts += 1
             
             if worker_rollouts > 0:
                 # Each worker gets a unique random seed for Dirichlet noise
@@ -592,8 +589,6 @@ class RootParallelMCTS:
                     noise_seed, self.epsilon, self.alpha
                 )
                 self.task_queue.put(task)
-                #print(f"Assigned {worker_rollouts} rollouts to worker {i + 1}/{self.num_workers} "
-                #      f"(seed {noise_seed})")
         
         # Collect results from all workers
         results = []

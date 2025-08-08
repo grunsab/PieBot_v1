@@ -305,7 +305,6 @@ class UCIEngine:
                 
                 edge = self.mcts_engine.maxNSelect()
                 if not edge:
-                    print("info string No best move found!")
                     return
 
                 best_move = edge.getMove()
@@ -345,6 +344,7 @@ class UCIEngine:
             print(f"bestmove {self.best_move}")
         else:
             # Fallback if search fails
+            print("WARNING: NO BEST MOVE FOUND")
             legal_moves = list(self.board.legal_moves)
             if legal_moves:
                 print(f"bestmove {legal_moves[0].uci()}")
