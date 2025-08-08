@@ -221,7 +221,6 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
         if devices[-1].type == 'cpu':
             print(f'Model using CPU (static quantized)')
         else:
-            model.to(device)
             print(f'Loaded model on GPU {gpu_id}: {torch.cuda.get_device_name(gpu_id)}')
     
     return models, devices

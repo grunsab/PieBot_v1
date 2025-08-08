@@ -27,7 +27,8 @@ if torch.cuda.is_available():
         pass
 
 import encoder
-from inference_server import InferenceRequest, InferenceResult, start_inference_server, start_inference_server_from_state
+#from inference_server import InferenceRequest, InferenceResult, start_inference_server, start_inference_server_from_state
+from inference_server_parallel_v2 import InferenceRequest, InferenceResult, start_inference_server_from_state, start_inference_server
 import MCTS  # Use the original single-threaded MCTS for node/edge structures with virtual loss support
 
 
@@ -91,7 +92,7 @@ def run_worker(worker_id, task_queue, result_queue, inference_queue, stop_event)
         try:
             task = task_queue.get(timeout=0.1)
         except queue.Empty:
-            print(f"Worker {worker_id} exiting due to empty task queue.")
+            #print(f"Worker {worker_id} exiting due to empty task queue.")
             continue
         
         # Initialize random generator with unique seed
@@ -470,7 +471,7 @@ class RootParallelMCTS:
     """
     
     def __init__(self, model, num_workers=None, epsilon=0.25, alpha=0.3,
-                 inference_batch_size=1024, inference_timeout_ms=20):
+                 inference_batch_size=1280, inference_timeout_ms=5):
         """
         Initialize root parallel MCTS.
         
@@ -483,7 +484,7 @@ class RootParallelMCTS:
             inference_timeout_ms: Timeout for batching inference requests
         """
         if num_workers is None:
-            num_workers = 8
+            num_workers = 12
         
         self.num_workers = num_workers
         self.epsilon = epsilon
@@ -529,7 +530,7 @@ class RootParallelMCTS:
         inference_process = Process(
             target=start_inference_server_from_state,
             args=(model_state, model_config, device_type, self.inference_queue, 
-                  self.stop_event, self.inference_batch_size, self.inference_timeout_ms)
+                  self.stop_event, 3, self.inference_batch_size, self.inference_timeout_ms)
         )
         
         inference_process.start()
@@ -544,7 +545,7 @@ class RootParallelMCTS:
             )
             process.start()
             self.processes.append(process)
-            print(f"Started worker process {i + 1}/{self.num_workers}")
+            #print(f"Started worker process {i + 1}/{self.num_workers}")
 
     
     def run_parallel_search(self, board, num_rollouts):
@@ -560,13 +561,13 @@ class RootParallelMCTS:
         """
         task_id = uuid.uuid4().hex
         rollouts_per_worker = num_rollouts // self.num_workers
-        remainder = num_rollouts % self.num_workers
+        #remainder = num_rollouts % self.num_workers
         
         # Create tasks with unique noise seeds for each worker
         for i in range(self.num_workers):
             worker_rollouts = rollouts_per_worker
-            if i < remainder:
-                worker_rollouts += 1
+            #if i < remainder:
+            #    worker_rollouts += 1
             
             if worker_rollouts > 0:
                 # Each worker gets a unique random seed for Dirichlet noise
@@ -632,6 +633,8 @@ class RootParallelMCTS:
                 best_visits = move_stats['visits']
                 best_move = move
         
+        print(f"Best move selected: {best_move} with {best_visits} visits")
+        print(stats)
         return best_move
     
     def cleanup(self):
@@ -692,10 +695,10 @@ class Root:
             self.board, num_parallel_rollouts
         )
 
-    def parallelRolloutsTotal(self, board, neuralNetwork, num_parallel_rollouts):
+    def parallelRolloutsTotal(self, board, neuralNetwork, total_rollouts, num_parallel_rollouts):
         """Run total parallel rollouts (compatibility method)."""
         self.stats = Root._mcts_engine.run_parallel_search(
-            self.board, num_parallel_rollouts
+            self.board, total_rollouts
         )
     
     def maxNSelect(self):

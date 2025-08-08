@@ -156,9 +156,9 @@ def inference_worker_process(worker_id, model_state, model_config, device_type,
             
             try:
                 if timeout_remaining > 0:
-                    item = request_queue.get(timeout=timeout_remaining)
-                    if item is not None:  # None signals shutdown
-                        batch_data.append(item)
+                    item_list = request_queue.get(timeout=timeout_remaining)
+                    if item_list is not None and item_list is not []:  # None signals shutdown
+                        batch_data.extend(item_list)
                 else:
                     break
             except queue.Empty:
@@ -169,10 +169,7 @@ def inference_worker_process(worker_id, model_state, model_config, device_type,
             process_batch(batch_data)
             total_requests += len(batch_data)
             total_batches += 1
-            
-            # Print statistics periodically
-            if total_batches % 500 == 0:
-                print(f"Worker {worker_id}: {total_requests} requests in {total_batches} batches")
+            print(f"Processed batch of size {len(batch_data)}")
     
     print(f"Inference worker {worker_id} stopped")
 
@@ -204,13 +201,16 @@ def coordinator_process(model_state, model_config, device_type, main_request_que
     # Route requests to workers
     while not stop_event.is_set():
         try:
-            req_tuple = main_request_queue.get(timeout=0.1)
-            if req_tuple is not None:
-                request, result_queue = req_tuple
+            request_tuples = []
+            request_tuple_list = main_request_queue.get(timeout=0.1)
+            worker_queue_conversion = []
+            if len(request_tuple_list) > 0:
+                for i in range(0, len(request_tuple_list)):
+                    req_tuple = request_tuple_list[i]
+                    request, result_queue = req_tuple
+                    worker_queue_conversion.append((request.request_id, request.board_fen, result_queue))
                 # Convert to simpler format for worker
-                worker_queues[next_worker].put(
-                    (request.request_id, request.board_fen, result_queue)
-                )
+                worker_queues[next_worker].put(worker_queue_conversion)
                 next_worker = (next_worker + 1) % num_workers
         except queue.Empty:
             continue
@@ -230,7 +230,7 @@ def coordinator_process(model_state, model_config, device_type, main_request_que
     print("Coordinator stopped")
 
 
-def start_parallel_inference_servers_v2(model, device, main_queue, stop_event,
+def start_inference_server(model, device, main_queue, stop_event,
                                        num_servers=2, batch_size=64, timeout_ms=150):
     """
     Start parallel inference servers (simplified version for Windows).
@@ -260,7 +260,7 @@ def start_parallel_inference_servers_v2(model, device, main_queue, stop_event,
                        stop_event, num_servers, batch_size, timeout_ms)
 
 
-def start_parallel_inference_servers_from_state_v2(model_state, model_config, device_type,
+def start_inference_server_from_state(model_state, model_config, device_type,
                                                   main_queue, stop_event,
                                                   num_servers=2, batch_size=64, timeout_ms=150):
     """
