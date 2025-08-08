@@ -177,7 +177,7 @@ class UCIEngine:
         """Load the neural network model."""
         try:
             if not self.model_path:
-                self.model_path = "AlphaZeroNet_20x256_distributed.pt"
+                self.model_path = "weights/AlphaZeroNet_20x256.pt"
             
             if not os.path.isabs(self.model_path):
                 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -234,7 +234,7 @@ class UCIEngine:
         print("id name AlphaZero UCI Engine (Persistent MP)")
         print("id author Rishi Sachdev")
         print("option name Threads type spin default 8 min 1 max 128")
-        print("option name Model type string default AlphaZeroNet_20x256_distributed.pt")
+        print("option name Model type string default weights/AlphaZeroNet_20x256.pt")
         print("option name Verbose type check default false")
         print("option name Move Overhead type spin default 30 min 0 max 5000")
         print("option name UseMultiprocess type check default true")
@@ -500,7 +500,7 @@ def main():
         description="UCI Protocol wrapper for AlphaZero chess engine"
     )
     parser.add_argument("--model", help="Path to model file", 
-                       default="AlphaZeroNet_20x256_distributed.pt")
+                       default="weights/AlphaZeroNet_20x256.pt")
     parser.add_argument("--threads", type=int, help="Number of threads for threaded MCTS", 
                        default=64)
     parser.add_argument("--verbose", action="store_true", 
