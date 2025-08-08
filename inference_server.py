@@ -198,8 +198,12 @@ class InferenceServer:
             # Process batch if we have requests
             if request_tuples:
                 self.process_batch(request_tuples)
-                print(f"Processed batch of {len(request_tuples)} requests with size {self.batch_size}")
-                
+                #print(f"Processed batch of {len(request_tuples)} requests with size {self.batch_size}")
+            
+
+            if self.total_requests > 0 and self.total_requests > 9000:
+                print(f"TOTAL REQUESTS: {self.total_requests}")
+
             # Print statistics periodically
             if self.total_batches > 0 and self.total_batches % 1000 == 0:
                 avg_batch_size = self.total_requests / self.total_batches

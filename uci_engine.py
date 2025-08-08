@@ -27,7 +27,7 @@ import sys
 
 device, device_str = get_optimal_device()
 
-import MCTS_multiprocess as MCTS
+import MCTS_root_parallel as MCTS
 
 class TimeManager:
     """Manages time allocation for moves based on game time constraints."""
@@ -47,11 +47,11 @@ class TimeManager:
         self.threads = threads
         # Adjust for the fact that parallelRollouts does 'threads' rollouts per call
         # So actual time per rollout is different
-        # My Macbook Mini M4 Runs around 600 rollouts per second, and my RTX 4080 does about 1200.
+        # My Macbook Mini M4 Runs around 600 rollouts per second, and my RTX 4080 does about 4000-5000 using MCTS_root_parallel.
         if device.type == "mps":
             self.rollouts_per_second = 600
         else:
-            self.rollouts_per_second = 1200  # Average for RTX 4080
+            self.rollouts_per_second = 4000  # Average for RTX 4080
         
         # Track actual performance
         self.measured_rollouts_per_second = None
@@ -218,7 +218,7 @@ class UCIEngine:
             if self.verbose:
                 print("info string Initializing persistent multi-process MCTS engine...")
                 sys.stdout.flush()
-            self.mcts_engine = MCTS(model=self.model)
+            self.mcts_engine = MCTS.Root(self.board, self.model)
 
             return True
             
@@ -292,16 +292,11 @@ class UCIEngine:
             with torch.no_grad():
                 start_time = time.time()
                 best_move = None
-                if self.use_multiprocess:
-                    # With the persistent engine, we just call the rollouts
-                    self.mcts_engine = MCTS(self.model)
-                    best_move = self.mcts_engine.search(self.board, num_simulations=rollouts)
-                    actual_rollouts = rollouts
-                else:
-                    # Original threaded version
-                    self.mcts_engine = MCTS(self.model)
-                    best_move = self.mcts_engine.search(self.board, num_simulations=rollouts)
-                    actual_rollouts = rollouts
+                if not self.mcts_engine:
+                    self.mcts_engine = MCTS.Root(self.board, self.model)
+
+                self.mcts_engine.parallelRolloutsTotal(self.board.copy(), self.model, rollouts, self.threads)
+                actual_rollouts = rollouts
                 
                 elapsed_time = time.time() - start_time
                 
@@ -313,11 +308,11 @@ class UCIEngine:
                     print("info string No best move found!")
                     return
 
-                move = best_move
-                self.best_move = move.uci()
+                best_move = edge.getMove()
+                self.best_move = best_move.uci()
                 
                 nps = int(actual_rollouts / elapsed_time) if elapsed_time > 0 else 0
-                print(f"info depth {actual_rollouts} nodes {actual_rollouts} nps {nps} pv {move}")
+                print(f"info depth {actual_rollouts} nodes {actual_rollouts} nps {nps} pv {best_move}")
                 sys.stdout.flush()
                 
         except Exception as e:

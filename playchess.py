@@ -1,7 +1,7 @@
 
 import argparse
 import chess
-import MCTS_profiling_speedups_v2 as MCTS
+import MCTS_root_parallel as MCTS
 import torch
 import AlphaZeroNetwork
 import time
@@ -308,11 +308,15 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
             edge = root.maxNSelect()
             best_move = edge.getMove()
 
+            total_nodes_explored = root.getN()
+
+            print(f"Total nodes explored {total_nodes_explored}")
+
             print( 'best move {}'.format( str( best_move ) ) )
 
             print(f"Elapsed time is {elapsed}")
 
-            NPS = total_simulations/elapsed
+            NPS = total_nodes_explored/elapsed
 
             print(f"NPS is {NPS}")
         

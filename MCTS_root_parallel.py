@@ -179,6 +179,9 @@ def run_parallel_rollouts(root, base_board, num_rollouts, worker_id,
     rollout_batch = []
     pending_evaluations = []
     
+    TOTAL_REQUESTS_SENT_FOR_INFERENCE = 0
+
+
     # Prepare all rollouts
     for rollout_idx in range(num_rollouts):
         rollout_board = base_board.copy()
@@ -199,7 +202,8 @@ def run_parallel_rollouts(root, base_board, num_rollouts, worker_id,
                     batch_metadata.append(data)
             
             inference_queue.put(batch_requests)
-            
+            TOTAL_REQUESTS_SENT_FOR_INFERENCE += len(batch_requests)
+
             # Collect all results
             results = []
             for _ in range(len(batch_requests)):
@@ -217,6 +221,8 @@ def run_parallel_rollouts(root, base_board, num_rollouts, worker_id,
             
             # Clear batch for next iteration
             rollout_batch = []
+    
+    #print(f"Worker ID: {worker_id}. Total requets sent for inference: {TOTAL_REQUESTS_SENT_FOR_INFERENCE}")
 
 
 def prepare_rollout(root, board, worker_id):
@@ -410,7 +416,7 @@ def run_single_rollout(root, board, worker_id, inference_queue, result_queue):
         num_probs = len(result.move_probabilities)
         
         if num_legal_moves != num_probs:
-            print("Warning: Number of legal moves does not match number of probabilities.")
+            # print("Warning: Number of legal moves does not match number of probabilities.")
             # This should not happen in a well-formed game, but handle gracefully
             # Re-decode probabilities for this specific board instance
             # Get fresh board from FEN to match what inference server saw
@@ -471,7 +477,7 @@ class RootParallelMCTS:
     """
     
     def __init__(self, model, num_workers=None, epsilon=0.25, alpha=0.3,
-                 inference_batch_size=1280, inference_timeout_ms=5):
+                 inference_batch_size=1280, inference_timeout_ms=1):
         """
         Initialize root parallel MCTS.
         
@@ -484,7 +490,7 @@ class RootParallelMCTS:
             inference_timeout_ms: Timeout for batching inference requests
         """
         if num_workers is None:
-            num_workers = 12
+            num_workers = 6
         
         self.num_workers = num_workers
         self.epsilon = epsilon
@@ -527,11 +533,21 @@ class RootParallelMCTS:
         else:
             device_type = 'cpu'
         
+        NUM_WORKERS_INFERENCE_SERVER = 3
+
         inference_process = Process(
             target=start_inference_server_from_state,
             args=(model_state, model_config, device_type, self.inference_queue, 
-                  self.stop_event, 3, self.inference_batch_size, self.inference_timeout_ms)
+                  self.stop_event, NUM_WORKERS_INFERENCE_SERVER, self.inference_batch_size, self.inference_timeout_ms)
         )
+
+        # inference_process = Process(
+        #     target=start_inference_server_from_state,
+        #     args=(model_state, model_config, device_type, self.inference_queue, 
+        #           self.stop_event, self.inference_batch_size, self.inference_timeout_ms)
+        # )
+        
+
         
         inference_process.start()
         self.processes.append(inference_process)
@@ -545,7 +561,6 @@ class RootParallelMCTS:
             )
             process.start()
             self.processes.append(process)
-            #print(f"Started worker process {i + 1}/{self.num_workers}")
 
     
     def run_parallel_search(self, board, num_rollouts):
@@ -633,8 +648,8 @@ class RootParallelMCTS:
                 best_visits = move_stats['visits']
                 best_move = move
         
-        print(f"Best move selected: {best_move} with {best_visits} visits")
-        print(stats)
+        # print(f"Best move selected: {best_move} with {best_visits} visits")
+        # print(stats)
         return best_move
     
     def cleanup(self):

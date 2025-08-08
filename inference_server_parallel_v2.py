@@ -169,7 +169,6 @@ def inference_worker_process(worker_id, model_state, model_config, device_type,
             process_batch(batch_data)
             total_requests += len(batch_data)
             total_batches += 1
-            print(f"Processed batch of size {len(batch_data)}")
     
     print(f"Inference worker {worker_id} stopped")
 
@@ -185,6 +184,9 @@ def coordinator_process(model_state, model_config, device_type, main_request_que
     worker_queues = [mp.Queue() for _ in range(num_workers)]
     worker_processes = []
     
+    total_requests = 0
+
+
     # Start worker processes
     for i in range(num_workers):
         p = Process(
@@ -209,9 +211,11 @@ def coordinator_process(model_state, model_config, device_type, main_request_que
                     req_tuple = request_tuple_list[i]
                     request, result_queue = req_tuple
                     worker_queue_conversion.append((request.request_id, request.board_fen, result_queue))
-                # Convert to simpler format for worker
+
+                total_requests += len(worker_queue_conversion)
                 worker_queues[next_worker].put(worker_queue_conversion)
                 next_worker = (next_worker + 1) % num_workers
+        
         except queue.Empty:
             continue
         except Exception as e:
