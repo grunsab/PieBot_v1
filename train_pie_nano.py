@@ -66,10 +66,10 @@ def parse_args():
                         help='Weight decay for optimizer (default: 1e-4)')
     parser.add_argument('--clip-grad-norm', type=float, default=1.0,
                         help='Gradient clipping norm (default: 1.0)')
-    parser.add_argument('--save-every', type=int, default=10,
-                        help='Save checkpoint every N epochs (default: 10)')
-    parser.add_argument('--validate-every', type=int, default=5,
-                        help='Validate every N epochs (default: 5)')
+    parser.add_argument('--save-every', type=int, default=20,
+                        help='Save checkpoint every N epochs (default: 20)')
+    parser.add_argument('--validate-every', type=int, default=1,
+                        help='Validate every N epochs (default: 1)')
     parser.add_argument('--policy-hidden-dim', type=int, default=256,
                         help='Hidden dimension for policy head (default: 256)')
     
@@ -339,7 +339,7 @@ def main():
     # Create dataloaders with MPS-optimized settings
     if is_mps:
         # MPS-specific dataloader settings
-        num_workers = min(4, get_num_workers_for_device())  # Limit workers on MPS
+        num_workers = min(6, get_num_workers_for_device())  # Limit workers on MPS
         persistent_workers = False  # Disable for MPS compatibility
         pin_memory = False  # MPS doesn't use pinned memory
     else:

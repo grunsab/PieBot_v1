@@ -132,14 +132,14 @@ def get_num_workers_for_device():
     import os
     
     device, _ = get_optimal_device()
-    cpu_count = os.cpu_count() or 4
+    cpu_count = os.cpu_count() or 8
     
     if device.type == 'cuda':
         # For GPU training, use more workers to keep GPU fed
         return min(cpu_count, 8)
     elif device.type == 'mps':
         # MPS benefits from fewer workers due to unified memory
-        return cpu_count // 3
+        return cpu_count
     else:  # CPU
         # For CPU training, use fewer workers to avoid overhead
         return min(cpu_count // 2, 4)
