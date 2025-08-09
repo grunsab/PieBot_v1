@@ -15,8 +15,8 @@ legal_moves_cache = {}  # Cache for legal move generation
 CACHE_MAX_SIZE = 20  # Maximum cache size to prevent memory issues
 
 # Object pools for Node/Edge creation
-node_pool = deque(maxlen=500)
-edge_pool = deque(maxlen=200)
+node_pool = deque(maxlen=50000)
+edge_pool = deque(maxlen=200000)
 
 def get_position_hash(board):
     """Get a hash for the current board position."""

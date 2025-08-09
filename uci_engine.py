@@ -20,8 +20,8 @@ import threading
 from queue import Queue
 import multiprocessing as mp
 import AlphaZeroNetwork
+import PieBotNetwork
 from device_utils import get_optimal_device, optimize_for_device
-from quantization_utils import load_quantized_model
 
 import sys
 
@@ -173,6 +173,20 @@ class UCIEngine:
         self.move_overhead = 30  # Default move overhead in milliseconds
         self.use_multiprocess = use_multiprocess
         
+    def detect_model_type(self, weights):
+        """Detect whether this is an AlphaZeroNet or PieBotNet model."""
+        if isinstance(weights, dict):
+            # Check state dict keys to determine model type
+            state_dict = weights.get('model_state_dict', weights)
+            
+            # PieBotNet has specific modules like positional_encoding and transformer_blocks
+            has_positional_encoding = any('positional_encoding' in key for key in state_dict.keys())
+            has_transformer = any('transformer_blocks' in key for key in state_dict.keys())
+            
+            if has_positional_encoding or has_transformer:
+                return 'PieBotNet'
+        return 'AlphaZeroNet'
+    
     def load_model(self):
         """Load the neural network model."""
         try:
@@ -194,14 +208,29 @@ class UCIEngine:
             if self.verbose:
                 print(f"info string Loading model from: {full_path} on {device_str}")
                 sys.stdout.flush()
-                
-            self.model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
-            weights = torch.load(full_path, map_location=self.device)
             
+            # Load weights to detect model type
+            weights = torch.load(full_path, map_location='cpu')
+            
+            # Detect and create the appropriate model type
+            model_type = self.detect_model_type(weights)
+            if model_type == 'PieBotNet':
+                # Use default PieBotNet configuration
+                self.model = PieBotNetwork.PieBotNet()
+                if self.verbose:
+                    print(f"info string Detected PieBotNet model")
+            else:
+                self.model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
+                if self.verbose:
+                    print(f"info string Detected AlphaZeroNet model")
+            
+            # Handle different model formats
             if isinstance(weights, dict) and 'model_state_dict' in weights:
                 self.model.load_state_dict(weights['model_state_dict'])
                 if weights.get('model_type') == 'fp16':
                     self.model = self.model.half()
+                    if self.verbose:
+                        print(f"info string Loaded FP16 model")
             else:
                 self.model.load_state_dict(weights)
             

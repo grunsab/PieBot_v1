@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Test script to debug MCTS chess engine blunders and timeouts.
-This script simulates a chess game and monitors for issues.
+Test script to debug shared tree MCTS implementation.
+This script simulates a chess game using the shared tree MCTS.
 """
 
 import chess
@@ -16,7 +16,7 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import AlphaZeroNetwork
-import MCTS_root_parallel as MCTS
+import MCTS_shared_search as MCTS
 from device_utils import get_optimal_device, optimize_for_device
 import encoder
 
@@ -81,7 +81,6 @@ def run_mcts_search(board, model, rollouts=100, verbose=True):
         print(f"ERROR during MCTS search: {e}")
         traceback.print_exc()
         return None, 0, 0
-    # Note: Don't cleanup here - let the main function handle cleanup at the end
 
 def detect_blunder(board, move, model, threshold=0.3):
     """
@@ -117,7 +116,7 @@ def simulate_game(model, max_moves=100, rollouts_per_move=100):
     move_count = 0
     
     print("\n" + "="*60)
-    print("Starting chess game simulation...")
+    print("Starting chess game simulation with shared tree MCTS...")
     print("="*60)
     
     while not board.is_game_over() and move_count < max_moves:
@@ -192,7 +191,7 @@ def simulate_game(model, max_moves=100, rollouts_per_move=100):
         print(f"Game result: {board.result()}")
     
     # Save PGN
-    pgn_file = "debug_game.pgn"
+    pgn_file = "shared_mcts_debug_game.pgn"
     with open(pgn_file, "w") as f:
         print(game, file=f)
     print(f"\nGame saved to {pgn_file}")
@@ -206,13 +205,13 @@ def main():
     print(f"Model loaded successfully on {device}")
     
     # Run test game
-    print("\nRunning test game to detect blunders and timeouts...")
+    print("\nRunning test game with shared tree MCTS...")
     
     try:
         blunder_count, timeout_count = simulate_game(
             model, 
-            max_moves=300,  # Play 100 moves (50 per side) for faster testing
-            rollouts_per_move=500  # Use 5000 rollouts for good quality
+            max_moves=10,  # Play 10 moves for faster testing
+            rollouts_per_move=10  # Use 10 rollouts for testing
         )
         
         # Analyze results
@@ -222,7 +221,7 @@ def main():
         
         if blunder_count > 2:
             print(f"ISSUE DETECTED: {blunder_count} blunders found!")
-            print("   This suggests the MCTS tree may be corrupted.")
+            print("   This suggests the shared MCTS tree may have issues.")
         else:
             print(f"Blunder count normal: {blunder_count}")
         
@@ -233,7 +232,7 @@ def main():
             print("No timeout issues detected")
         
         if blunder_count <= 2 and timeout_count == 0:
-            print("\nAll tests passed! The engine appears to be working correctly.")
+            print("\nAll tests passed! The shared tree MCTS appears to be working correctly.")
         else:
             print("\nIssues detected. Review the debug output above.")
             

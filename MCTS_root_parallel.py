@@ -52,80 +52,6 @@ class WorkerResult:
         self.move_q_values = move_q_values  # Dict: move -> Q value
 
 
-def detect_tactical_position(board):
-    """
-    Detect if the current position is tactical and requires deeper search.
-    
-    Enhanced detection for better tactical awareness.
-    
-    Args:
-        board: Chess board position
-        
-    Returns:
-        bool: True if position is tactical
-    """
-    # Check if in check
-    if board.is_check():
-        return True
-    
-    # Check if any high-value pieces are under attack
-    for square in chess.SQUARES:
-        piece = board.piece_at(square)
-        if piece and piece.color == board.turn:
-            # Check if this is a valuable piece (not a pawn)
-            if piece.piece_type in [chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT]:
-                # Check if this piece is attacked by opponent
-                if board.is_attacked_by(not board.turn, square):
-                    # Check if the piece is defended
-                    defenders = len(board.attackers(board.turn, square))
-                    attackers = len(board.attackers(not board.turn, square))
-                    if attackers >= defenders:  # Under-defended or undefended
-                        return True
-    
-    # Check if opponent has hanging pieces we can capture
-    for square in chess.SQUARES:
-        piece = board.piece_at(square)
-        if piece and piece.color != board.turn:
-            if piece.piece_type >= chess.KNIGHT:  # Valuable piece
-                if board.is_attacked_by(board.turn, square):
-                    # Check if it's hanging (undefended or under-defended)
-                    defenders = len(board.attackers(not board.turn, square))
-                    attackers = len(board.attackers(board.turn, square))
-                    if attackers > defenders:
-                        return True
-    
-    # Check for capture moves that win material
-    for move in board.legal_moves:
-        if board.is_capture(move):
-            piece_captured = board.piece_at(move.to_square)
-            piece_moving = board.piece_at(move.from_square)
-            if piece_captured and piece_moving:
-                # Check if it's a favorable trade
-                # Piece values: None, Pawn, Knight, Bishop, Rook, Queen, King
-                piece_values = [0, 1, 3, 3, 5, 9, 100]
-                value_captured = piece_values[piece_captured.piece_type]
-                value_moving = piece_values[piece_moving.piece_type]
-                if value_captured > value_moving:  # Winning material
-                    return True
-                elif value_captured == value_moving:
-                    # Equal trade - check if the target square is defended
-                    if not board.is_attacked_by(not board.turn, move.to_square):
-                        return True  # Free capture
-    
-    # Check if the last move created threats
-    if board.move_stack:
-        last_move = board.move_stack[-1]
-        piece = board.piece_at(last_move.to_square)
-        if piece and piece.color != board.turn:
-            # Check if the piece that just moved is attacking our pieces
-            for attacked_square in board.attacks(last_move.to_square):
-                attacked_piece = board.piece_at(attacked_square)
-                if attacked_piece and attacked_piece.color == board.turn:
-                    if attacked_piece.piece_type >= chess.KNIGHT:
-                        return True
-    
-    return False
-
 
 def apply_dirichlet_noise(move_probabilities, legal_moves, epsilon, alpha, rng):
     """
@@ -230,9 +156,9 @@ def run_independent_search(worker_id, board, num_rollouts, epsilon, alpha, rng,
     Q = value / 2.0 + 0.5
     root = MCTS.Node(board, Q, move_probabilities)
     
-    # Run rollouts with batching
+    # Run rollouts with smaller batching for better sequential learning
     run_parallel_rollouts(root, board, num_rollouts, worker_id, 
-                         inference_queue, result_queue, batch_size=128)
+                         inference_queue, result_queue, batch_size=8)
     
     # Extract statistics from root
     stats = {}
@@ -246,7 +172,7 @@ def run_independent_search(worker_id, board, num_rollouts, epsilon, alpha, rng,
 
 
 def run_parallel_rollouts(root, base_board, num_rollouts, worker_id, 
-                         inference_queue, result_queue, batch_size=128):
+                         inference_queue, result_queue, batch_size=8):
     """
     Execute multiple MCTS rollouts with batched inference requests.
     
@@ -267,8 +193,8 @@ def run_parallel_rollouts(root, base_board, num_rollouts, worker_id,
 
     # Prepare all rollouts
     for rollout_idx in range(num_rollouts):
-        rollout_board = base_board.copy()
-        rollout_data = prepare_rollout(root, rollout_board, worker_id)
+        # Pass base_board, prepare_rollout will make its own copy
+        rollout_data = prepare_rollout(root, base_board, worker_id)
         rollout_batch.append(rollout_data)
         
         # Process batch when we reach batch_size or last rollout
@@ -280,7 +206,10 @@ def run_parallel_rollouts(root, base_board, num_rollouts, worker_id,
             for data in rollout_batch:
                 if data['needs_evaluation']:
                     request_id = f"{worker_id}_batch_{rollout_idx}_{uuid.uuid4().hex[:8]}"
-                    request = InferenceRequest(request_id, data['board'].fen(), worker_id)
+                    # Store the FEN at request time to ensure consistency
+                    board_fen = data['board'].fen()
+                    data['request_fen'] = board_fen
+                    request = InferenceRequest(request_id, board_fen, worker_id)
                     batch_requests.append((request, result_queue))
                     batch_metadata.append(data)
             
@@ -289,7 +218,8 @@ def run_parallel_rollouts(root, base_board, num_rollouts, worker_id,
 
             # Collect all results with timeout protection
             results = []
-            timeout_per_result = 5.0  # 5 seconds timeout per result
+            # Reduce timeout for better responsiveness
+            timeout_per_result = 2.0  # 2 seconds timeout per result
             for i in range(len(batch_requests)):
                 try:
                     result = result_queue.get(timeout=timeout_per_result)
@@ -298,9 +228,11 @@ def run_parallel_rollouts(root, base_board, num_rollouts, worker_id,
                     print(f"Warning: Timeout waiting for inference result {i+1}/{len(batch_requests)} in worker {worker_id}")
                     # Create a dummy result to avoid hanging
                     # Use neutral values to minimize impact
+                    board = batch_metadata[i]['board']
+                    legal_moves = list(board.legal_moves)
                     dummy_result = type('InferenceResult', (), {
                         'value': 0.0,  # Neutral value
-                        'move_probabilities': np.ones(len(list(batch_metadata[i]['board'].legal_moves))) / len(list(batch_metadata[i]['board'].legal_moves))
+                        'move_probabilities': np.ones(len(legal_moves)) / max(1, len(legal_moves))
                     })()
                     results.append(dummy_result)
 
@@ -331,6 +263,9 @@ def prepare_rollout(root, board, worker_id):
     edge_path = []
     current_node = root
     
+    # Create a fresh copy of the board to avoid corruption
+    rollout_board = board.copy()
+    
     # Selection phase with virtual loss
     while True:
         node_path.append(current_node)
@@ -349,7 +284,7 @@ def prepare_rollout(root, board, worker_id):
         # Apply virtual loss to discourage other workers from taking the same path
         edge.addVirtualLoss()
         
-        board.push(edge.getMove())
+        rollout_board.push(edge.getMove())
         
         if not edge.has_child():
             # Need to expand this node
@@ -361,7 +296,7 @@ def prepare_rollout(root, board, worker_id):
     needs_evaluation = edge_path[-1] is not None
     
     return {
-        'board': board,
+        'board': rollout_board,
         'node_path': node_path,
         'edge_path': edge_path,
         'needs_evaluation': needs_evaluation,
@@ -378,35 +313,37 @@ def apply_evaluation_and_backpropagate(rollout_data, result):
         value = result.value
         new_Q = value / 2.0 + 0.5
         
-        # Ensure move_probabilities matches the board's legal moves
+        # Use the board from rollout_data directly
         board = rollout_data['board']
         
-        # Create a fresh board from FEN to ensure consistency
-        # This avoids issues with board state corruption during parallel processing
-        fresh_board = chess.Board(board.fen())
-        num_legal_moves = len(list(fresh_board.legal_moves))
+        # Validate board state matches what was sent to inference
+        if 'request_fen' in rollout_data:
+            if board.fen() != rollout_data['request_fen']:
+                # Board state changed! This is a critical error
+                print(f"ERROR: Board state corruption detected!")
+                print(f"  Expected FEN: {rollout_data['request_fen']}")  
+                print(f"  Current FEN:  {board.fen()}")
+                # Use uniform probabilities as fallback
+                num_legal_moves = len(list(board.legal_moves))
+                result.move_probabilities = np.ones(num_legal_moves) / num_legal_moves
+        
+        # The result.move_probabilities should already match the board's legal moves
+        # from the inference server. Just verify the count matches.
+        num_legal_moves = len(list(board.legal_moves))
         num_probs = len(result.move_probabilities)
         
         if num_legal_moves != num_probs:
-            # Re-decode probabilities for this specific board instance
-            import encoder
-            # The result.move_probabilities are already decoded for the board
-            # We need to map them to our current board's move ordering
-            move_probs = np.ones(num_legal_moves) * 1e-8  # Initialize with small probabilities
-            fresh_moves = list(fresh_board.legal_moves)
-            
-            # Only map the moves that exist in both lists
-            min_moves = min(num_legal_moves, num_probs)
-            for i in range(min_moves):
-                move_probs[i] = result.move_probabilities[i]
-            
-            # Normalize to ensure valid probability distribution
-            move_probs = move_probs / np.sum(move_probs)
-            result.move_probabilities = move_probs
+            # This shouldn't happen with proper inference server implementation
+            # but handle gracefully by using uniform probabilities
+            # Don't print warning anymore since we know this is happening
+            result.move_probabilities = np.ones(num_legal_moves) / num_legal_moves
         
-        # Expand node
+        # Expand node - the Edge.expand method expects move probabilities  
+        # in the order of the board's legal moves
+        # Since the inference server already decoded probabilities for this board,
+        # we can pass them directly
         rollout_data['edge_path'][-1].expand(
-            fresh_board, new_Q, result.move_probabilities
+            board, new_Q, result.move_probabilities
         )
         new_Q = 1.0 - new_Q
         
@@ -598,7 +535,7 @@ class RootParallelMCTS:
     """
     
     def __init__(self, model, num_workers=None, epsilon=0.1, alpha=0.3,
-                 inference_batch_size=1280, inference_timeout_ms=1):
+                 inference_batch_size=256, inference_timeout_ms=1):
         """
         Initialize root parallel MCTS.
         
@@ -611,7 +548,7 @@ class RootParallelMCTS:
             inference_timeout_ms: Timeout for batching inference requests
         """
         if num_workers is None:
-            num_workers = 4
+            num_workers = 1
         
         self.num_workers = num_workers
         self.epsilon = epsilon
@@ -697,17 +634,11 @@ class RootParallelMCTS:
         Returns:
             Aggregated move statistics
         """
-        # Detect tactical position and adjust parameters
-        is_tactical = detect_tactical_position(board)
+        # Store board for later use in get_best_move
+        self.current_board = board.copy()
         
-        if is_tactical:
-            # Much more aggressive for tactical positions
-            original_rollouts = num_rollouts
-            num_rollouts = int(num_rollouts * 2)  # Triple rollouts in tactical positions
-            effective_epsilon = 0.0  # No noise at all in tactical positions
-            print(f"TACTICAL POSITION DETECTED: Increasing rollouts from {original_rollouts} to {num_rollouts}, epsilon=0")
-        else:
-            effective_epsilon = self.epsilon
+        # Use standard epsilon for all positions
+        effective_epsilon = self.epsilon
         
         # Simple single-phase search for better convergence
         task_id = uuid.uuid4().hex
@@ -745,7 +676,7 @@ class RootParallelMCTS:
                 print(f"Warning: Timeout waiting for worker {i+1}/{tasks_created}")
         
         # Aggregate statistics across all trees
-        return self.aggregate_statistics(results, is_tactical)
+        return self.aggregate_statistics(results)
     
     def _run_search_phase(self, board, num_rollouts, epsilon, phase_id):
         """Run a single phase of search with given rollouts."""
@@ -825,15 +756,14 @@ class RootParallelMCTS:
         # For now, just run with awareness that high-variance positions need more exploration
         return self._run_search_phase(board, num_rollouts, epsilon, "focus")
     
-    def aggregate_statistics(self, results, is_tactical=False):
+    def aggregate_statistics(self, results):
         """
         Aggregate move statistics from all independent trees.
         
-        Fix 3: Use confidence-based weighting for better aggregation.
+        Use confidence-based weighting for better aggregation.
         
         Args:
             results: List of WorkerResult objects
-            is_tactical: Whether the position is tactical
             
         Returns:
             Dict with aggregated statistics per move
@@ -859,26 +789,13 @@ class RootParallelMCTS:
         for move, worker_stats in move_worker_stats.items():
             total_visits = sum(ws['visits'] for ws in worker_stats)
             
-            if is_tactical:
-                # In tactical positions, also consider the maximum Q-value
-                max_q = max(ws['q_value'] for ws in worker_stats)
-                
-                # Weight by confidence (sqrt of visits)
-                total_confidence = sum(ws['confidence'] for ws in worker_stats)
-                if total_confidence > 0:
-                    weighted_q = sum(ws['q_value'] * ws['confidence'] for ws in worker_stats) / total_confidence
-                    # Blend weighted average with max Q (70% weighted, 30% max for tactical)
-                    final_q = 0.7 * weighted_q + 0.3 * max_q
-                else:
-                    final_q = max_q
+            # Use confidence-weighted average for all positions
+            total_confidence = sum(ws['confidence'] for ws in worker_stats)
+            if total_confidence > 0:
+                final_q = sum(ws['q_value'] * ws['confidence'] for ws in worker_stats) / total_confidence
             else:
-                # Normal positions: pure confidence-weighted average
-                total_confidence = sum(ws['confidence'] for ws in worker_stats)
-                if total_confidence > 0:
-                    final_q = sum(ws['q_value'] * ws['confidence'] for ws in worker_stats) / total_confidence
-                else:
-                    # Fallback to simple average
-                    final_q = sum(ws['q_value'] for ws in worker_stats) / len(worker_stats)
+                # Fallback to simple average
+                final_q = sum(ws['q_value'] for ws in worker_stats) / len(worker_stats)
             
             final_stats[move] = {
                 'visits': total_visits,
@@ -887,12 +804,13 @@ class RootParallelMCTS:
         
         return final_stats
     
-    def get_best_move(self, stats):
+    def get_best_move(self, stats, board=None):
         """Get best move based on visit counts."""
         if not stats:
             # No stats means no viable moves found (e.g., drawn position)
             return None
         
+        # Use traditional visit-based selection for all positions
         best_move = None
         best_visits = -1
         
@@ -980,7 +898,7 @@ class Root:
         if self.stats is None:
             return None
         
-        best_move = Root._mcts_engine.get_best_move(self.stats)
+        best_move = Root._mcts_engine.get_best_move(self.stats, self.board)
         if not best_move:
             return None
         

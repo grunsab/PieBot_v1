@@ -5,7 +5,9 @@
       "Bash(python test:*)",
       "Bash(python:*)",
       "Bash(timeout:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(copy MCTS_shared_search_v2.py MCTS_shared_search.py)",
+      "Bash(nvidia-smi:*)"
     ],
     "deny": []
   }

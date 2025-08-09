@@ -4,9 +4,9 @@ import chess
 import MCTS_root_parallel as MCTS
 import torch
 import AlphaZeroNetwork
+import PieBotNetwork
 import time
 from device_utils import get_optimal_device, optimize_for_device, get_gpu_count
-from quantization_utils import load_quantized_model
 
 def tolist( move_generator ):
     """
@@ -22,6 +22,20 @@ def tolist( move_generator ):
     for move in move_generator:
         moves.append( move )
     return moves
+
+def detect_model_type(weights):
+    """Detect whether this is an AlphaZeroNet or PieBotNet model."""
+    if isinstance(weights, dict):
+        # Check state dict keys to determine model type
+        state_dict = weights.get('model_state_dict', weights)
+        
+        # PieBotNet has specific modules like positional_encoding and transformer_blocks
+        has_positional_encoding = any('positional_encoding' in key for key in state_dict.keys())
+        has_transformer = any('transformer_blocks' in key for key in state_dict.keys())
+        
+        if has_positional_encoding or has_transformer:
+            return 'PieBotNet'
+    return 'AlphaZeroNet'
 
 def load_model_multi_gpu(model_file, gpu_ids=None):
     """
@@ -48,77 +62,32 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
         device, device_str = get_optimal_device()
         print(f'Using device: {device_str}')
         
-        # Always load to CPU first to check model type
+        # Load weights to check model type
         weights = torch.load(model_file, map_location='cpu')
         
-        # Check if it's a static quantized model first
-        # Static quantized models have 'quant.scale' and 'base_model.*' keys
-        is_static_quantized = (isinstance(weights, dict) and 
-                             'quant.scale' in weights and 
-                             any(k.startswith('base_model.') for k in weights.keys()))
-        
-        if is_static_quantized or (isinstance(weights, dict) and weights.get('model_type') == 'static_quantized'):
-            # Static quantized models run on CPU
-            cpu_device = torch.device('cpu')
-            try:
-                # Try loading as TorchScript
-                model = torch.jit.load(model_file, map_location=cpu_device)
-                model.eval()
-                print(f"Loaded static quantized model (TorchScript) on CPU")
-                # Update device to CPU for static quantized models
-                device = cpu_device
-                device_str = 'CPU (static quantized model)'
-            except Exception as e:
-                print(f"Warning: Could not load as TorchScript: {e}")
-                try:
-                    # Try using quantization_utils
-                    model = load_quantized_model(model_file, cpu_device, 20, 256)
-                    print(f"Loaded static quantized model on CPU")
-                    # Update device to CPU for static quantized models
-                    device = cpu_device
-                    device_str = 'CPU (static quantized model)'
-                except Exception as e2:
-                    print(f"Warning: Static quantization not supported on this platform: {e2}")
-                    print("Falling back to loading as regular model...")
-                    # Fall back to loading as regular non-quantized model
-                    # Extract the base model weights from the quantized state dict
-                    model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
-                    # Create a new state dict with dequantized weights
-                    new_state_dict = {}
-                    for key, value in weights.items():
-                        if key.startswith('base_model.'):
-                            new_key = key.replace('base_model.', '')
-                            # Skip quantization-specific keys
-                            if any(x in new_key for x in ['.scale', '.zero_point', '_packed_params']):
-                                continue
-                            # Dequantize if needed
-                            if hasattr(value, 'dequantize'):
-                                new_state_dict[new_key] = value.dequantize()
-                            else:
-                                new_state_dict[new_key] = value
-                    model.load_state_dict(new_state_dict, strict=False)
-                    # Move to original device since we're using a regular model now
-                    model.to(device)
-                    model.eval()
-                    print(f"Loaded dequantized model on {device_str}")
+        # Detect and create the appropriate model type
+        model_type = detect_model_type(weights)
+        if model_type == 'PieBotNet':
+            # Use default PieBotNet configuration
+            model = PieBotNetwork.PieBotNet()
+            print(f"Loading PieBotNet model on {device_str}")
         else:
-            # Create regular model
             model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
-            print(f"Loading regular model on {device_str}")
-            
-            # Handle different model formats
-            if isinstance(weights, dict) and 'model_state_dict' in weights:
-                # FP16 model format
-                model.load_state_dict(weights['model_state_dict'])
-                if weights.get('model_type') == 'fp16':
-                    model = model.half()
-                    print(f"Loaded FP16 model on {device_str}")
-            else:
-                # Regular model format
-                model.load_state_dict(weights)
-            
-            model = optimize_for_device(model, device)
-            model.eval()
+            print(f"Loading AlphaZeroNet model on {device_str}")
+        
+        # Handle different model formats
+        if isinstance(weights, dict) and 'model_state_dict' in weights:
+            # FP16 model format
+            model.load_state_dict(weights['model_state_dict'])
+            if weights.get('model_type') == 'fp16':
+                model = model.half()
+                print(f"Loaded FP16 model on {device_str}")
+        else:
+            # Regular model format
+            model.load_state_dict(weights)
+        
+        model = optimize_for_device(model, device)
+        model.eval()
         
         for param in model.parameters():
             param.requires_grad = False
@@ -137,89 +106,38 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
         device = torch.device(f'cuda:{gpu_id}')
         devices.append(device)
         
-        # Always load to CPU first to check model type
+        # Load weights to check model type
         weights = torch.load(model_file, map_location='cpu')
         
-        # Check if it's a static quantized model first
-        # Static quantized models have 'quant.scale' and 'base_model.*' keys
-        is_static_quantized = (isinstance(weights, dict) and 
-                             'quant.scale' in weights and 
-                             any(k.startswith('base_model.') for k in weights.keys()))
-        
-        if is_static_quantized or (isinstance(weights, dict) and weights.get('model_type') == 'static_quantized'):
-            # Static quantized models run on CPU
-            cpu_device = torch.device('cpu')
-            try:
-                # Try loading as TorchScript
-                model = torch.jit.load(model_file, map_location=cpu_device)
-                model.eval()
-                print(f"Loaded static quantized model (TorchScript) on CPU (GPU {gpu_id} requested but quantized models run on CPU)")
-                # Update device to CPU for static quantized models
-                devices[-1] = cpu_device
-            except Exception as e:
-                print(f"Warning: Could not load as TorchScript: {e}")
-                try:
-                    # Try using quantization_utils
-                    model = load_quantized_model(model_file, cpu_device, 20, 256)
-                    print(f"Loaded static quantized model on CPU (GPU {gpu_id} requested but quantized models run on CPU)")
-                    # Update device to CPU for static quantized models
-                    devices[-1] = cpu_device
-                except Exception as e2:
-                    print(f"Warning: Static quantization not supported on this platform: {e2}")
-                    print("Falling back to loading as regular model...")
-                    # Fall back to loading as regular non-quantized model
-                    # Extract the base model weights from the quantized state dict
-                    model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
-                    # Create a new state dict with dequantized weights
-                    new_state_dict = {}
-                    for key, value in weights.items():
-                        if key.startswith('base_model.'):
-                            new_key = key.replace('base_model.', '')
-                            # Skip quantization-specific keys
-                            if any(x in new_key for x in ['.scale', '.zero_point', '_packed_params']):
-                                continue
-                            # Dequantize if needed
-                            if hasattr(value, 'dequantize'):
-                                new_state_dict[new_key] = value.dequantize()
-                            else:
-                                new_state_dict[new_key] = value
-                    model.load_state_dict(new_state_dict, strict=False)
-                    # Move to the requested GPU device since we're using a regular model now
-                    model.to(device)
-                    model.eval()
-                    print(f"Loaded dequantized model on GPU {gpu_id}")
+        # Detect and create the appropriate model type
+        model_type = detect_model_type(weights)
+        if model_type == 'PieBotNet':
+            # Use default PieBotNet configuration
+            model = PieBotNetwork.PieBotNet()
+            print(f"Loading PieBotNet model on GPU {gpu_id}")
         else:
-            # Create regular model
             model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
-            
-            # Handle different model formats
-            if isinstance(weights, dict) and 'model_state_dict' in weights:
-                # FP16 model format
-                model.load_state_dict(weights['model_state_dict'])
-                if weights.get('model_type') == 'fp16':
-                    model = model.half()
-                    print(f"Loaded FP16 model on GPU {gpu_id}")
-            else:
-                # Regular model format
-                model.load_state_dict(weights)
+            print(f"Loading AlphaZeroNet model on GPU {gpu_id}")
         
-        # Only move to device if not static quantized (already on CPU)
-        is_static_quantized = (isinstance(weights, dict) and 
-                             'quant.scale' in weights and 
-                             any(k.startswith('base_model.') for k in weights.keys()))
-        if not is_static_quantized and not (isinstance(weights, dict) and weights.get('model_type') == 'static_quantized'):
-            model.to(device)
+        # Handle different model formats
+        if isinstance(weights, dict) and 'model_state_dict' in weights:
+            # FP16 model format
+            model.load_state_dict(weights['model_state_dict'])
+            if weights.get('model_type') == 'fp16':
+                model = model.half()
+                print(f"Loaded FP16 model on GPU {gpu_id}")
+        else:
+            # Regular model format
+            model.load_state_dict(weights)
+        
+        model.to(device)
         model.eval()
         
         for param in model.parameters():
             param.requires_grad = False
         
         models.append(model)
-        # Print appropriate message based on actual device
-        if devices[-1].type == 'cpu':
-            print(f'Model using CPU (static quantized)')
-        else:
-            print(f'Loaded model on GPU {gpu_id}: {torch.cuda.get_device_name(gpu_id)}')
+        print(f'Loaded model on GPU {gpu_id}: {torch.cuda.get_device_name(gpu_id)}')
     
     return models, devices
 
