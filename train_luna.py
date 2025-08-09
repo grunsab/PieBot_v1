@@ -121,8 +121,8 @@ def parse_args():
                         help='Directory for tensorboard logs')
     parser.add_argument('--checkpoint-dir', type=str, default='checkpoints/luna',
                         help='Directory for saving checkpoints')
-    parser.add_argument('--save-every', type=int, default=1,
-                        help='Save checkpoint every N epochs (default: 5)')
+    parser.add_argument('--save-every', type=int, default=50,
+                        help='Save checkpoint every N epochs (default: 50)')
     
     return parser.parse_args()
 
