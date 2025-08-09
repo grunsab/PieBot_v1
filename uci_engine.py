@@ -22,6 +22,7 @@ import multiprocessing as mp
 import AlphaZeroNetwork
 import PieBotNetwork
 import PieNanoNetwork
+import PieNanoNetwork_v2
 from device_utils import get_optimal_device, optimize_for_device
 from quantization_utils import load_quantized_model
 
@@ -185,6 +186,7 @@ class UCIEngine:
                 num_blocks = getattr(args, 'num_blocks', 8)
                 num_filters = getattr(args, 'num_filters', 128)
                 num_input_planes = 112 if getattr(args, 'use_enhanced_encoder', False) else 16
+                policy_hidden_dim = getattr(args, 'policy_hidden_dim', None)
             else:
                 # Try to infer from state dict
                 state_dict = weights.get('model_state_dict', weights)
@@ -202,6 +204,11 @@ class UCIEngine:
                     num_filters = 128
                     num_input_planes = 16
                 
+                # Detect if it's V2 by checking for policy_head.fc1
+                policy_hidden_dim = None
+                if 'policy_head.fc1.weight' in state_dict:
+                    policy_hidden_dim = state_dict['policy_head.fc1.weight'].shape[0]
+                
                 # Default to 8 blocks if detection failed
                 if num_blocks == 0:
                     num_blocks = 8
@@ -210,12 +217,23 @@ class UCIEngine:
             num_blocks = 8
             num_filters = 128
             num_input_planes = 16
+            policy_hidden_dim = None
         
-        return PieNanoNetwork.PieNano(
-            num_blocks=num_blocks,
-            num_filters=num_filters,
-            num_input_planes=num_input_planes
-        )
+        # Create V2 if policy_hidden_dim is detected, otherwise V1
+        if policy_hidden_dim is not None:
+            return PieNanoNetwork_v2.PieNanoV2(
+                num_blocks=num_blocks,
+                num_filters=num_filters,
+                num_input_planes=num_input_planes,
+                policy_hidden_dim=policy_hidden_dim
+            )
+        else:
+            # Fallback to V1 for older models
+            return PieNanoNetwork.PieNano(
+                num_blocks=num_blocks,
+                num_filters=num_filters,
+                num_input_planes=num_input_planes
+            )
     
     def detect_model_type(self, weights, model_path=None):
         """Detect whether this is an AlphaZeroNet, PieBotNet, or PieNano model."""

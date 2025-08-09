@@ -129,25 +129,22 @@ class WDLValueHead(nn.Module):
 
 class ConvolutionalPolicyHead(nn.Module):
     """
-    A convolutional policy head. This design is more parameter-efficient and
-    better preserves the spatial structure of the board compared to older
-    fully-connected designs.
+    A truly lightweight convolutional policy head for PieNano.
+    Directly outputs 73 planes × 8×8 = 4672 logits without a large FC layer.
+    The MCTS/UCI engine will handle mapping to the 4608 legal moves.
     """
     def __init__(self, input_channels, num_moves=4608):
         super().__init__()
         # The number of possible move types from any given square.
-        num_move_planes = 73 
-        self.conv = nn.Conv2d(input_channels, num_move_planes, kernel_size=1, bias=False)
-        self.bn = nn.BatchNorm2d(num_move_planes)
-        self.relu = nn.ReLU(inplace=True)
-        self.fc = nn.Linear(num_move_planes * 64, num_moves)
-
+        # We output 72 planes (not 73) to match the exact 4608 moves (72*64=4608)
+        num_move_planes = 72
+        self.conv = nn.Conv2d(input_channels, num_move_planes, kernel_size=1, bias=True)
+        self.num_moves = num_moves
+        
     def forward(self, x):
         x = self.conv(x)
-        x = self.bn(x)
-        x = self.relu(x)
-        x = x.view(x.size(0), -1) # Flatten
-        x = self.fc(x)
+        # Flatten to (batch, 72*64) = (batch, 4608)
+        x = x.view(x.size(0), -1)
         return x
 
 # ==============================================================================

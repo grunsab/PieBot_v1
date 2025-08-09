@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader, ConcatDataset
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, OneCycleLR
 from CCRLDataset import CCRLDataset
 from RLDataset import RLDataset
-from PieNanoNetwork import PieNano
+from PieNanoNetwork_v2 import PieNanoV2
 from device_utils import get_optimal_device, optimize_for_device, get_batch_size_for_device, get_num_workers_for_device
 import argparse
 import time
@@ -70,21 +70,24 @@ def parse_args():
                         help='Save checkpoint every N epochs (default: 10)')
     parser.add_argument('--validate-every', type=int, default=5,
                         help='Validate every N epochs (default: 5)')
+    parser.add_argument('--policy-hidden-dim', type=int, default=256,
+                        help='Hidden dimension for policy head (default: 256)')
     
     return parser.parse_args()
 
 def create_model(args):
-    """Create and configure the PieNano model."""
+    """Create and configure the PieNano V2 model."""
     # Determine input planes based on encoder type
     num_input_planes = 112 if args.use_enhanced_encoder else 16
     
-    model = PieNano(
+    model = PieNanoV2(
         num_blocks=args.num_blocks,
         num_filters=args.num_filters,
         num_input_planes=num_input_planes,
         use_se=args.use_se,
         dropout_rate=args.dropout,
-        policy_weight=args.policy_weight
+        policy_weight=args.policy_weight,
+        policy_hidden_dim=args.policy_hidden_dim
     )
     
     return model
@@ -399,7 +402,7 @@ def main():
                 if args.output:
                     best_path = args.output.replace('.pt', '_best.pt')
                 else:
-                    best_path = f'weights/PieNano_{args.num_blocks}x{args.num_filters}_best.pt'
+                    best_path = f'weights/PieNanoV2_{args.num_blocks}x{args.num_filters}_best.pt'
                 
                 checkpoint = {
                     'epoch': epoch,
@@ -420,7 +423,7 @@ def main():
             if args.output:
                 checkpoint_path = args.output.replace('.pt', f'_epoch{epoch+1}.pt')
             else:
-                checkpoint_path = f'weights/PieNano_{args.num_blocks}x{args.num_filters}_epoch{epoch+1}.pt'
+                checkpoint_path = f'weights/PieNanoV2_{args.num_blocks}x{args.num_filters}_epoch{epoch+1}.pt'
             
             checkpoint = {
                 'epoch': epoch,
@@ -439,7 +442,7 @@ def main():
             if args.output:
                 last_path = args.output
             else:
-                last_path = f'weights/PieNano_{args.num_blocks}x{args.num_filters}_last.pt'
+                last_path = f'weights/PieNanoV2_{args.num_blocks}x{args.num_filters}_last.pt'
             
             checkpoint = {
                 'epoch': epoch,
