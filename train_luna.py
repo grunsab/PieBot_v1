@@ -20,6 +20,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.cuda.amp import GradScaler, autocast
 import random
 from torch.nn.parallel import DistributedDataParallel as DDP
+import signal
 
 
 # Training params (defaults)
@@ -522,6 +523,24 @@ def train():
     is_main = (rank == 0)
     if is_main:
         print(f'Using device: {device_str}')
+
+    # Setup graceful shutdown on terminal/daemon signals
+    def _graceful_exit(signum, frame):
+        try:
+            if dist.is_available() and dist.is_initialized():
+                if is_main:
+                    print(f"Received signal {signum}; destroying process group...")
+                dist.destroy_process_group()
+        except Exception:
+            pass
+        finally:
+            os._exit(0)
+
+    for _sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(_sig, _graceful_exit)
+        except Exception:
+            pass
 
     # directories and writer
     os.makedirs(args.checkpoint_dir, exist_ok=True)

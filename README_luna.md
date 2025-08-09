@@ -9,6 +9,39 @@ Highlights:
 - Policy head outputs 64×72 logits (flattened to 4608) to match existing pipeline.
 - Training supports CCRL (supervised), RL (self-play), or mixed.
 
+## Multi-GPU (DDP) quick start
+
+- torchrun (recommended, auto-enables DDP):
+
+```bash
+cd /root/PieBot_v1
+python3 -m torch.distributed.run --nproc_per_node=3 --rdzv_backend=c10d --rdzv_endpoint=localhost:29500 \
+  train_luna.py --mode supervised --ccrl-dir /abs/path/to/reformatted \
+  --distributed --batch-size-total 384 --mixed-precision
+```
+
+- Background safe run (survives terminal exit):
+
+```bash
+cd /root/PieBot_v1
+nohup python3 -m torch.distributed.run --nproc_per_node=3 --rdzv_backend=c10d --rdzv_endpoint=localhost:29500 \
+  train_luna.py --mode supervised --ccrl-dir /abs/path/to/reformatted \
+  --distributed --batch-size-total 384 --mixed-precision > luna_train.out 2>&1 &
+echo $! > luna_train.pid
+```
+
+- Monitor and stop:
+
+```bash
+tail -f luna_train.out
+kill -TERM $(cat luna_train.pid)
+```
+
+Notes:
+- You can omit `--distributed` when using torchrun; it’s auto-enabled via WORLD_SIZE.
+- Use `--batch-size` for per-GPU batch or `--batch-size-total` for global.
+- If the rendezvous port is busy, change `localhost:29500`.
+
 Flags of interest in train_luna.py:
 - --input-planes {16|112}
 - --use-rope, --use-alibi
