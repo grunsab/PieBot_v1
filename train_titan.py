@@ -50,7 +50,7 @@ def parse_args():
     p.add_argument('--batch-size', type=int, default=None)
     p.add_argument('--batch-size-total', type=int, default=None)
     p.add_argument('--gradient-accumulation', type=int, default=1)
-    p.add_argument('--grad-clip', type=float, default=10.0)
+    p.add_argument('--grad-clip', type=float, default=1.0)
     p.add_argument('--mixed-precision', action='store_true')
     p.add_argument('--compile', action='store_true')
 
@@ -184,17 +184,15 @@ def train_epoch(model, train_loader, optimizer, scheduler, args, epoch, writer, 
 
         scaler = None
         if args.mixed_precision and torch.cuda.is_available():
-            try:
-                from torch.amp import GradScaler as AmpGradScaler
-                scaler = AmpGradScaler('cuda')
-            except Exception:
-                from torch.cuda.amp import GradScaler as CudaGradScaler
-                scaler = CudaGradScaler()
-            # Reuse scaler across steps by caching on function attr
-            if not hasattr(train_epoch, "_scaler") or train_epoch._scaler is None:
-                train_epoch._scaler = scaler
-            else:
-                scaler = train_epoch._scaler
+            # Initialize scaler once at the beginning of training
+            if not hasattr(train_epoch, "_scaler"):
+                try:
+                    from torch.amp import GradScaler as AmpGradScaler
+                    train_epoch._scaler = AmpGradScaler('cuda')
+                except Exception:
+                    from torch.cuda.amp import GradScaler as CudaGradScaler
+                    train_epoch._scaler = CudaGradScaler()
+            scaler = train_epoch._scaler
 
         if scaler is not None:
             with amp_ctx:
@@ -203,7 +201,10 @@ def train_epoch(model, train_loader, optimizer, scheduler, args, epoch, writer, 
             scaler.scale(loss).backward()
             if (batch_idx + 1) % args.gradient_accumulation == 0:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                # Monitor gradient norm before clipping
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                if torch.isnan(grad_norm) or torch.isinf(grad_norm) or grad_norm > 100:
+                    print(f"WARNING: Large/invalid gradient norm: {grad_norm:.2f} at epoch {epoch} batch {batch_idx}")
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
@@ -215,7 +216,10 @@ def train_epoch(model, train_loader, optimizer, scheduler, args, epoch, writer, 
                 loss = loss / args.gradient_accumulation
             loss.backward()
             if (batch_idx + 1) % args.gradient_accumulation == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                # Monitor gradient norm before clipping
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                if torch.isnan(grad_norm) or torch.isinf(grad_norm) or grad_norm > 100:
+                    print(f"WARNING: Large/invalid gradient norm: {grad_norm:.2f} at epoch {epoch} batch {batch_idx}")
                 optimizer.step()
                 optimizer.zero_grad()
                 if scheduler is not None:
@@ -363,7 +367,7 @@ def train():
     try:
         if not (0.0 < pct < 1.0):
             raise ValueError
-        scheduler = OneCycleLR(optimizer, max_lr=args.lr * 10, total_steps=total_steps, pct_start=pct,
+        scheduler = OneCycleLR(optimizer, max_lr=args.lr * 3, total_steps=total_steps, pct_start=pct,
                                anneal_strategy='cos', div_factor=10, final_div_factor=100)
     except Exception:
         scheduler = None
