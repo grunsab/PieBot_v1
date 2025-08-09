@@ -374,8 +374,17 @@ class TitanMini(nn.Module):
             assert value_target is not None and policy_target is not None
             value_loss = self.mse_loss(value, value_target)
             
-            policy_target_1d = policy_target.view(batch_size)
-            policy_loss = self.cross_entropy_loss(policy, policy_target_1d)
+            # Handle both soft targets (distribution) and hard targets (single index)
+            if policy_target.dim() == 1 or (policy_target.dim() == 2 and policy_target.size(1) == 1):
+                # Hard targets: single index per sample
+                policy_target_1d = policy_target.view(batch_size)
+                policy_loss = self.cross_entropy_loss(policy, policy_target_1d)
+            else:
+                # Soft targets: full distribution
+                policy_target_flat = policy_target.view(batch_size, -1)
+                # Use KL divergence for soft targets
+                log_policy = F.log_softmax(policy, dim=1)
+                policy_loss = F.kl_div(log_policy, policy_target_flat, reduction='batchmean')
             
             total_loss = value_loss + self.policy_weight * policy_loss
             return total_loss, value_loss, policy_loss

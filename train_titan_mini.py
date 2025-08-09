@@ -80,7 +80,7 @@ def parse_args():
                         help='Number of synthetic samples to generate for dry-run (default: 64)')
     
     # Data params
-    parser.add_argument('--mode', choices=['supervised', 'rl', 'mixed'], default='mixed',
+    parser.add_argument('--mode', choices=['supervised', 'rl', 'mixed'], default='supervised',
                         help='Training mode: supervised (CCRL data), rl (self-play), or mixed (both)')
     parser.add_argument('--ccrl-dir', type=str, default=ccrl_dir,
                         help='Directory containing CCRL training data')
@@ -170,10 +170,13 @@ class SyntheticTitanDataset(Dataset):
         return position, torch.tensor(value, dtype=torch.float32), policy, mask
 
 
-def create_data_loaders(args, *, distributed=False, rank=0, world_size=1, is_main=True):
+def create_data_loaders(args, *, distributed=False, rank=0, world_size=1, is_main=True, device=None):
     """Create training and validation data loaders."""
     # Detect device for DataLoader tuning (pin_memory and default batch size)
-    device, _ = get_optimal_device()
+    if device is None:
+        device, _ = get_optimal_device()
+    elif isinstance(device, str):
+        device = torch.device(device)
 
     # Dry-run synthetic dataset path
     if args.dry_run:
@@ -209,7 +212,7 @@ def create_data_loaders(args, *, distributed=False, rank=0, world_size=1, is_mai
 
     # Create dataset based on training mode
     if args.mode == 'supervised':
-        print('Training mode: Supervised learning on CCRL dataset')
+        print(f'Training mode: Supervised learning on CCRL dataset')
         enhanced = args.input_planes > 16
         dataset = CCRLDataset(args.ccrl_dir, soft_targets=True, temperature=args.label_smoothing_temp, enhanced_encoder=enhanced)
     elif args.mode == 'rl':
@@ -507,17 +510,26 @@ def train():
     local_rank = 0
     world_size = 1
     if distributed:
-        backend = args.dist_backend or ('nccl' if torch.cuda.is_available() else 'gloo')
-        if not dist.is_initialized():
-            dist.init_process_group(backend=backend, init_method='env://')
-        world_size = dist.get_world_size()
-        rank = dist.get_rank()
-        local_rank = int(os.environ.get('LOCAL_RANK', rank))
-        if torch.cuda.is_available():
-            torch.cuda.set_device(local_rank)
-            device = torch.device('cuda', local_rank)
-            device_str = f'CUDA GPU {local_rank} (rank {rank}/{world_size})'
-        else:
+        try:
+            backend = args.dist_backend or ('nccl' if torch.cuda.is_available() else 'gloo')
+            if not dist.is_initialized():
+                # Set timeout for initialization
+                import datetime
+                timeout = datetime.timedelta(seconds=300)
+                dist.init_process_group(backend=backend, init_method='env://', timeout=timeout)
+            world_size = dist.get_world_size()
+            rank = dist.get_rank()
+            local_rank = int(os.environ.get('LOCAL_RANK', rank))
+            if torch.cuda.is_available():
+                torch.cuda.set_device(local_rank)
+                device = torch.device('cuda', local_rank)
+                device_str = f'CUDA GPU {local_rank} (rank {rank}/{world_size})'
+            else:
+                device, device_str = get_optimal_device()
+        except Exception as e:
+            print(f"Error initializing distributed training: {e}")
+            print("Falling back to single GPU/CPU training")
+            distributed = False
             device, device_str = get_optimal_device()
     else:
         device, device_str = get_optimal_device()
@@ -570,17 +582,36 @@ def train():
         model = torch.compile(model)
     model = optimize_for_device(model, device)
 
-    # DDP wrap (tolerate conditionally unused params)
-    if distributed and torch.cuda.is_available():
-        model = DDP(
-            model,
-            device_ids=[local_rank],
-            output_device=local_rank,
-            find_unused_parameters=True,
-        )
+    # DDP wrap
+    if distributed and world_size > 1:
+        if torch.cuda.is_available():
+            # Ensure all processes are ready before wrapping
+            if dist.is_initialized():
+                dist.barrier()
+            model = DDP(
+                model,
+                device_ids=[local_rank],
+                output_device=local_rank,
+                find_unused_parameters=False,  # Set to False for better performance
+                broadcast_buffers=True,
+            )
+        else:
+            model = DDP(model, find_unused_parameters=False)
 
     # data
-    train_loader, val_loader = create_data_loaders(args, distributed=distributed, rank=rank, world_size=world_size, is_main=is_main)
+    if is_main:
+        print(f"Creating data loaders...")
+        print(f"Mode: {args.mode}")
+        print(f"CCRL dir: {args.ccrl_dir} (exists: {os.path.exists(args.ccrl_dir)})")
+        print(f"RL dir: {args.rl_dir} (exists: {os.path.exists(args.rl_dir)})")
+    
+    # Synchronize before data loading
+    if distributed and dist.is_initialized():
+        dist.barrier()
+        if is_main:
+            print("All processes synchronized, loading data...")
+    
+    train_loader, val_loader = create_data_loaders(args, distributed=distributed, rank=rank, world_size=world_size, is_main=is_main, device=device)
 
     # optimizer and scheduler
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01)
