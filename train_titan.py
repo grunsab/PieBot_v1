@@ -19,13 +19,13 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import signal
 
 # Defaults aligned with Luna but can differ for Titan
-default_epochs = 100
+default_epochs = 500
 default_num_layers = 15
 default_d_model = 1024
 default_num_heads = 16
 default_d_ff = 4096
-default_lr = 5e-5
-default_warmup_epochs = 3
+default_lr = 1e-5
+default_warmup_epochs = 5
 default_policy_weight = 1.0
 ccrl_dir = os.path.abspath('games_training_data/reformatted/')
 rl_dir = os.path.abspath('games_training_data/selfplay/')
