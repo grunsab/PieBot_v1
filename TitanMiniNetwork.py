@@ -239,15 +239,16 @@ class PolicyHead(nn.Module):
     """
     Predicts the policy (a probability distribution over all possible moves).
     """
-    def __init__(self, d_model, num_move_actions=4672):
+    def __init__(self, d_model, num_move_actions_per_square=73):
         super().__init__()
-        self.proj = nn.Linear(d_model, num_move_actions)
+        self.num_move_actions_per_square = num_move_actions_per_square
+        self.proj = nn.Linear(d_model, num_move_actions_per_square)
 
     def forward(self, x):
         # Input x shape: [batch, 64, d_model]
         # Project features for each of the 64 squares.
-        policy_logits = self.proj(x)
-        # Reshape to a flat policy vector: [batch, 64 * num_move_actions]
+        policy_logits = self.proj(x)  # [batch, 64, num_move_actions_per_square]
+        # Reshape to a flat policy vector: [batch, 64 * num_move_actions_per_square]
         return policy_logits.view(x.shape[0], -1)
 
 
@@ -323,7 +324,7 @@ class TitanMini(nn.Module):
 
         # Output heads. Policy uses a Stockfish-like 73 move types per square.
         self.value_head = ValueHead(d_model)
-        self.policy_head = PolicyHead(d_model, num_move_actions=73)
+        self.policy_head = PolicyHead(d_model, num_move_actions_per_square=73)
         
         # Loss functions.
         self.mse_loss = nn.MSELoss()
