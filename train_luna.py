@@ -553,9 +553,14 @@ def train():
         model = torch.compile(model)
     model = optimize_for_device(model, device)
 
-    # DDP wrap
+    # DDP wrap (tolerate conditionally unused params)
     if distributed and torch.cuda.is_available():
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
+        model = DDP(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=True,
+        )
 
     # data
     train_loader, val_loader = create_data_loaders(args, distributed=distributed, rank=rank, world_size=world_size, is_main=is_main)
@@ -574,7 +579,16 @@ def train():
         from torch.optim.lr_scheduler import StepLR
         scheduler = StepLR(optimizer, step_size=max(1, len(train_loader)//2), gamma=0.1)
 
-    scaler = GradScaler() if args.mixed_precision and torch.cuda.is_available() else None
+    # Use new torch.amp.GradScaler API when available (silence deprecation)
+    if args.mixed_precision and torch.cuda.is_available():
+        try:
+            from torch.amp import GradScaler as AmpGradScaler  # PyTorch 2.1+
+            scaler = AmpGradScaler('cuda')
+        except Exception:
+            from torch.cuda.amp import GradScaler as CudaGradScaler
+            scaler = CudaGradScaler()
+    else:
+        scaler = None
     ema = EMA(model, decay=0.9999) if args.swa and is_main else None
 
     # resume
