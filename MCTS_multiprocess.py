@@ -1,190 +1,51 @@
-import encoder
-import math
-from threading import Thread, Lock
-from concurrent.futures import ThreadPoolExecutor
-import time
-import multiprocessing as mp
-from multiprocessing import Pool, Manager, Queue
-import numpy as np
 import chess
+import threading
 import torch
-import pickle
-from functools import partial
-import MCTS
 
-def worker_rollouts(args):
+# --- Import the NEWLY COMPILED C++ engine ---
+from mcts_cpp_engine import MCTS_CPP
+# --- Import NNManager from its own dedicated file ---
+from nn_manager import NNManager
+
+class MCTS:
     """
-    Worker function to perform rollouts in a separate process.
-    
-    Args:
-        args: Tuple of (board_fen, model_path, num_rollouts, num_threads_per_rollout, device_str)
-    
-    Returns:
-        Serialized statistics from the rollouts
+    A Python wrapper for the high-performance C++ MCTS engine.
+    This class now manages the NNManager thread.
     """
-    board_fen, model_path, num_rollouts, num_threads_per_rollout, device_str = args
-    
-    # Set up the device in this process
-    if device_str.startswith('cuda'):
-        device = torch.device(device_str)
-    else:
-        device = torch.device('cpu')
-    
-    # Load the model in this process
-    import AlphaZeroNetwork
-    from device_utils import optimize_for_device
-    
-    # Load model weights
-    weights = torch.load(model_path, map_location='cpu')
-    
-    # Check if it's FP16 model
-    if isinstance(weights, dict) and weights.get('model_type') == 'fp16':
-        model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
-        model.load_state_dict(weights['model_state_dict'])
-        model = model.half()
-    else:
-        model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
-        if isinstance(weights, dict) and 'model_state_dict' in weights:
-            model.load_state_dict(weights['model_state_dict'])
-        else:
-            model.load_state_dict(weights)
-    
-    model = optimize_for_device(model, device)
-    model.eval()
-    
-    for param in model.parameters():
-        param.requires_grad = False
-    
-    # Create board from FEN
-    board = chess.Board(board_fen)
-    
-    # Create local root node
-    with torch.no_grad():
-        root = MCTS.Root(board, model)
+    def __init__(self, model):
+        self.model = model
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         
-        # Perform rollouts
-        for _ in range(num_rollouts):
-            root.parallelRollouts(board.copy(), model, num_threads_per_rollout)
-    
-    # Collect statistics from the tree
-    stats = {
-        'N': root.N,
-        'sum_Q': root.sum_Q,
-        'edges': []
-    }
-    
-    for edge in root.edges:
-        edge_stats = {
-            'move': edge.move.uci(),
-            'P': edge.P,
-            'child_N': edge.child.N if edge.has_child() else 0,
-            'child_sum_Q': edge.child.sum_Q if edge.has_child() else 0,
-            'has_child': edge.has_child()
-        }
-        stats['edges'].append(edge_stats)
-    
-    return stats
+        # 1. Create the NNManager here in Python
+        self.nn_manager = NNManager(self.model, self.device)
+        
+        # 2. Pass its queue to the C++ engine's constructor (using positional arguments)
+        self.engine = MCTS_CPP(
+            self.nn_manager.inference_queue,  # positional argument
+            8,                                 # num_workers
+            512,                              # batch_size
+            1.5,                              # cpuct
+            3,                                # virtual_loss
+            0.3,                              # dirichlet_alpha
+            0.25                              # dirichlet_epsilon
+        )
 
-
-class MultiprocessRoot(MCTS.Root):
-    """
-    Extended Root class that supports multiprocessing.
-    """
-    
-    def __init__(self, board, neuralNetwork):
-        super().__init__(board, neuralNetwork)
-        self.model_path = None  # Will be set by the caller
-        self.device_str = str(next(neuralNetwork.parameters()).device)
-    
-    def merge_stats(self, other_stats):
+    def search(self, board, num_simulations):
         """
-        Merge statistics from another process into this tree.
-        
-        Args:
-            other_stats: Dictionary containing statistics from another process
+        Starts the NNManager, delegates the search to the C++ backend,
+        and then stops the NNManager.
         """
-        # Update root node statistics
-        self.N += other_stats['N'] - 1  # Subtract 1 because root starts with N=1
-        self.sum_Q += other_stats['sum_Q'] - self.sum_Q / self.N  # Adjust for initial Q
         
-        # Merge edge statistics
-        for edge_idx, edge_stats in enumerate(other_stats['edges']):
-            edge = self.edges[edge_idx]
-            
-            if edge_stats['has_child']:
-                if not edge.has_child():
-                    # Create child node if it doesn't exist
-                    board_copy = self.board.copy()
-                    board_copy.push(edge.move)
-                    
-                    # Calculate initial Q for the child
-                    child_Q = edge_stats['child_sum_Q'] / edge_stats['child_N']
-                    
-                    # Create empty move probabilities (will be updated if needed)
-                    move_probs = np.zeros(200, dtype=np.float32)
-                    
-                    edge.child = MCTS.Node(board_copy, child_Q, move_probs)
-                    edge.child.N = edge_stats['child_N']
-                    edge.child.sum_Q = edge_stats['child_sum_Q']
-                else:
-                    # Update existing child
-                    edge.child.N += edge_stats['child_N']
-                    edge.child.sum_Q += edge_stats['child_sum_Q']
-    
-    def multiprocess_rollouts(self, board, model_path, total_rollouts, num_processes, threads_per_rollout):
-        """
-        Perform rollouts using multiple processes.
+        # 3. Start the NNManager thread from Python before searching
+        # Only start if it's not already running
+        if not self.nn_manager.is_alive():
+            self.nn_manager.start()
         
-        Args:
-            board: Chess board
-            model_path: Path to the model file
-            total_rollouts: Total number of rollout iterations
-            num_processes: Number of processes to use
-            threads_per_rollout: Number of threads per rollout in each process
-        """
-        self.model_path = model_path
+        # This call will block until the C++ search is complete
+        best_move = self.engine.search(board, num_simulations)
         
-        # Calculate rollouts per process
-        rollouts_per_process = total_rollouts // num_processes
-        remaining = total_rollouts % num_processes
+        # Don't stop the thread - keep it running for next search
+        # The thread will be cleaned up when the MCTS object is destroyed
         
-        # Prepare arguments for each process
-        process_args = []
-        board_fen = board.fen()
-        
-        for i in range(num_processes):
-            process_rollouts = rollouts_per_process
-            if i < remaining:
-                process_rollouts += 1
-            
-            if process_rollouts > 0:
-                args = (board_fen, model_path, process_rollouts, threads_per_rollout, self.device_str)
-                process_args.append(args)
-        
-        # Use multiprocessing pool
-        with Pool(processes=num_processes) as pool:
-            results = pool.map(worker_rollouts, process_args)
-        
-        # Merge results from all processes
-        for stats in results:
-            self.merge_stats(stats)
-        
-        # Update same_paths counter (approximate)
-        self.same_paths = sum(1 for edge in self.edges if edge.has_child() and edge.child.N > 1)
+        return best_move
 
-
-def create_multiprocess_root(board, neuralNetwork, model_path):
-    """
-    Create a MultiprocessRoot instance with the model path set.
-    
-    Args:
-        board: Chess board
-        neuralNetwork: Neural network model
-        model_path: Path to the model file
-    
-    Returns:
-        MultiprocessRoot instance
-    """
-    root = MultiprocessRoot(board, neuralNetwork)
-    root.model_path = model_path
-    return root

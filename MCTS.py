@@ -65,9 +65,13 @@ class Node:
 
         self.edges = []
 
-        for idx, move in enumerate( board.legal_moves ):
-            edge = Edge( move, move_probabilities[ idx ] )
-            self.edges.append( edge )
+        if not board.is_game_over(claim_draw=True):
+            # Pass the node's Q value to edges as initial Q
+            # From opponent's perspective, so use 1 - new_Q
+            initial_edge_Q = 1.0 - new_Q
+            for idx, move in enumerate( board.legal_moves ):
+                edge = Edge( move, move_probabilities[ idx ], initial_edge_Q )
+                self.edges.append( edge )
 
     def getN( self ):
         """
@@ -189,11 +193,12 @@ class Edge:
     virtual losses and a child.
     """
 
-    def __init__( self, move, move_probability ):
+    def __init__( self, move, move_probability, initial_Q=0.5 ):
         """
         Args:
             move (chess.Move) the move this edge represents
             move_probability (float) this move's probability from the neural network
+            initial_Q (float) initial Q value from parent node (default 0.5)
         """
 
         self.move = move
@@ -205,6 +210,7 @@ class Edge:
             self.P = move_probability
 
         self.child = None
+        self.initial_Q = initial_Q  # Store initial Q value
         
         self._lock = Lock()  # Thread-safe lock for virtual losses
         self.virtualLosses = 0.
@@ -236,7 +242,12 @@ class Edge:
         if self.has_child():
             return 1. - ( ( self.child.sum_Q + self.virtualLosses ) / ( self.child.N + self.virtualLosses ) )
         else:
-            return 0.
+            # Return the initial Q value for unexpanded edges
+            # Apply virtual losses to initial Q to discourage revisiting
+            if self.virtualLosses > 0:
+                return self.initial_Q * (1.0 / (1.0 + self.virtualLosses))
+            else:
+                return self.initial_Q
 
     def getP( self ):
         """
@@ -398,7 +409,7 @@ class Root( Node ):
             new_Q = 1. - new_Q
 
         else:
-            winner = encoder.parseResult( board.result() )
+            winner = encoder.parseResult( board.result(claim_draw=True) )
 
             if not board.turn:
                 winner *= -1
@@ -477,7 +488,7 @@ class Root( Node ):
                 new_Q = 1. - new_Q
                 
             else:
-                winner = encoder.parseResult( board.result() )
+                winner = encoder.parseResult( board.result(claim_draw=True) )
 
                 if not board.turn:
                     winner *= -1
@@ -503,6 +514,26 @@ class Root( Node ):
         Wrapper to use optimized version while maintaining compatibility.
         """
         return self.parallelRolloutsOptimized(board, neuralNetwork, num_parallel_rollouts)
+    
+    def parallelRolloutsTotal(self, board, neuralNetwork, total_rollouts, num_parallel_rollouts):
+        """
+        Perform a total number of rollouts using parallel rollouts.
+        
+        Args:
+            board (chess.Board): The chess position
+            neuralNetwork (torch.nn.Module): The neural network
+            total_rollouts (int): Total number of rollouts to perform
+            num_parallel_rollouts (int): Number of rollouts to perform in parallel each time
+            
+        Returns:
+            int: Number of rollouts performed
+        """
+        for _ in range(0, total_rollouts, num_parallel_rollouts):
+            self.parallelRollouts(board, neuralNetwork, num_parallel_rollouts)
+        
+        return total_rollouts
+        
+
 
     def getVisitCounts(self, board):
         """

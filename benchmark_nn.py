@@ -12,8 +12,10 @@ import chess
 import torch
 import numpy as np
 import random
+import multiprocessing as mp
+from functools import partial
 from AlphaZeroNetwork import AlphaZeroNet
-from encoder import encodePositionForInference, callNeuralNetworkBatched
+from encoder import encodePositionForInference, callNeuralNetworkBatched, decodePolicyOutput
 from device_utils import get_optimal_device, optimize_for_device, get_batch_size_for_device
 import sys
 
@@ -106,7 +108,51 @@ def generate_diverse_positions(num_positions=10000):
     return positions[:num_positions]
 
 
-def benchmark_neural_network(model_path, num_positions=10000, batch_size=None):
+def encode_positions_worker(positions_chunk):
+    """
+    Worker function to encode a chunk of positions in parallel.
+    
+    Args:
+        positions_chunk: List of chess.Board positions to encode
+        
+    Returns:
+        Tuple of (encoded_positions, masks) as numpy arrays
+    """
+    encoded = []
+    masks = []
+    
+    for board in positions_chunk:
+        position, mask = encodePositionForInference(board)
+        encoded.append(position)
+        masks.append(mask)
+    
+    return np.array(encoded), np.array(masks)
+
+
+def decode_policies_worker(args):
+    """
+    Worker function to decode policy outputs in parallel.
+    
+    Args:
+        args: Tuple of (boards_chunk, policies_chunk)
+        
+    Returns:
+        Array of move probabilities
+    """
+    boards_chunk, policies_chunk = args
+    move_probs = []
+    
+    for board, policy in zip(boards_chunk, policies_chunk):
+        move_prob = decodePolicyOutput(board, policy)
+        # Pad to 200 to match expected output shape
+        padded = np.zeros(200, dtype=np.float32)
+        padded[:move_prob.shape[0]] = move_prob
+        move_probs.append(padded)
+    
+    return np.array(move_probs)
+
+
+def benchmark_neural_network(model_path, num_positions=10000, batch_size=None, skip_compile=False, num_processes=1):
     """
     Benchmark neural network evaluation performance.
     
@@ -147,7 +193,7 @@ def benchmark_neural_network(model_path, num_positions=10000, batch_size=None):
     model = optimize_for_device(model, device)
     model.eval()
     # Basically if we're using Linux with a CUDA device
-    if hasattr(torch, 'compile') and sys.platform != 'win32' and device.type != "mps":
+    if hasattr(torch, 'compile') and sys.platform != 'win32' and device.type != "mps" and not skip_compile:
         try:
             model = torch.compile(model, mode='reduce-overhead')
             print("Model compiled with torch.compile for additional speedup")
@@ -158,7 +204,7 @@ def benchmark_neural_network(model_path, num_positions=10000, batch_size=None):
 
     # Determine batch size
     if batch_size is None:
-        batch_size = get_batch_size_for_device(base_batch_size=256)
+        batch_size = get_batch_size_for_device(base_batch_size=1024)
     print(f"Using batch size: {batch_size}")
     
     # Generate positions
@@ -166,19 +212,38 @@ def benchmark_neural_network(model_path, num_positions=10000, batch_size=None):
     print(f"Generated {len(positions)} positions")
     
     # Pre-encode positions (not included in timing)
-    print("Pre-encoding positions...")
-    encoded_positions = []
-    masks = []
+    print(f"Pre-encoding positions using {num_processes} process(es)...")
     
-    with torch.no_grad():
-        for board in positions:
-            position, mask = encodePositionForInference(board)
-            encoded_positions.append(position)
-            masks.append(mask)
-    
-    # Convert to tensors
-    encoded_positions = np.array(encoded_positions)
-    masks = np.array(masks)
+    if num_processes > 1:
+        # Split positions into chunks for parallel processing
+        chunk_size = len(positions) // num_processes
+        position_chunks = []
+        for i in range(num_processes):
+            start_idx = i * chunk_size
+            end_idx = start_idx + chunk_size if i < num_processes - 1 else len(positions)
+            position_chunks.append(positions[start_idx:end_idx])
+        
+        # Encode positions in parallel
+        with mp.Pool(processes=num_processes) as pool:
+            results = pool.map(encode_positions_worker, position_chunks)
+        
+        # Combine results
+        encoded_positions = np.vstack([r[0] for r in results])
+        masks = np.vstack([r[1] for r in results])
+    else:
+        # Single process encoding (original behavior)
+        encoded_positions = []
+        masks = []
+        
+        with torch.no_grad():
+            for board in positions:
+                position, mask = encodePositionForInference(board)
+                encoded_positions.append(position)
+                masks.append(mask)
+        
+        # Convert to tensors
+        encoded_positions = np.array(encoded_positions)
+        masks = np.array(masks)
     
     # Warm-up run
     print("Performing warm-up run...")
@@ -187,24 +252,95 @@ def benchmark_neural_network(model_path, num_positions=10000, batch_size=None):
     
     # Benchmark
     print(f"\nStarting benchmark of {num_positions} positions...")
+    print(f"Using {num_processes} process(es) for CPU operations")
     
-    start_time = time.perf_counter()
-    
-    num_batches = (num_positions + batch_size - 1) // batch_size
-    total_evaluations = 0
-    
-    with torch.no_grad():
-        for i in range(num_batches):
-            batch_start = i * batch_size
-            batch_end = min((i + 1) * batch_size, num_positions)
-            batch_positions = positions[batch_start:batch_end]
-            
-            # Evaluate batch
-            values, policies = callNeuralNetworkBatched(batch_positions, model)
-            total_evaluations += len(batch_positions)
-    
-    end_time = time.perf_counter()
-    elapsed_time = end_time - start_time
+    if num_processes > 1:
+        # Multi-process benchmark with custom batching
+        start_time = time.perf_counter()
+        
+        num_batches = (num_positions + batch_size - 1) // batch_size
+        total_evaluations = 0
+        
+        # Setup multiprocessing pool
+        pool = mp.Pool(processes=num_processes)
+        
+        with torch.no_grad():
+            for i in range(num_batches):
+                batch_start = i * batch_size
+                batch_end = min((i + 1) * batch_size, num_positions)
+                batch_positions = positions[batch_start:batch_end]
+                batch_encoded = encoded_positions[batch_start:batch_end]
+                batch_masks = masks[batch_start:batch_end]
+                
+                # Convert to tensors
+                inputs = torch.from_numpy(batch_encoded).float()
+                masks_tensor = torch.from_numpy(batch_masks).float()
+                
+                # Move to device
+                model_device = next(model.parameters()).device
+                inputs = inputs.to(model_device)
+                masks_tensor = masks_tensor.to(model_device)
+                
+                # Convert to half precision if model is FP16
+                if next(model.parameters()).dtype == torch.float16:
+                    inputs = inputs.half()
+                    masks_tensor = masks_tensor.half()
+                
+                # Flatten masks
+                masks_flat = masks_tensor.view(masks_tensor.shape[0], -1)
+                
+                # GPU inference
+                value, policy = model(inputs, policyMask=masks_flat)
+                
+                # Move results back to CPU
+                values_cpu = value.cpu().numpy().reshape(-1)
+                policies_cpu = policy.cpu().numpy()
+                
+                # Parallel policy decoding
+                chunk_size = len(batch_positions) // num_processes
+                decode_args = []
+                for j in range(num_processes):
+                    start_idx = j * chunk_size
+                    end_idx = start_idx + chunk_size if j < num_processes - 1 else len(batch_positions)
+                    decode_args.append((
+                        batch_positions[start_idx:end_idx],
+                        policies_cpu[start_idx:end_idx]
+                    ))
+                
+                # Decode policies in parallel
+                if len(batch_positions) >= num_processes:
+                    decoded_results = pool.map(decode_policies_worker, decode_args)
+                    move_probabilities = np.vstack(decoded_results)
+                else:
+                    # For small batches, use single process
+                    move_probabilities = decode_policies_worker((batch_positions, policies_cpu))
+                
+                total_evaluations += len(batch_positions)
+        
+        pool.close()
+        pool.join()
+        
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
+    else:
+        # Single process benchmark (original behavior)
+        start_time = time.perf_counter()
+        
+        num_batches = (num_positions + batch_size - 1) // batch_size
+        total_evaluations = 0
+        
+        with torch.no_grad():
+            for i in range(num_batches):
+                batch_start = i * batch_size
+                batch_end = min((i + 1) * batch_size, num_positions)
+                batch_positions = positions[batch_start:batch_end]
+                
+                # Evaluate batch
+                values, policies = callNeuralNetworkBatched(batch_positions, model)
+                total_evaluations += len(batch_positions)
+        
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
     
     # Calculate metrics
     evaluations_per_second = total_evaluations / elapsed_time
@@ -217,6 +353,7 @@ def benchmark_neural_network(model_path, num_positions=10000, batch_size=None):
     print(f"Device: {device_str}")
     print(f"Model: {num_blocks} blocks x {num_filters} filters")
     print(f"Batch size: {batch_size}")
+    print(f"CPU processes: {num_processes}")
     print(f"Total positions evaluated: {total_evaluations}")
     print(f"Total time: {elapsed_time:.3f} seconds")
     print(f"Evaluations per second: {evaluations_per_second:.1f}")
@@ -242,6 +379,10 @@ def main():
                         help='Batch size for evaluation (auto-detect if not specified)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for position generation')
+    parser.add_argument("--skip-compile", type=bool, default=False,
+                        help="Should we skip the compilation of the neural network")
+    parser.add_argument('--num-processes', type=int, default=1,
+                        help='Number of processes for parallel encoding/decoding (default: 1)')
     
     args = parser.parse_args()
     
@@ -251,7 +392,7 @@ def main():
     torch.manual_seed(args.seed)
     
     # Run benchmark
-    benchmark_neural_network(args.model, args.positions, args.batch_size)
+    benchmark_neural_network(args.model, args.positions, args.batch_size, args.skip_compile, args.num_processes)
 
 
 if __name__ == '__main__':

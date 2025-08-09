@@ -4,11 +4,8 @@ games_training_data/
 *.7z
 *.bz2
 __pycache__/
-static/pngs/b 2.png
-static/pngs/N.png
-static/pngs/P.png
-static/pngs/B.png
-static/pngs/R.png
-static/pngs/k.png
-static/pngs/q.png
-
+.DS_Store
+build/
+*.log
+logs/
+checkpoints/

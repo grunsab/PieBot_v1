@@ -323,8 +323,6 @@ def main():
                         help='Approximate number of games per file (default: 8000, use 0 to force counting)')
     parser.add_argument('--fast-count', '-f', action='store_true',
                         help='Use fast game counting by scanning Result tags')
-    parser.add_argument("--starting-offset", type=int, default=0, help="Set starting index for PGN file number")
-    parser.add_argument("--default-base-name", default="", help="set the default base name of the file to save")
     
     args = parser.parse_args()
     
@@ -334,9 +332,6 @@ def main():
     if not input_path.exists():
         print(f"Error: Input path {input_path} does not exist")
         sys.exit(1)
-    
-    if args.starting_offset:
-        STARTING_OFFSET_FOR_FILENAME = args.starting_offset
 
 
     if input_path.is_file():

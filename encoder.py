@@ -316,6 +316,9 @@ def decodePolicyOutput( board, policy ):
             move = mirrorMove( move )
         planeIdx, rankIdx, fileIdx = moveToIdx( move )
         moveIdx = planeIdx * 64 + rankIdx * 8 + fileIdx
+        if moveIdx >= len(policy):
+            raise IndexError(f"moveIdx {moveIdx} is out of bounds for policy array of size {len(policy)}. "
+                           f"This suggests the policy array is not the expected 4608-dimensional output from the neural network.")
         move_probabilities[ idx ] = policy[ moveIdx ]
         num_moves += 1
 

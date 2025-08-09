@@ -20,7 +20,7 @@ Standard python libraries. See requirements.txt.
 
 The entry point to the chess engine is the python file playchess.py. Good parameters for strong, long-thinking moves would be:
 ```
-python3 playchess.py --model AlphaZeroNet_20x256_distributed.pt --verbose --rollouts 1000 --threads 10 --mode h
+python3 playchess.py --model PieBot_20x256_v0.pt --verbose --rollouts 500 --threads 20 --mode h
 ```
 The current position is displayed with an ascii chess board. Enter your moves in long algebraic notation. Note that running the engine requires a weights file.  
 
@@ -29,9 +29,9 @@ The current position is displayed with an ascii chess board. Enter your moves in
 
 Download the 2.5MM games [CCRL Dataset](https://lczero.org/blog/2018/09/a-standard-dataset/), reformat it using `reformat.py`and run `train.py`.
 
-Use download_computerchess_org_uk.py program to download another 2MM games. This file will filter out games that are 3000+ ELO, which number approximately 1MM in this set of games.
+Use download_computerchess_org_uk.py program to download another 2MM games. This script will filter out around the top 60 engines in the world, which number approximately 250k games in this set.
 
-This should give you approximately 3.5MM games in total to train on, which should give you a good starting point for an engine that plays at over 2800 ELO.
+This should give you approximately 2.75MM games in total to train on, which should give you a good starting point for an engine that plays at over 2700 ELO on LiChess.
 
 Use download_lichess_games.py to download more 3000+ ELO games. Note that there are approximately 400k such games spread across all LiChess's many years of operating, so it might not be that efficient to use download_lichess_games.py.
 
@@ -64,9 +64,9 @@ The algorithm is based on [this paper](https://arxiv.org/pdf/1712.01815.pdf). On
 
 ## Strength
 
-Note that there are multiple models included in the repository. AlphaZeroNet_20x256_distributed.pt is currently the most refined of them, with a policy loss of approximately 1.5 and a value loss of approximately 0.4. It was trained across 250 epochs on a dataset of 2MM games from LCZero's standard dataset, using supervised learning.
+Note that there are multiple models included in the repository. PieBot_20x256_v0.pt is currently the most refined of them, with a policy loss of approximately 1.5 and a value loss of approximately 0.4. It was trained across 250 epochs on a dataset of 2MM games from LCZero's standard dataset, using supervised learning.
 
-The current best model performs at around 2500 ELO on LiChess (available to test on AlphaZeroNet_20x256_distributed.pt), on a Macbook Mini M4 at 400-500 nodes per second evaluated. It performs at a higher ELO of around 2750 on a Macbook Pro M4 Pro due to that device processing 800 nodes per second.
+The current best model performs at around 2400 ELO on LiChess (available to test on PieBot_20x256_v0.pt), on a Macbook Mini M4 at 400-500 nodes per second evaluated. It performs at a higher ELO of around 2500 on a Macbook Pro M4 Pro due to that device processing 800 nodes per second.
 
 I'm training a new model using a larger dataset including the ones from ComputerChess.org.uk, which should play much stronger once it's completed. That will train on approximately 3MM-3.5MM games in total.
 
