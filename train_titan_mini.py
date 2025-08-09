@@ -24,7 +24,7 @@ import signal
 
 
 # Training params (defaults)
-default_epochs = 100
+default_epochs = 500
 default_num_layers = 10
 default_d_model = 384
 default_num_heads = 6
