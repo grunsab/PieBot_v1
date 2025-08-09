@@ -242,7 +242,7 @@ def create_data_loaders(args):
         batch_size = args.batch_size
     else:
         # Conservative default on MPS to avoid OOM for large transformer
-        batch_size = 4 if device.type == 'mps' else (get_batch_size_for_device() // 6)
+        batch_size = 64 if device.type == 'mps' else (get_batch_size_for_device() // 6)
     num_workers = get_num_workers_for_device()
 
     # Create data loaders

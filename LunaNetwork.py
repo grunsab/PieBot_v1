@@ -437,7 +437,7 @@ class Luna(nn.Module):
                 # Use gradient checkpointing to reduce activation memory
                 def _block_fn(inp):
                     return block(inp)
-                x = torch.utils.checkpoint.checkpoint(_block_fn, x)
+                x = torch.utils.checkpoint.checkpoint(_block_fn, x, use_reentrant=False)
             else:
                 x = block(x)
         
