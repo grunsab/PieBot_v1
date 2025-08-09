@@ -165,8 +165,8 @@ class SyntheticTitanDataset(Dataset):
     def __getitem__(self, idx):
         position = torch.randn(self.c, 8, 8)
         value = torch.rand(1).item() * 2 - 1  # [-1, 1]
-        policy = torch.randint(0, 73 * 64, (1,), dtype=torch.long).squeeze(0)
-        mask = torch.ones(73, 8, 8, dtype=torch.int64)  # allow all moves for simplicity
+        policy = torch.randint(0, 72 * 64, (1,), dtype=torch.long).squeeze(0)
+        mask = torch.ones(72, 8, 8, dtype=torch.int64)  # allow all moves for simplicity
         return position, torch.tensor(value, dtype=torch.float32), policy, mask
 
 

@@ -239,7 +239,7 @@ class PolicyHead(nn.Module):
     """
     Predicts the policy (a probability distribution over all possible moves).
     """
-    def __init__(self, d_model, num_move_actions_per_square=73):
+    def __init__(self, d_model, num_move_actions_per_square=72):
         super().__init__()
         self.num_move_actions_per_square = num_move_actions_per_square
         self.proj = nn.Linear(d_model, num_move_actions_per_square)
@@ -322,9 +322,9 @@ class TitanMini(nn.Module):
         # Final normalization layer.
         self.output_norm = nn.LayerNorm(d_model)
 
-        # Output heads. Policy uses a Stockfish-like 73 move types per square.
+        # Output heads. Policy uses 72 move types per square (standard for this codebase).
         self.value_head = ValueHead(d_model)
-        self.policy_head = PolicyHead(d_model, num_move_actions_per_square=73)
+        self.policy_head = PolicyHead(d_model, num_move_actions_per_square=72)
         
         # Loss functions.
         self.mse_loss = nn.MSELoss()
@@ -420,7 +420,7 @@ if __name__ == "__main__":
     dummy_input = torch.randn(batch_size, 112, 8, 8)
     dummy_value_target = torch.randn(batch_size, 1)
     
-    num_total_moves = 73 * 64
+    num_total_moves = 72 * 64
     dummy_policy_target = torch.randint(0, num_total_moves, (batch_size, 1))
     dummy_mask = torch.randint(0, 2, (batch_size, num_total_moves))
 
