@@ -445,8 +445,11 @@ def validate(model, val_loader, args, epoch, writer, *, device=None, distributed
             if policy_mask is not None:
                 policy_mask = policy_mask.to(device)
 
-            # Forward pass
+            # Forward pass - model returns (value, policy) in eval mode
+            # We need to switch to training mode temporarily to get losses
+            model.train()
             loss, value_loss, policy_loss = model(position, value_target, policy_target, policy_mask)
+            model.eval()
 
             total_loss += loss.item()
             total_value_loss += value_loss.item()
