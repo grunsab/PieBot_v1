@@ -12,7 +12,7 @@ set -euo pipefail
 NPROC="${NPROC:-1}"
 RDZV_BACKEND="${RDZV_BACKEND:-c10d}"
 RDZV_ENDPOINT="${RDZV_ENDPOINT:-localhost:29500}"
-BATCH_SIZE_TOTAL="${BATCH_SIZE_TOTAL:-512}"
+BATCH_SIZE_TOTAL="${BATCH_SIZE_TOTAL:-1024}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${REPO_DIR}/train_titan.py"
 CCRL_DIR_DEFAULT="${REPO_DIR}/games_training_data/reformatted"

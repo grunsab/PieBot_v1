@@ -19,7 +19,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import signal
 
 # Defaults aligned with Luna but can differ for Titan
-default_epochs = 2
+default_epochs = 100
 default_num_layers = 15
 default_d_model = 1024
 default_num_heads = 16
