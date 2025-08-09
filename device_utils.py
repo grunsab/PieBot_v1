@@ -101,13 +101,13 @@ def get_batch_size_for_device(base_batch_size=1024):
         try:
             total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
             if total_memory >= 80:  # B200 or similar high-memory GPU
-                return base_batch_size * 5
-            elif total_memory >= 40:  # High-end GPU (A100, etc.)
-                return base_batch_size * 4
-            elif total_memory >= 24:  # RTX 4090 24GB, RTX 3090 24GB
                 return base_batch_size * 3
+            elif total_memory >= 40:  # High-end GPU (A100, etc.)
+                return base_batch_size * 2
+            elif total_memory >= 24:  # RTX 4090 24GB, RTX 3090 24GB
+                return base_batch_size * 1
             elif total_memory >= 15:  # RTX 4080 16GB, RTX 4070 Ti 16GB
-                return base_batch_size * 2  # More aggressive multiplier
+                return base_batch_size * 1  # More aggressive multiplier
             elif total_memory >= 10:  # RTX 3080 10GB, RTX 4070 12GB
                 return base_batch_size * 1
             else:  # Lower-end GPU (8GB or less)
