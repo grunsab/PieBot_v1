@@ -31,15 +31,14 @@ def load_mcts_module(mcts_file):
     
     mcts_module = importlib.util.module_from_spec(spec)
     
-    # Add to sys.modules with a unique name to avoid conflicts
-    unique_module_name = f"mcts_{id(mcts_module)}"
-    sys.modules[unique_module_name] = mcts_module
+    # Add to sys.modules with the proper module name for pickle compatibility
+    sys.modules[module_name] = mcts_module
     
     # Execute the module
     spec.loader.exec_module(mcts_module)
     
     # Verify the module has the required components
-    required_attrs = ['Root', 'Node', 'Edge']
+    required_attrs = ['Root', ]
     for attr in required_attrs:
         if not hasattr(mcts_module, attr):
             raise AttributeError(f"MCTS module {mcts_file} missing required attribute: {attr}")
@@ -133,7 +132,7 @@ def play_game(mcts1_module, mcts2_module, model, device, rollouts=100, threads=1
         'mcts2_moves': 0
     }
     
-    while not board.is_game_over():
+    while not board.is_game_over(claim_draw=True):
         move_count += 1
         
         # Select the MCTS module based on whose turn it is
@@ -166,9 +165,7 @@ def play_game(mcts1_module, mcts2_module, model, device, rollouts=100, threads=1
             
             with torch.no_grad():
                 root = current_mcts.Root(board, model)
-                
-                for i in range(rollouts):
-                    root.parallelRollouts(board.copy(), model, threads)
+                root.parallelRolloutsTotal(board.copy(), model, threads*rollouts, threads)
             
             elapsed = time.perf_counter() - start_time
             time_stats[f'{time_key}_total'] += elapsed
@@ -208,7 +205,7 @@ def main():
     parser.add_argument('--mcts1', required=True, help='Path to first MCTS implementation (.py) file')
     parser.add_argument('--mcts2', required=True, help='Path to second MCTS implementation (.py) file')
     parser.add_argument('--model', required=True, help='Path to model (.pt) file to use for both MCTS')
-    parser.add_argument('--games', type=int, default=10, help='Number of games to play (default: 10)')
+    parser.add_argument('--games', type=int, default=20, help='Number of games to play (default: 20)')
     parser.add_argument('--rollouts', type=int, default=50, help='Number of MCTS rollouts per move (default: 50)')
     parser.add_argument('--threads', type=int, default=60, help='Number of threads for MCTS (default: 60)')
     parser.add_argument('--verbose', action='store_true', help='Print detailed move information')
@@ -230,6 +227,7 @@ def main():
     # Load the model
     print(f"\nLoading model: {args.model}")
     model, device = load_model(args.model)
+    print(f"Model loaded on device: {device}")
     
     print(f"\nStarting tournament: {args.games} games")
     print(f"Rollouts per move: {args.rollouts}")

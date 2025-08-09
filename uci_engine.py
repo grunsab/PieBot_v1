@@ -20,15 +20,14 @@ import threading
 from queue import Queue
 import multiprocessing as mp
 import AlphaZeroNetwork
+import PieBotNetwork
 from device_utils import get_optimal_device, optimize_for_device
-from quantization_utils import load_quantized_model
 
 import sys
 
 device, device_str = get_optimal_device()
 
-import MCTS_profiling_speedups_v2 as MCTS
-import MCTS_multiprocess as MCTS_MP
+import MCTS_root_parallel as MCTS
 
 class TimeManager:
     """Manages time allocation for moves based on game time constraints."""
@@ -48,11 +47,11 @@ class TimeManager:
         self.threads = threads
         # Adjust for the fact that parallelRollouts does 'threads' rollouts per call
         # So actual time per rollout is different
-        # My Macbook Mini M4 Runs around 600 rollouts per second, and my RTX 4080 does about 1200.
+        # My Macbook Mini M4 Runs around 600 rollouts per second, and my RTX 4080 does about 4000-5000 using MCTS_root_parallel.
         if device.type == "mps":
             self.rollouts_per_second = 600
         else:
-            self.rollouts_per_second = 1200  # Average for RTX 4080
+            self.rollouts_per_second = 4000  # Average for RTX 4080
         
         # Track actual performance
         self.measured_rollouts_per_second = None
@@ -137,7 +136,7 @@ class TimeManager:
         rollouts = max(100, rollouts)
         
         # Cap maximum rollouts to prevent excessive thinking
-        rollouts = min(100000, rollouts)
+        rollouts = min(200000, rollouts)
         
         return rollouts
 
@@ -174,11 +173,25 @@ class UCIEngine:
         self.move_overhead = 30  # Default move overhead in milliseconds
         self.use_multiprocess = use_multiprocess
         
+    def detect_model_type(self, weights):
+        """Detect whether this is an AlphaZeroNet or PieBotNet model."""
+        if isinstance(weights, dict):
+            # Check state dict keys to determine model type
+            state_dict = weights.get('model_state_dict', weights)
+            
+            # PieBotNet has specific modules like positional_encoding and transformer_blocks
+            has_positional_encoding = any('positional_encoding' in key for key in state_dict.keys())
+            has_transformer = any('transformer_blocks' in key for key in state_dict.keys())
+            
+            if has_positional_encoding or has_transformer:
+                return 'PieBotNet'
+        return 'AlphaZeroNet'
+    
     def load_model(self):
         """Load the neural network model."""
         try:
             if not self.model_path:
-                self.model_path = "AlphaZeroNet_20x256_distributed.pt"
+                self.model_path = "weights/AlphaZeroNet_20x256.pt"
             
             if not os.path.isabs(self.model_path):
                 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -195,14 +208,29 @@ class UCIEngine:
             if self.verbose:
                 print(f"info string Loading model from: {full_path} on {device_str}")
                 sys.stdout.flush()
-                
-            self.model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
-            weights = torch.load(full_path, map_location=self.device)
             
+            # Load weights to detect model type
+            weights = torch.load(full_path, map_location='cpu')
+            
+            # Detect and create the appropriate model type
+            model_type = self.detect_model_type(weights)
+            if model_type == 'PieBotNet':
+                # Use default PieBotNet configuration
+                self.model = PieBotNetwork.PieBotNet()
+                if self.verbose:
+                    print(f"info string Detected PieBotNet model")
+            else:
+                self.model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
+                if self.verbose:
+                    print(f"info string Detected AlphaZeroNet model")
+            
+            # Handle different model formats
             if isinstance(weights, dict) and 'model_state_dict' in weights:
                 self.model.load_state_dict(weights['model_state_dict'])
                 if weights.get('model_type') == 'fp16':
                     self.model = self.model.half()
+                    if self.verbose:
+                        print(f"info string Loaded FP16 model")
             else:
                 self.model.load_state_dict(weights)
             
@@ -216,13 +244,10 @@ class UCIEngine:
                 print("info string Model loaded successfully")
                 sys.stdout.flush()
 
-            # If using multiprocess, initialize the engine now
-            if self.use_multiprocess:
-                if self.verbose:
-                    print("info string Initializing persistent multi-process MCTS engine...")
-                    sys.stdout.flush()
-                # The MCTS_MP.Root will handle the creation of the persistent engine
-                self.mcts_engine = MCTS_MP.Root(self.board, self.model)
+            if self.verbose:
+                print("info string Initializing persistent multi-process MCTS engine...")
+                sys.stdout.flush()
+            self.mcts_engine = MCTS.Root(self.board, self.model)
 
             return True
             
@@ -238,7 +263,7 @@ class UCIEngine:
         print("id name AlphaZero UCI Engine (Persistent MP)")
         print("id author Rishi Sachdev")
         print("option name Threads type spin default 8 min 1 max 128")
-        print("option name Model type string default AlphaZeroNet_20x256_distributed.pt")
+        print("option name Model type string default weights/AlphaZeroNet_20x256.pt")
         print("option name Verbose type check default false")
         print("option name Move Overhead type spin default 30 min 0 max 5000")
         print("option name UseMultiprocess type check default true")
@@ -267,10 +292,15 @@ class UCIEngine:
                 self.board = chess.Board(fen)
                 moves_start = 7
             except ValueError:
-                print(f"info string Invalid FEN: {fen}")
+                print(f"ERROR Invalid FEN: {fen}")
                 return
         else:
             return
+            
+        if self.mcts_engine:
+            if self.verbose:
+                print("info string Resetting MCTS engine for new position")
+                sys.stdout.flush()
             
         if len(args) > moves_start and args[moves_start] == "moves":
             for move_str in args[moves_start + 1:]:
@@ -284,37 +314,33 @@ class UCIEngine:
                         
     def search_position(self, rollouts):
         """Search current position using MCTS."""
+        if self.verbose:
+            print(f"info string Searching position: {self.board.fen()}")
+            sys.stdout.flush()
         self.stop_search.clear()
         self.best_move = None
         
         try:
             if self.model is None:
-                print("info string ERROR: No model loaded")
+                print("ERROR: No model loaded")
                 sys.stdout.flush()
                 return
                 
             with torch.no_grad():
                 start_time = time.time()
+                best_move = None
                 
-                if self.use_multiprocess:
-                    # With the persistent engine, we just call the rollouts
-                    self.mcts_engine = MCTS_MP.Root(self.board, self.model)
-                    self.mcts_engine.parallelRollouts(self.board, self.model, rollouts)
-                    actual_rollouts = rollouts
-                else:
-                    # Original threaded version
-                    self.mcts_engine = MCTS.Root(self.board, self.model)
-                    num_iterations = max(1, rollouts // self.threads)
-                    remainder = rollouts % self.threads
-                    
-                    for i in range(num_iterations):
-                        if self.stop_search.is_set(): break
-                        self.mcts_engine.parallelRollouts(self.board, self.model, self.threads)
-                    
-                    if remainder > 0 and not self.stop_search.is_set():
-                        self.mcts_engine.parallelRollouts(self.board, self.model, remainder)
-                    
-                    actual_rollouts = (num_iterations * self.threads) + (remainder if not self.stop_search.is_set() else 0)
+                # Always create a fresh MCTS engine for each search to avoid state corruption
+                if self.verbose:
+                    print("info string Creating fresh MCTS engine for search")
+                    sys.stdout.flush()
+                
+                # Create a new MCTS engine with the current board position
+                # This ensures no stale tree state from previous positions
+                self.mcts_engine = MCTS.Root(self.board.copy(), self.model)
+
+                self.mcts_engine.parallelRolloutsTotal(self.board.copy(), self.model, rollouts, self.threads)
+                actual_rollouts = rollouts
                 
                 elapsed_time = time.time() - start_time
                 
@@ -323,30 +349,28 @@ class UCIEngine:
                 
                 edge = self.mcts_engine.maxNSelect()
                 if not edge:
-                    print("info string No best move found!")
+                    if self.verbose:
+                        print("info string Warning: No edge selected from MCTS")
+                        sys.stdout.flush()
                     return
 
-                move = edge.getMove()
-                Q = self.mcts_engine.getQ()
+                best_move = edge.getMove()
+                self.best_move = best_move.uci()
                 
-                self.best_move = move.uci()
-                
-                # Cleanup for non-persistent MCTS
-                if not self.use_multiprocess:
-                    MCTS.clear_caches()
-                    MCTS.clear_pools()
-
-                score = int(self.mcts_engine.getQ() * 1000 - 500) if self.mcts_engine.getQ() is not None else 0
+                if self.verbose:
+                    print(f"info string Selected move: {self.best_move}")
+                    
                 nps = int(actual_rollouts / elapsed_time) if elapsed_time > 0 else 0
-                print(f"info depth {actual_rollouts} score cp {score} nodes {actual_rollouts} nps {nps} pv {move}")
+                print(f"info depth {actual_rollouts} nodes {actual_rollouts} nps {nps} pv {best_move}")
                 sys.stdout.flush()
+
                 
         except Exception as e:
-            print(f"info string Error during search: {e}")
+            print(f"Error during search: {e}")
             import traceback
             traceback.print_exc()
             sys.stdout.flush()
-                
+
     def go(self, args):
         """Handle 'go' command."""
         wtime, btime, winc, binc, movestogo, movetime, infinite = self.parse_go_args(args)
@@ -371,6 +395,7 @@ class UCIEngine:
             print(f"bestmove {self.best_move}")
         else:
             # Fallback if search fails
+            print("WARNING: NO BEST MOVE FOUND")
             legal_moves = list(self.board.legal_moves)
             if legal_moves:
                 print(f"bestmove {legal_moves[0].uci()}")
@@ -423,7 +448,6 @@ class UCIEngine:
             if self.verbose:
                 print("info string Shutting down multi-process engine...")
                 sys.stdout.flush()
-            MCTS_MP.Root.cleanup_engine()
         sys.exit(0)
         
     def setoption(self, args):
@@ -500,6 +524,14 @@ class UCIEngine:
                 elif command == "ucinewgame":
                     # Reset board for new game
                     self.board = chess.Board()
+                    # Clean up MCTS engine for new game
+                    if self.mcts_engine:
+                        if self.verbose:
+                            print("info string Resetting engine for new game")
+                            sys.stdout.flush()
+                        import MCTS_root_parallel as MCTS
+                        MCTS.Root.cleanup_engine()
+                        self.mcts_engine = None
                 elif self.verbose:
                     print(f"info string Unknown command: {command}")
                     sys.stdout.flush()
@@ -527,7 +559,7 @@ def main():
         description="UCI Protocol wrapper for AlphaZero chess engine"
     )
     parser.add_argument("--model", help="Path to model file", 
-                       default="AlphaZeroNet_20x256_distributed.pt")
+                       default="weights/AlphaZeroNet_20x256.pt")
     parser.add_argument("--threads", type=int, help="Number of threads for threaded MCTS", 
                        default=64)
     parser.add_argument("--verbose", action="store_true", 

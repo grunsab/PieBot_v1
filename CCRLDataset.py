@@ -5,6 +5,10 @@ import os
 import torch
 from torch.utils.data import Dataset
 import encoder
+try:
+    import encoder_enhanced
+except ImportError:
+    encoder_enhanced = None
 
 def tolist( mainline_moves ):
     """
@@ -26,18 +30,23 @@ class CCRLDataset( Dataset ):
     Subclass of torch.utils.data.Dataset for the ccrl dataset.
     """
 
-    def __init__( self, ccrl_dir, soft_targets=True, temperature=0.1 ):
+    def __init__( self, ccrl_dir, soft_targets=True, temperature=0.1, enhanced_encoder=False ):
         """
         Args:
             ccrl_dir (string) Path to directory containing
                 pgn files with names 0.pgn, 1.pgn, 2.pgn, etc.
             soft_targets (bool) If True, return probability distribution instead of move index
             temperature (float) Temperature for label smoothing when using soft targets
+            enhanced_encoder (bool) If True, use enhanced encoder with 112 planes
         """
         self.ccrl_dir = ccrl_dir
         self.pgn_file_names = os.listdir( ccrl_dir )
         self.soft_targets = soft_targets
         self.temperature = temperature
+        self.enhanced_encoder = enhanced_encoder
+        
+        if enhanced_encoder and encoder_enhanced is None:
+            raise ImportError("encoder_enhanced module not found but enhanced_encoder=True")
 
     def __len__( self ):
         """
@@ -92,7 +101,30 @@ class CCRLDataset( Dataset ):
             
         winner = encoder.parseResult( game.headers[ 'Result' ] )
 
-        position, policy_idx, value, mask = encoder.encodeTrainingPoint( board, next_move, winner )
+        if self.enhanced_encoder:
+            # Use enhanced encoder - need to encode components separately
+            # Encode position with enhanced features (112 planes)
+            position = encoder_enhanced.encode_enhanced_position(board)
+            
+            # Encode the move to get policy index
+            # Mirror the move if it's black's turn (to match encoder behavior)
+            move_to_encode = next_move
+            if not board.turn:
+                move_to_encode = encoder.mirrorMove(next_move)
+            planeIdx, rankIdx, fileIdx = encoder.moveToIdx(move_to_encode)
+            policy_idx = planeIdx * 64 + rankIdx * 8 + fileIdx
+            
+            # Encode value (winner from perspective of current player)
+            if board.turn:
+                value = (winner + 1.) / 2.
+            else:
+                value = (-winner + 1.) / 2.
+            
+            # Encode legal moves mask
+            mask = encoder.getLegalMoveMask(board)
+        else:
+            # Use regular encoder
+            position, policy_idx, value, mask = encoder.encodeTrainingPoint( board, next_move, winner )
         
         if self.soft_targets:
             # Convert to probability distribution with label smoothing

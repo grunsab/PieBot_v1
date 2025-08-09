@@ -12,7 +12,7 @@ import multiprocessing as mp
 # Global caches for optimization
 position_cache = {}  # Cache for position encodings
 legal_moves_cache = {}  # Cache for legal move generation
-CACHE_MAX_SIZE = 200000  # Maximum cache size to prevent memory issues
+CACHE_MAX_SIZE = 20  # Maximum cache size to prevent memory issues
 
 # Object pools for Node/Edge creation
 node_pool = deque(maxlen=50000)
@@ -605,7 +605,7 @@ class Root( Node ):
                     edge.clearVirtualLoss()
 
     def parallelRolloutsProgressive( self, board, neuralNetwork, total_rollouts, 
-                                   initial_batch_size=50, max_batch_size=200 ):
+                                   initial_batch_size=50, max_batch_size=512 ):
         """
         Progressive batching to reduce path collisions while maintaining high throughput.
         
@@ -645,6 +645,20 @@ class Root( Node ):
         else:
             # For lower parallelism, use the standard optimized version
             return self.parallelRolloutsOptimized(board, neuralNetwork, num_parallel_rollouts)
+    
+
+    def parallelRolloutsTotal( self, board, neuralNetwork, total_rollouts, num_parallel_rollouts ):
+        """
+        Run total parallel rollouts (compatibility method).
+        This is a wrapper for the optimized version.
+        
+        Args:
+            board (chess.Board) the chess position
+            neuralNetwork (torch.nn.Module) the neural network
+            total_rollouts (int) total number of rollouts to perform
+            num_parallel_rollouts (int) number of rollouts per batch
+        """
+        return self.parallelRollouts(board, neuralNetwork, total_rollouts)
 
     def getVisitCounts(self, board):
         """
