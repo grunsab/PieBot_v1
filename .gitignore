@@ -7,3 +7,6 @@ __pycache__/
 .DS_Store
 build/
 *.log
+checkpoints/
+logs/
+weights/Luna_2x256.pt
