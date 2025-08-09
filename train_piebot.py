@@ -376,21 +376,18 @@ def main():
         val_loss, val_value_loss, val_policy_loss = validate(model, val_loader, device)
         print(f"Val   - Loss: {val_loss:.4f}, Value: {val_value_loss:.4f}, Policy: {val_policy_loss:.4f}")
         
-        # Save checkpoint
+        # Check if this is the best model
         is_best = val_loss < best_val_loss
         if is_best:
             best_val_loss = val_loss
         
-        # Determine output filename
-        if args.output:
-            output_path = args.output
-        else:
-            output_path = f'weights/PieBotNet_{args.num_blocks}x{args.num_filters}_e{epoch+1}.pt'
+        # Check if this is the last epoch
+        is_last_epoch = (epoch == args.epochs - 1)
         
         # Create weights directory if it doesn't exist
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        os.makedirs('weights', exist_ok=True)
         
-        # Save model
+        # Prepare checkpoint
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
@@ -402,13 +399,23 @@ def main():
             'args': args
         }
         
-        torch.save(checkpoint, output_path)
-        print(f"Saved checkpoint to {output_path}")
-        
+        # Save best model
         if is_best:
-            best_path = output_path.replace('.pt', '_best.pt')
+            if args.output:
+                best_path = args.output.replace('.pt', '_best.pt')
+            else:
+                best_path = f'weights/PieBotNet_{args.num_blocks}x{args.num_filters}_best.pt'
             torch.save(checkpoint, best_path)
-            print(f"Saved best model to {best_path}")
+            print(f"Saved best model to {best_path} (val_loss: {val_loss:.4f})")
+        
+        # Save last epoch model
+        if is_last_epoch:
+            if args.output:
+                last_path = args.output
+            else:
+                last_path = f'weights/PieBotNet_{args.num_blocks}x{args.num_filters}_last.pt'
+            torch.save(checkpoint, last_path)
+            print(f"Saved final model to {last_path}")
     
     print("\nTraining complete!")
     print(f"Best validation loss: {best_val_loss:.4f}")
