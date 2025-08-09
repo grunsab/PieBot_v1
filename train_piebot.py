@@ -2,6 +2,7 @@ import os
 import torch
 import torch.optim as optim
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, ConcatDataset
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, OneCycleLR
@@ -223,6 +224,9 @@ def validate(model, dataloader, device):
     total_policy_loss = 0
     num_batches = 0
     
+    mse_loss = nn.MSELoss()
+    cross_entropy_loss = nn.CrossEntropyLoss()
+    
     with torch.no_grad():
         for batch in tqdm(dataloader, desc='Validation'):
             # Extract data from batch dictionary
@@ -230,11 +234,27 @@ def validate(model, dataloader, device):
             value_targets = batch['value'].to(device)
             policy_targets = batch['policy'].to(device)
             
-            loss, value_loss, policy_loss = model(
-                positions, value_targets, policy_targets
-            )
+            # Get model predictions (in eval mode, model returns value and policy)
+            value, policy = model(positions)
             
-            total_loss += loss.item()
+            # Calculate losses manually
+            value_loss = mse_loss(value, value_targets)
+            
+            # Handle different policy target formats
+            if policy_targets.dim() == 1 or (policy_targets.dim() == 2 and policy_targets.shape[1] == 1):
+                # Supervised learning: policy target is move index
+                policy_targets = policy_targets.view(policy_targets.shape[0])
+                policy_loss = cross_entropy_loss(policy, policy_targets)
+            else:
+                # RL: policy target is probability distribution
+                log_probs = F.log_softmax(policy, dim=1)
+                policy_targets = policy_targets + 1e-8
+                policy_targets = policy_targets / policy_targets.sum(dim=1, keepdim=True)
+                policy_loss = -(policy_targets * log_probs).sum(dim=1).mean()
+            
+            total_loss_val = value_loss + model.policy_weight * policy_loss
+            
+            total_loss += total_loss_val.item()
             total_value_loss += value_loss.item()
             total_policy_loss += policy_loss.item()
             num_batches += 1
