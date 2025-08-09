@@ -31,7 +31,7 @@ import sys
 device, device_str = get_optimal_device()
 
 #import MCTS_root_parallel as MCTS
-import searchless_value as MCTS
+import searchless_policy as MCTS
 
 class TimeManager:
     """Manages time allocation for moves based on game time constraints."""
