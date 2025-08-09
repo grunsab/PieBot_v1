@@ -21,7 +21,9 @@ from queue import Queue
 import multiprocessing as mp
 import AlphaZeroNetwork
 import PieBotNetwork
+import PieNanoNetwork
 from device_utils import get_optimal_device, optimize_for_device
+from quantization_utils import load_quantized_model
 
 import sys
 
@@ -173,11 +175,71 @@ class UCIEngine:
         self.move_overhead = 30  # Default move overhead in milliseconds
         self.use_multiprocess = use_multiprocess
         
-    def detect_model_type(self, weights):
-        """Detect whether this is an AlphaZeroNet or PieBotNet model."""
+    def _create_pienano_from_weights(self, weights):
+        """Create PieNano model with correct architecture from weights."""
+        # Try to detect architecture from weights
+        if isinstance(weights, dict):
+            # Check if it has args from training
+            if 'args' in weights:
+                args = weights['args']
+                num_blocks = getattr(args, 'num_blocks', 8)
+                num_filters = getattr(args, 'num_filters', 128)
+                num_input_planes = 112 if getattr(args, 'use_enhanced_encoder', False) else 16
+            else:
+                # Try to infer from state dict
+                state_dict = weights.get('model_state_dict', weights)
+                
+                # Count residual blocks
+                residual_keys = [k for k in state_dict.keys() if 'residual_tower' in k and 'conv1' in k]
+                num_blocks = len(set(k.split('.')[1] for k in residual_keys if len(k.split('.')) > 1))
+                
+                # Get number of filters and input planes from conv_block
+                if 'conv_block.0.weight' in state_dict:
+                    num_filters = state_dict['conv_block.0.weight'].shape[0]
+                    num_input_planes = state_dict['conv_block.0.weight'].shape[1]
+                else:
+                    # Default values
+                    num_filters = 128
+                    num_input_planes = 16
+                
+                # Default to 8 blocks if detection failed
+                if num_blocks == 0:
+                    num_blocks = 8
+        else:
+            # Default PieNano configuration
+            num_blocks = 8
+            num_filters = 128
+            num_input_planes = 16
+        
+        return PieNanoNetwork.PieNano(
+            num_blocks=num_blocks,
+            num_filters=num_filters,
+            num_input_planes=num_input_planes
+        )
+    
+    def detect_model_type(self, weights, model_path=None):
+        """Detect whether this is an AlphaZeroNet, PieBotNet, or PieNano model."""
+        # Check if it's a quantized model by filename
+        if model_path and ('quantized' in model_path.lower() or 'quant' in model_path.lower()):
+            # Try to determine the base model type from filename
+            if 'pienano' in model_path.lower() or 'pie_nano' in model_path.lower():
+                return 'PieNano_Quantized'
+            # If can't determine from filename, assume it's a quantized PieNano
+            # since that's the only model we support quantization for
+            return 'PieNano_Quantized'
+        
         if isinstance(weights, dict):
             # Check state dict keys to determine model type
             state_dict = weights.get('model_state_dict', weights)
+            
+            # Check for PieNano specific features (depthwise convolutions, WDL head)
+            has_depthwise = any('depthwise' in key for key in state_dict.keys())
+            has_wdl = any('value_head.fc2.weight' in key for key in state_dict.keys())
+            if has_depthwise and has_wdl:
+                # Check the shape of value head output to distinguish PieNano
+                value_fc2_weight = state_dict.get('value_head.fc2.weight')
+                if value_fc2_weight is not None and value_fc2_weight.shape[0] == 3:
+                    return 'PieNano'
             
             # PieBotNet has specific modules like positional_encoding and transformer_blocks
             has_positional_encoding = any('positional_encoding' in key for key in state_dict.keys())
@@ -209,32 +271,76 @@ class UCIEngine:
                 print(f"info string Loading model from: {full_path} on {device_str}")
                 sys.stdout.flush()
             
-            # Load weights to detect model type
-            weights = torch.load(full_path, map_location='cpu')
+            # Check if it's a quantized model (TorchScript file)
+            is_quantized = False
+            weights = None
             
-            # Detect and create the appropriate model type
-            model_type = self.detect_model_type(weights)
-            if model_type == 'PieBotNet':
-                # Use default PieBotNet configuration
-                self.model = PieBotNetwork.PieBotNet()
+            # Try loading as TorchScript first (for quantized models)
+            try:
+                # Attempt to load as TorchScript
+                self.model = torch.jit.load(full_path, map_location='cpu')
+                is_quantized = True
                 if self.verbose:
-                    print(f"info string Detected PieBotNet model")
-            else:
-                self.model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
-                if self.verbose:
-                    print(f"info string Detected AlphaZeroNet model")
+                    print(f"info string Loaded quantized PieNano model (TorchScript)")
+                    sys.stdout.flush()
+            except:
+                # Not a TorchScript file, load normally
+                weights = torch.load(full_path, map_location='cpu')
+                is_quantized = False
             
-            # Handle different model formats
-            if isinstance(weights, dict) and 'model_state_dict' in weights:
-                self.model.load_state_dict(weights['model_state_dict'])
-                if weights.get('model_type') == 'fp16':
-                    self.model = self.model.half()
+            # If not quantized, detect and create the appropriate model type
+            if not is_quantized:
+                model_type = self.detect_model_type(weights, full_path)
+                
+                if model_type == 'PieNano_Quantized':
+                    # Handle quantized PieNano saved as state dict
+                    try:
+                        # Try loading with quantization utils
+                        self.model = load_quantized_model(full_path)
+                        is_quantized = True
+                        if self.verbose:
+                            print(f"info string Loaded quantized PieNano model")
+                            sys.stdout.flush()
+                    except:
+                        # Fallback: create regular PieNano and load state dict
+                        # This might happen if quantized model was saved as regular state dict
+                        self.model = self._create_pienano_from_weights(weights)
+                        if self.verbose:
+                            print(f"info string Loaded PieNano model (dequantized fallback)")
+                elif model_type == 'PieNano':
+                    # Use default PieNano configuration
+                    self.model = self._create_pienano_from_weights(weights)
                     if self.verbose:
-                        print(f"info string Loaded FP16 model")
-            else:
-                self.model.load_state_dict(weights)
+                        print(f"info string Detected PieNano model")
+                elif model_type == 'PieBotNet':
+                    # Use default PieBotNet configuration
+                    self.model = PieBotNetwork.PieBotNet()
+                    if self.verbose:
+                        print(f"info string Detected PieBotNet model")
+                else:
+                    self.model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
+                    if self.verbose:
+                        print(f"info string Detected AlphaZeroNet model")
+                
+                # Handle different model formats (only for non-quantized models)
+                if isinstance(weights, dict) and 'model_state_dict' in weights:
+                    self.model.load_state_dict(weights['model_state_dict'])
+                    if weights.get('model_type') == 'fp16':
+                        self.model = self.model.half()
+                        if self.verbose:
+                            print(f"info string Loaded FP16 model")
+                else:
+                    self.model.load_state_dict(weights)
             
-            self.model = optimize_for_device(self.model, self.device)
+            # Only optimize non-quantized models (quantized models must stay on CPU)
+            if not is_quantized:
+                self.model = optimize_for_device(self.model, self.device)
+            else:
+                # Quantized models run on CPU
+                self.model = self.model.cpu()
+                if self.verbose:
+                    print(f"info string Note: Quantized model will run on CPU")
+                    sys.stdout.flush()
             self.model.eval()
             
             for param in self.model.parameters():

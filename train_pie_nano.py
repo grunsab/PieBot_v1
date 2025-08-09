@@ -3,22 +3,19 @@ import torch
 import torch.optim as optim
 import torch.nn as nn
 from torch.utils.data import DataLoader, ConcatDataset
-from torch.cuda.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, OneCycleLR
 from CCRLDataset import CCRLDataset
-from RLDataset import RLDataset, WeightedRLSampler
-from PieBotNetwork import PieBotNet, PieBotNetConfig
+from RLDataset import RLDataset
+from PieNanoNetwork import PieNano
 from device_utils import get_optimal_device, optimize_for_device, get_batch_size_for_device, get_num_workers_for_device
 import argparse
-import re
 import time
-import math
 from tqdm import tqdm
 
-# Training params (defaults)
-default_epochs = 500
-default_blocks = 45
-default_filters = 480
+# Training params optimized for PieNano
+default_epochs = 100
+default_blocks = 8
+default_filters = 128
 default_lr = 0.001
 default_policy_weight = 1.0
 ccrl_dir = os.path.abspath('games_training_data/reformatted/')
@@ -26,7 +23,7 @@ rl_dir = os.path.abspath('games_training_data/selfplay/')
 logmode = True
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Train PieBot enhanced AlphaZero network')
+    parser = argparse.ArgumentParser(description='Train PieNano lightweight chess network')
     parser.add_argument('--resume', type=str,
                         help='Path to checkpoint to resume training from')
     parser.add_argument('--epochs', type=int, default=default_epochs,
@@ -41,8 +38,6 @@ def parse_args():
                         help=f'Number of residual blocks (default: {default_blocks})')
     parser.add_argument('--num-filters', type=int, default=default_filters,
                         help=f'Number of filters (default: {default_filters})')
-    parser.add_argument('--num-transformer-blocks', type=int, default=2,
-                        help='Number of transformer blocks (default: 2)')
     parser.add_argument('--output', type=str, default=None,
                         help='Output filename for saved model')
     parser.add_argument('--policy-weight', type=float, default=default_policy_weight,
@@ -55,41 +50,39 @@ def parse_args():
                         help='For mixed mode: ratio of RL data (0.0-1.0, default: 0.5)')
     parser.add_argument('--use-enhanced-encoder', action='store_true',
                         help='Use enhanced 112-plane encoder instead of 16-plane')
-    parser.add_argument('--no-mixed-precision', action='store_true',
-                        help='Disable mixed precision training')
-    parser.add_argument('--gradient-accumulation', type=int, default=1,
-                        help='Number of gradient accumulation steps (default: 1)')
-    parser.add_argument('--warmup-steps', type=int, default=1000,
-                        help='Number of warmup steps for learning rate (default: 1000)')
+    parser.add_argument('--gradient-accumulation', type=int, default=2,
+                        help='Number of gradient accumulation steps (default: 2)')
+    parser.add_argument('--warmup-epochs', type=int, default=5,
+                        help='Number of warmup epochs for learning rate (default: 5)')
     parser.add_argument('--scheduler', choices=['cosine', 'onecycle', 'none'], default='cosine',
                         help='Learning rate scheduler (default: cosine)')
     parser.add_argument('--dropout', type=float, default=0.1,
                         help='Dropout rate (default: 0.1)')
     parser.add_argument('--use-se', action='store_true', default=True,
                         help='Use Squeeze-Excitation blocks (default: True)')
-    parser.add_argument('--use-depthwise', action='store_true', default=True,
-                        help='Use depthwise separable convolutions (default: True)')
-    parser.add_argument('--label-smoothing', type=float, default=0.1,
-                        help='Label smoothing for policy loss (default: 0.1)')
+    parser.add_argument('--label-smoothing', type=float, default=0.05,
+                        help='Label smoothing for policy loss (default: 0.05)')
     parser.add_argument('--weight-decay', type=float, default=1e-4,
                         help='Weight decay for optimizer (default: 1e-4)')
     parser.add_argument('--clip-grad-norm', type=float, default=1.0,
                         help='Gradient clipping norm (default: 1.0)')
+    parser.add_argument('--save-every', type=int, default=10,
+                        help='Save checkpoint every N epochs (default: 10)')
+    parser.add_argument('--validate-every', type=int, default=5,
+                        help='Validate every N epochs (default: 5)')
     
     return parser.parse_args()
 
 def create_model(args):
-    """Create and configure the PieBotNet model."""
+    """Create and configure the PieNano model."""
     # Determine input planes based on encoder type
     num_input_planes = 112 if args.use_enhanced_encoder else 16
     
-    model = PieBotNet(
+    model = PieNano(
         num_blocks=args.num_blocks,
         num_filters=args.num_filters,
-        num_transformer_blocks=args.num_transformer_blocks,
         num_input_planes=num_input_planes,
         use_se=args.use_se,
-        use_depthwise=args.use_depthwise,
         dropout_rate=args.dropout,
         policy_weight=args.policy_weight
     )
@@ -117,31 +110,44 @@ def create_optimizer(model, args):
 
 def create_scheduler(optimizer, args, steps_per_epoch):
     """Create learning rate scheduler."""
+    total_steps = steps_per_epoch * args.epochs
+    warmup_steps = steps_per_epoch * args.warmup_epochs
+    
     if args.scheduler == 'cosine':
+        # Cosine annealing with warm restarts
         scheduler = CosineAnnealingWarmRestarts(
             optimizer,
-            T_0=steps_per_epoch * 5,  # Restart every 5 epochs
+            T_0=steps_per_epoch * 10,  # Restart every 10 epochs
             T_mult=2,  # Double the period after each restart
-            eta_min=args.lr * 0.01  # Minimum LR is 1% of initial
+            eta_min=args.lr * 0.001  # Minimum LR is 0.1% of initial
         )
+        
+        # Create a warmup scheduler wrapper
+        def warmup_scheduler(step):
+            if step < warmup_steps:
+                return float(step) / float(max(1, warmup_steps))
+            return 1.0
+        
+        warmup = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_scheduler)
+        return {'main': scheduler, 'warmup': warmup, 'warmup_steps': warmup_steps}
+        
     elif args.scheduler == 'onecycle':
         scheduler = OneCycleLR(
             optimizer,
             max_lr=args.lr * 10,  # Peak LR is 10x initial
-            total_steps=steps_per_epoch * args.epochs,
+            total_steps=total_steps,
             pct_start=0.1,  # 10% of training for warmup
             anneal_strategy='cos',
             cycle_momentum=True,
             base_momentum=0.85,
             max_momentum=0.95
         )
+        return {'main': scheduler, 'warmup': None, 'warmup_steps': 0}
     else:
-        scheduler = None
-    
-    return scheduler
+        return {'main': None, 'warmup': None, 'warmup_steps': 0}
 
-def train_epoch(model, dataloader, optimizer, scheduler, scaler, args, device, epoch):
-    """Train for one epoch with mixed precision and gradient accumulation."""
+def train_epoch(model, dataloader, optimizer, scheduler, args, device, epoch, step_count):
+    """Train for one epoch with gradient accumulation."""
     model.train()
     
     total_loss = 0
@@ -156,47 +162,32 @@ def train_epoch(model, dataloader, optimizer, scheduler, scaler, args, device, e
         positions = batch['position'].to(device)
         value_targets = batch['value'].to(device)
         policy_targets = batch['policy'].to(device)
-        # Note: batch['mask'] is available if needed for legal move masking
         
-        # Mixed precision training
-        if not args.no_mixed_precision and device.type == 'cuda':
-            with autocast():
-                loss, value_loss, policy_loss = model(
-                    positions, value_targets, policy_targets
-                )
-                loss = loss / args.gradient_accumulation
-        else:
-            loss, value_loss, policy_loss = model(
-                positions, value_targets, policy_targets
-            )
-            loss = loss / args.gradient_accumulation
+        # Forward pass
+        loss, value_loss, policy_loss = model(
+            positions, value_targets, policy_targets
+        )
+        loss = loss / args.gradient_accumulation
         
         # Backward pass with gradient accumulation
-        if not args.no_mixed_precision and device.type == 'cuda':
-            scaler.scale(loss).backward()
-        else:
-            loss.backward()
+        loss.backward()
         
         # Update weights after gradient accumulation
         if (batch_idx + 1) % args.gradient_accumulation == 0:
-            if not args.no_mixed_precision and device.type == 'cuda':
-                # Gradient clipping
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
-                
-                # Optimizer step
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
-                optimizer.step()
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
             
+            # Optimizer step
+            optimizer.step()
             optimizer.zero_grad()
             
             # Learning rate scheduling
-            if scheduler is not None:
-                scheduler.step()
+            if scheduler['warmup'] and step_count[0] < scheduler['warmup_steps']:
+                scheduler['warmup'].step()
+            elif scheduler['main'] is not None:
+                scheduler['main'].step()
+            
+            step_count[0] += 1
         
         # Track losses
         total_loss += loss.item() * args.gradient_accumulation
@@ -205,11 +196,12 @@ def train_epoch(model, dataloader, optimizer, scheduler, scaler, args, device, e
         num_batches += 1
         
         # Update progress bar
+        current_lr = optimizer.param_groups[0]['lr']
         progress_bar.set_postfix({
             'loss': f'{total_loss/num_batches:.4f}',
             'value': f'{total_value_loss/num_batches:.4f}',
             'policy': f'{total_policy_loss/num_batches:.4f}',
-            'lr': f'{optimizer.param_groups[0]["lr"]:.6f}'
+            'lr': f'{current_lr:.6f}'
         })
     
     return total_loss / num_batches, total_value_loss / num_batches, total_policy_loss / num_batches
@@ -225,7 +217,6 @@ def validate(model, dataloader, device):
     
     with torch.no_grad():
         for batch in tqdm(dataloader, desc='Validation'):
-            # Extract data from batch dictionary
             positions = batch['position'].to(device)
             value_targets = batch['value'].to(device)
             policy_targets = batch['policy'].to(device)
@@ -248,15 +239,23 @@ def main():
     device, device_str = get_optimal_device()
     print(f"Using device: {device_str}")
     
+    # MPS-specific settings
+    is_mps = device.type == 'mps'
+    
     # Auto-detect batch size if not specified
     if args.batch_size is None:
-        # For enhanced encoder (112 planes), use smaller base due to memory requirements
-        # For regular encoder (16 planes), use larger base
-        # Aggressive base sizes to maximize GPU utilization
-        # Enhanced encoder with transformer blocks can handle large batches
-        # Regular encoder can handle even larger batches
-        base_batch = 256 if args.use_enhanced_encoder else 4096
+        if is_mps:
+            # MPS-optimized batch sizes for M4 Pro with 24GB RAM
+            if args.use_enhanced_encoder:
+                base_batch = 128  # Conservative for 112-plane encoder
+            else:
+                base_batch = 256  # Good for 16-plane encoder on M4 Pro
+        else:
+            # CPU or CUDA defaults
+            base_batch = 64 if args.use_enhanced_encoder else 128
+        
         args.batch_size = get_batch_size_for_device(base_batch)
+    
     print(f"Batch size: {args.batch_size}")
     
     # Effective batch size with gradient accumulation
@@ -264,14 +263,12 @@ def main():
     print(f"Effective batch size: {effective_batch_size}")
     
     # Apply linear scaling rule for learning rate based on batch size
-    # Reference batch size is 256, scale linearly from there
     if not args.no_lr_scaling:
         reference_batch_size = 256
         lr_scale = effective_batch_size / reference_batch_size
         scaled_lr = args.lr * lr_scale
         print(f"Base learning rate: {args.lr}")
         print(f"Scaled learning rate (linear scaling): {scaled_lr:.6f}")
-        # Use the scaled learning rate
         args.lr = scaled_lr
     
     # Create model
@@ -283,15 +280,20 @@ def main():
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
+    print(f"Model size: ~{total_params * 4 / 1024 / 1024:.1f} MB (FP32)")
     
     # Load checkpoint if resuming
     start_epoch = 0
+    step_count = [0]  # Use list to make it mutable for the closure
+    
     if args.resume:
         print(f"Loading checkpoint from {args.resume}")
         checkpoint = torch.load(args.resume, map_location=device)
         model.load_state_dict(checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint)
         if 'epoch' in checkpoint:
             start_epoch = checkpoint['epoch'] + 1
+        if 'step_count' in checkpoint:
+            step_count[0] = checkpoint['step_count']
         print(f"Resumed from epoch {start_epoch}")
     
     # Create datasets
@@ -331,15 +333,26 @@ def main():
         dataset, [train_size, val_size]
     )
     
-    # Create dataloaders
-    num_workers = get_num_workers_for_device()
+    # Create dataloaders with MPS-optimized settings
+    if is_mps:
+        # MPS-specific dataloader settings
+        num_workers = min(4, get_num_workers_for_device())  # Limit workers on MPS
+        persistent_workers = False  # Disable for MPS compatibility
+        pin_memory = False  # MPS doesn't use pinned memory
+    else:
+        num_workers = get_num_workers_for_device()
+        persistent_workers = (num_workers > 0)
+        pin_memory = (device.type == 'cuda')
+    
+    print(f"Using {num_workers} data loader workers")
+    
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=(device.type == 'cuda'),
-        persistent_workers=(num_workers > 0)
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers
     )
     
     val_loader = DataLoader(
@@ -347,19 +360,19 @@ def main():
         batch_size=args.batch_size * 2,  # Larger batch for validation
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=(device.type == 'cuda'),
-        persistent_workers=(num_workers > 0)
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers
     )
     
     # Create optimizer and scheduler
     optimizer = create_optimizer(model, args)
-    scheduler = create_scheduler(optimizer, args, len(train_loader))
-    
-    # Create gradient scaler for mixed precision
-    scaler = GradScaler() if not args.no_mixed_precision and device.type == 'cuda' else None
+    scheduler = create_scheduler(optimizer, args, len(train_loader) // args.gradient_accumulation)
     
     # Training loop
     best_val_loss = float('inf')
+    
+    # Create weights directory if it doesn't exist
+    os.makedirs('weights', exist_ok=True)
     
     for epoch in range(start_epoch, args.epochs):
         print(f"\n{'='*50}")
@@ -368,53 +381,75 @@ def main():
         
         # Train
         train_loss, train_value_loss, train_policy_loss = train_epoch(
-            model, train_loader, optimizer, scheduler, scaler, args, device, epoch
+            model, train_loader, optimizer, scheduler, args, device, epoch, step_count
         )
         
         print(f"\nTrain - Loss: {train_loss:.4f}, Value: {train_value_loss:.4f}, Policy: {train_policy_loss:.4f}")
         
-        # Validate
-        val_loss, val_value_loss, val_policy_loss = validate(model, val_loader, device)
-        print(f"Val   - Loss: {val_loss:.4f}, Value: {val_value_loss:.4f}, Policy: {val_policy_loss:.4f}")
+        # Validate periodically
+        if (epoch + 1) % args.validate_every == 0:
+            val_loss, val_value_loss, val_policy_loss = validate(model, val_loader, device)
+            print(f"Val   - Loss: {val_loss:.4f}, Value: {val_value_loss:.4f}, Policy: {val_policy_loss:.4f}")
+            
+            # Check if this is the best model
+            is_best = val_loss < best_val_loss
+            if is_best:
+                best_val_loss = val_loss
+                # Save best model
+                if args.output:
+                    best_path = args.output.replace('.pt', '_best.pt')
+                else:
+                    best_path = f'weights/PieNano_{args.num_blocks}x{args.num_filters}_best.pt'
+                
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler['main'].state_dict() if scheduler['main'] else None,
+                    'train_loss': train_loss,
+                    'val_loss': val_loss,
+                    'best_val_loss': best_val_loss,
+                    'step_count': step_count[0],
+                    'args': args
+                }
+                torch.save(checkpoint, best_path)
+                print(f"Saved best model to {best_path} (val_loss: {val_loss:.4f})")
         
-        # Check if this is the best model
-        is_best = val_loss < best_val_loss
-        if is_best:
-            best_val_loss = val_loss
-        
-        # Check if this is the last epoch
-        is_last_epoch = (epoch == args.epochs - 1)
-        
-        # Create weights directory if it doesn't exist
-        os.makedirs('weights', exist_ok=True)
-        
-        # Prepare checkpoint
-        checkpoint = {
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-            'train_loss': train_loss,
-            'val_loss': val_loss,
-            'best_val_loss': best_val_loss,
-            'args': args
-        }
-        
-        # Save best model
-        if is_best:
+        # Save checkpoint periodically
+        if (epoch + 1) % args.save_every == 0:
             if args.output:
-                best_path = args.output.replace('.pt', '_best.pt')
+                checkpoint_path = args.output.replace('.pt', f'_epoch{epoch+1}.pt')
             else:
-                best_path = f'weights/PieBotNet_{args.num_blocks}x{args.num_filters}_best.pt'
-            torch.save(checkpoint, best_path)
-            print(f"Saved best model to {best_path} (val_loss: {val_loss:.4f})")
+                checkpoint_path = f'weights/PieNano_{args.num_blocks}x{args.num_filters}_epoch{epoch+1}.pt'
+            
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler['main'].state_dict() if scheduler['main'] else None,
+                'train_loss': train_loss,
+                'step_count': step_count[0],
+                'args': args
+            }
+            torch.save(checkpoint, checkpoint_path)
+            print(f"Saved checkpoint to {checkpoint_path}")
         
         # Save last epoch model
-        if is_last_epoch:
+        if epoch == args.epochs - 1:
             if args.output:
                 last_path = args.output
             else:
-                last_path = f'weights/PieBotNet_{args.num_blocks}x{args.num_filters}_last.pt'
+                last_path = f'weights/PieNano_{args.num_blocks}x{args.num_filters}_last.pt'
+            
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler['main'].state_dict() if scheduler['main'] else None,
+                'train_loss': train_loss,
+                'step_count': step_count[0],
+                'args': args
+            }
             torch.save(checkpoint, last_path)
             print(f"Saved final model to {last_path}")
     

@@ -1,8 +1,9 @@
 """
-Quantization utilities for AlphaZero neural network models.
+Quantization utilities for PieNano neural network models.
 
-This module provides functions to quantize AlphaZero models for improved inference performance,
+This module provides functions to quantize PieNano models for improved CPU inference performance,
 reducing model size and increasing throughput while maintaining accuracy.
+Optimized specifically for static quantization on CPU for deployment on low-end VPS.
 """
 
 import torch
@@ -14,153 +15,142 @@ import chess
 import numpy as np
 from typing import List, Tuple, Optional
 import encoder
-import AlphaZeroNetwork
-from device_utils import get_optimal_device, move_to_device
+from PieNanoNetwork import PieNano
+from device_utils import get_optimal_device
 
 
-class QuantizableAlphaZeroNet(nn.Module):
+class QuantizablePieNano(nn.Module):
     """
-    Quantization-ready version of AlphaZeroNet with quant/dequant stubs.
+    Quantization-ready version of PieNano with quant/dequant stubs for static quantization.
     """
     
-    def __init__(self, num_blocks, num_filters, policy_weight=1.0):
+    def __init__(self, base_model: PieNano):
         super().__init__()
         self.quant = QuantStub()
-        self.dequant = DeQuantStub()
+        self.dequant_value = DeQuantStub()
+        self.dequant_policy = DeQuantStub()
         
-        # Create the base model
-        self.base_model = AlphaZeroNetwork.AlphaZeroNet(num_blocks, num_filters, policy_weight)
+        # Copy the base model components
+        self.conv_block = base_model.conv_block
+        self.residual_tower = base_model.residual_tower
+        self.value_head = base_model.value_head
+        self.policy_head = base_model.policy_head
+        self.policy_weight = base_model.policy_weight
         
-    def forward(self, x, valueTarget=None, policyTarget=None, policyMask=None):
+    def forward(self, x, value_targets=None, policy_targets=None):
+        """
+        Forward pass with quantization stubs.
+        """
         # Quantize input
         x = self.quant(x)
         
-        # Forward through the model components
-        x = self.base_model.convBlock1(x)
+        # Forward through the model (matches PieNano forward)
+        x = self.conv_block(x)
+        x = self.residual_tower(x)
         
-        for block in self.base_model.residualBlocks:
-            x = block(x)
-        
-        # Split for value and policy heads
-        value = self.base_model.valueHead(x)
-        policy = self.base_model.policyHead(x)
+        # Compute heads
+        value_logits = self.value_head(x)
+        policy_logits = self.policy_head(x)
         
         # Dequantize outputs
-        value = self.dequant(value)
-        policy = self.dequant(policy)
+        value_logits = self.dequant_value(value_logits)
+        policy_logits = self.dequant_policy(policy_logits)
         
-        # Handle training vs inference
-        if self.training:
-            return self.base_model(x, valueTarget, policyTarget, policyMask)
+        # Return based on mode (training vs inference)
+        if value_targets is not None and policy_targets is not None:
+            # Training mode - compute losses (copy from PieNano)
+            # This shouldn't be used after quantization, but included for completeness
+            return self._compute_loss(value_logits, policy_logits, value_targets, policy_targets)
         else:
-            # Apply softmax for policy during inference
-            if policyMask is not None:
-                policyMask = policyMask.view(policyMask.shape[0], -1)
-                policy_exp = torch.exp(policy)
-                policy_exp *= policyMask.type(torch.float32)
-                policy_exp_sum = torch.sum(policy_exp, dim=1, keepdim=True)
-                policy_softmax = policy_exp / policy_exp_sum
-                return value, policy_softmax
-            return value, policy
+            # Inference mode
+            return policy_logits, value_logits
+    
+    def _compute_loss(self, value_logits, policy_logits, value_targets, policy_targets):
+        """Helper to compute losses (copied from PieNano)"""
+        import torch.nn.functional as F
+        
+        # Value loss (WDL uses CrossEntropy)
+        if value_targets.dim() == 1 or (value_targets.dim() == 2 and value_targets.size(1) == 1):
+            # Convert scalar values to WDL
+            wdl_targets = torch.zeros(value_targets.size(0), 3, device=value_targets.device)
+            value_targets = value_targets.view(-1)
+            
+            draw_prob = torch.exp(-4 * value_targets**2)
+            win_prob = torch.clamp((value_targets + 1) / 2 * (1 - draw_prob), 0, 1)
+            loss_prob = torch.clamp((1 - value_targets) / 2 * (1 - draw_prob), 0, 1)
+            
+            wdl_targets[:, 0] = win_prob
+            wdl_targets[:, 1] = draw_prob
+            wdl_targets[:, 2] = loss_prob
+            
+            wdl_targets = wdl_targets / wdl_targets.sum(dim=1, keepdim=True)
+            value_targets = wdl_targets
+        
+        value_loss = F.cross_entropy(value_logits, value_targets.argmax(dim=1))
+        
+        # Policy loss
+        if policy_targets.dim() == 1:
+            policy_loss = F.cross_entropy(policy_logits, policy_targets)
+        else:
+            log_probs = F.log_softmax(policy_logits, dim=1)
+            policy_loss = -(policy_targets * log_probs).sum() / policy_targets.size(0)
+        
+        total_loss = value_loss + self.policy_weight * policy_loss
+        
+        return total_loss, value_loss, policy_loss
 
 
-def prepare_model_for_quantization(model: AlphaZeroNetwork.AlphaZeroNet) -> QuantizableAlphaZeroNet:
+def prepare_pienano_for_quantization(model: PieNano) -> QuantizablePieNano:
     """
-    Prepare an AlphaZero model for quantization by wrapping it with quantization stubs.
+    Prepare a PieNano model for static quantization.
     
     Args:
-        model: Original AlphaZeroNet model
+        model: Original PieNano model
         
     Returns:
-        QuantizableAlphaZeroNet ready for quantization
+        QuantizablePieNano ready for quantization
     """
-    # Extract parameters
-    num_blocks = len(model.residualBlocks)
-    num_filters = model.convBlock1.conv1.out_channels
-    policy_weight = model.policy_weight
-    
     # Create quantizable model
-    quant_model = QuantizableAlphaZeroNet(num_blocks, num_filters, policy_weight)
+    quant_model = QuantizablePieNano(model)
     
-    # Copy weights
-    quant_model.base_model.load_state_dict(model.state_dict())
+    # Copy all parameters
+    quant_model.load_state_dict(model.state_dict(), strict=False)
     
     return quant_model
 
 
-class DynamicQuantizedAlphaZeroNet(nn.Module):
-    """
-    Wrapper for dynamically quantized AlphaZero model that handles inference only.
-    """
-    def __init__(self, model: AlphaZeroNetwork.AlphaZeroNet):
-        super().__init__()
-        # Check if quantization is supported
-        # Apply dynamic quantization
-        self.quantized_model = torch.quantization.quantize_dynamic(
-            model, 
-            qconfig_spec={nn.Linear, nn.Conv2d},
-            dtype=torch.qint8
-        )
-        
-    def forward(self, x, policyMask=None):
-        """
-        Forward pass for inference only.
-        """
-        # Set model to eval mode to ensure consistent behavior
-        self.quantized_model.eval()
-        
-        # Call the quantized model
-        with torch.no_grad():
-            value, policy = self.quantized_model(x, policyMask=policyMask)
-        
-        return value, policy
-
-
-def apply_dynamic_quantization(model: AlphaZeroNetwork.AlphaZeroNet) -> nn.Module:
-    """
-    Apply dynamic quantization to the model (easiest, no calibration needed).
-    Quantizes weights to INT8, keeps activations in FP32.
-    
-    Args:
-        model: Original AlphaZeroNet model
-        
-    Returns:
-        Dynamically quantized model wrapped for inference
-    """
-    # Set model to eval mode
-    model.eval()
-    
-    # Move model to CPU for quantization (quantization only works on CPU)
-    device = next(model.parameters()).device
-    model_cpu = model.cpu()
-    
-    # Create wrapper that handles dynamic quantization
-    quantized_wrapper = DynamicQuantizedAlphaZeroNet(model_cpu)
-    
-    # Note: Quantized models must run on CPU, even on CUDA systems
-    print("Note: Quantized model will run on CPU for inference")
-    
-    return quantized_wrapper
-
-
-def create_calibration_dataset(num_positions: int = 1000) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+def create_calibration_dataset(num_positions: int = 500, enhanced_encoder: bool = False) -> List[torch.Tensor]:
     """
     Create a calibration dataset from various chess positions.
+    Optimized for PieNano with smaller dataset for faster calibration.
     
     Args:
-        num_positions: Number of positions to generate
+        num_positions: Number of positions to generate (default 500 for faster calibration)
+        enhanced_encoder: Whether to use 112-plane encoder
         
     Returns:
-        List of (input_tensor, mask_tensor) tuples
+        List of input tensors for calibration
     """
     calibration_data = []
     
-    # Generate positions from different game phases
+    print(f"Generating {num_positions} calibration positions...")
+    
+    # Generate positions from different game phases for diversity
     for i in range(num_positions):
         board = chess.Board()
         
+        # Vary game phase: opening (0-10), middle (10-40), endgame (40+)
+        if i < num_positions // 3:
+            # Opening positions
+            num_moves = np.random.randint(0, 10)
+        elif i < 2 * num_positions // 3:
+            # Middle game positions
+            num_moves = np.random.randint(10, 40)
+        else:
+            # Endgame positions
+            num_moves = np.random.randint(40, 80)
+        
         # Play random moves to get diverse positions
-        num_moves = np.random.randint(0, 60)  # 0-60 moves
         for _ in range(num_moves):
             legal_moves = list(board.legal_moves)
             if not legal_moves:
@@ -169,157 +159,160 @@ def create_calibration_dataset(num_positions: int = 1000) -> List[Tuple[torch.Te
             board.push(move)
         
         # Encode the position
-        input_planes = encoder.encodePosition(board)
+        if enhanced_encoder:
+            import encoder_enhanced
+            input_planes = encoder_enhanced.encode_enhanced_position(board)
+        else:
+            input_planes = encoder.encodePosition(board)
+        
         input_tensor = torch.tensor(input_planes, dtype=torch.float32).unsqueeze(0)
+        calibration_data.append(input_tensor)
         
-        # Create legal move mask
-        mask = encoder.getLegalMoveMask(board)
-        mask_tensor = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)
-        
-        calibration_data.append((input_tensor, mask_tensor))
+        # Progress indicator
+        if (i + 1) % 100 == 0:
+            print(f"  Generated {i + 1}/{num_positions} positions")
     
     return calibration_data
 
 
-def calibrate_model(model: nn.Module, calibration_data: List[Tuple[torch.Tensor, torch.Tensor]],
-                   device: torch.device) -> None:
+def calibrate_model(model: nn.Module, calibration_data: List[torch.Tensor]) -> None:
     """
-    Calibrate the model for static quantization.
+    Calibrate the model for static quantization using representative data.
     
     Args:
-        model: Model prepared for quantization
+        model: Model prepared for quantization (with observers)
         calibration_data: List of calibration samples
-        device: Device to run calibration on
     """
     model.eval()
-    model.to(device)
+    model.cpu()  # Quantization calibration must be on CPU
+    
+    print("Calibrating model for static quantization...")
     
     with torch.no_grad():
-        for idx, (input_tensor, mask_tensor) in enumerate(calibration_data):
-            input_tensor = input_tensor.to(device)
-            mask_tensor = mask_tensor.to(device)
-            
-            # Run forward pass for calibration
-            # Only pass required arguments for inference
-            _ = model(input_tensor, policyMask=mask_tensor)
+        for idx, input_tensor in enumerate(calibration_data):
+            # Run forward pass for calibration (inference mode)
+            _ = model(input_tensor.cpu())
             
             # Progress indicator
             if (idx + 1) % 100 == 0:
-                print(f"Calibrated on {idx + 1}/{len(calibration_data)} positions")
+                print(f"  Calibrated on {idx + 1}/{len(calibration_data)} positions")
 
 
-def apply_static_quantization(model: AlphaZeroNetwork.AlphaZeroNet,
-                            calibration_data: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
-                            backend: str = 'fbgemm') -> nn.Module:
+def apply_dynamic_quantization(model: PieNano) -> nn.Module:
     """
-    Apply static quantization with calibration.
+    Apply dynamic INT8 quantization to PieNano model for CPU inference.
+    This quantizes weights to INT8 while keeping activations in FP32.
+    Simpler and more compatible than static quantization.
     
     Args:
-        model: Original AlphaZeroNet model
-        calibration_data: Calibration dataset (if None, will generate)
-        backend: Quantization backend ('fbgemm' for x86, 'qnnpack' for ARM/mobile)
+        model: Original PieNano model
         
     Returns:
-        Statically quantized model
+        Dynamically quantized model
     """
-    # Move model to CPU for quantization
-    device = next(model.parameters()).device
+    # Move model to CPU (required for quantization)
     model = model.cpu()
+    model.eval()
     
-    # Set quantization backend - use fbgemm for Windows/Linux x86
-    import platform
-    if platform.system() == "Windows":
-        backend = 'fbgemm'
-    torch.backends.quantized.engine = backend
+    # Apply dynamic quantization to Linear and Conv2d layers
+    quantized_model = torch.quantization.quantize_dynamic(
+        model,
+        qconfig_spec={nn.Linear, nn.Conv2d},
+        dtype=torch.qint8
+    )
+    
+    print("Dynamic quantization complete!")
+    print("Note: Weights are INT8, activations remain FP32")
+    
+    return quantized_model
+
+
+def apply_static_quantization(model: PieNano,
+                            calibration_data: Optional[List[torch.Tensor]] = None,
+                            backend: str = 'auto') -> nn.Module:
+    """
+    Apply static INT8 quantization to PieNano model for CPU inference.
+    This is the recommended approach for deployment on VPS.
+    
+    Args:
+        model: Original PieNano model
+        calibration_data: Calibration dataset (if None, will generate)
+        backend: Quantization backend ('fbgemm' for x86, 'qnnpack' for ARM, 'auto' to detect)
+        
+    Returns:
+        Statically quantized model (INT8 weights and activations)
+    """
+    # Move model to CPU (required for quantization)
+    model = model.cpu()
+    model.eval()
+    
+    # Auto-detect backend if needed
+    if backend == 'auto':
+        import platform
+        system = platform.system()
+        machine = platform.machine()
+        
+        if system == 'Darwin':  # macOS
+            # macOS doesn't support fbgemm, use qnnpack
+            backend = 'qnnpack'
+        elif machine.startswith('arm') or machine == 'aarch64':
+            backend = 'qnnpack'
+        else:
+            # x86 Linux/Windows
+            backend = 'fbgemm'
+    
+    # Set quantization backend
+    try:
+        torch.backends.quantized.engine = backend
+        print(f"Using quantization backend: {backend}")
+    except RuntimeError as e:
+        # Fallback to qnnpack if fbgemm isn't available
+        if 'fbgemm' in str(e).lower():
+            print(f"FBGEMM not available, falling back to QNNPACK")
+            backend = 'qnnpack'
+            torch.backends.quantized.engine = backend
+        else:
+            raise
     
     # Prepare model for quantization
-    quant_model = prepare_model_for_quantization(model)
+    quant_model = prepare_pienano_for_quantization(model)
+    quant_model.eval()
     
-    # Set quantization config
-    # Use per-tensor quantization to avoid per_channel_affine error
+    # Set quantization config for static quantization
+    # Use fbgemm for x86 CPUs (VPS), qnnpack for ARM
     if backend == 'fbgemm':
-        # For x86 CPUs, use per-tensor quantization
-        quant_model.qconfig = torch.quantization.QConfig(
-            activation=torch.quantization.default_observer,
-            weight=torch.quantization.default_weight_observer
-        )
+        quant_model.qconfig = torch.quantization.get_default_qconfig('fbgemm')
     else:
-        # For other backends (ARM/mobile)
-        quant_model.qconfig = torch.quantization.get_default_qconfig(backend)
+        quant_model.qconfig = torch.quantization.get_default_qconfig('qnnpack')
+    
+    # Skip module fusion for now due to the complex architecture
+    # Module fusion would require careful handling of depthwise separable convs
     
     # Prepare model (insert observers)
     torch.quantization.prepare(quant_model, inplace=True)
     
     # Generate calibration data if not provided
     if calibration_data is None:
-        print("Generating calibration dataset...")
-        calibration_data = create_calibration_dataset(1000)
+        # Detect encoder type from model
+        num_input_planes = quant_model.conv_block[0].in_channels
+        enhanced = (num_input_planes == 112)
+        calibration_data = create_calibration_dataset(500, enhanced_encoder=enhanced)
     
-    # Calibrate the model on CPU (required for quantization)
-    print(f"Calibrating model on CPU...")
-    calibrate_model(quant_model, calibration_data, torch.device('cpu'))
+    # Calibrate the model
+    calibrate_model(quant_model, calibration_data)
     
     # Convert to quantized model
-    print("Converting to quantized model...")
+    print("Converting to INT8 quantized model...")
     quantized_model = torch.quantization.convert(quant_model)
     
+    print("Static quantization complete!")
     return quantized_model
 
 
-class FP16OptimizedAlphaZeroNet(nn.Module):
+def save_quantized_model(quantized_model: nn.Module, original_path: str, 
+                        suffix: str = "_quantized") -> str:
     """
-    Wrapper for FP16 (half precision) optimized model with automatic mixed precision.
-    """
-    def __init__(self, model: AlphaZeroNetwork.AlphaZeroNet, device: torch.device):
-        super().__init__()
-        self.model = model.half().to(device)
-        self.device = device
-        
-    def forward(self, x, policyMask=None):
-        """
-        Forward pass with FP16 optimization.
-        """
-        # Ensure inputs are FP16
-        x = x.half()
-        if policyMask is not None:
-            policyMask = policyMask.half()
-        
-        # Run inference
-        with torch.cuda.amp.autocast(enabled=True):
-            return self.model(x, policyMask=policyMask)
-
-
-def apply_fp16_optimization(model: AlphaZeroNetwork.AlphaZeroNet, device: torch.device) -> nn.Module:
-    """
-    Apply FP16 (half precision) optimization for GPU/MPS inference.
-    This is an alternative to quantization that works on GPU.
-    
-    Args:
-        model: Original AlphaZeroNet model
-        device: Target device (cuda or mps)
-        
-    Returns:
-        FP16 optimized model
-    """
-    if device.type not in ['cuda', 'mps']:
-        print("FP16 optimization is only beneficial on GPU/MPS. Returning original model.")
-        return model
-    
-    # Set model to eval mode
-    model.eval()
-    
-    # Create FP16 wrapper
-    fp16_model = FP16OptimizedAlphaZeroNet(model, device)
-    
-    print(f"Model converted to FP16 for {device.type.upper()} inference")
-    print("Note: This provides ~2x memory reduction and faster inference on modern GPUs")
-    
-    return fp16_model
-
-
-def save_quantized_model(quantized_model: nn.Module, original_path: str, suffix: str = "_quantized") -> str:
-    """
-    Save quantized model with appropriate naming.
+    Save quantized PieNano model with metadata.
     
     Args:
         quantized_model: The quantized model
@@ -332,183 +325,134 @@ def save_quantized_model(quantized_model: nn.Module, original_path: str, suffix:
     base, ext = os.path.splitext(original_path)
     quantized_path = f"{base}{suffix}{ext}"
     
-    # Handle different model types
-    if isinstance(quantized_model, DynamicQuantizedAlphaZeroNet):
-        # Save the state dict for dynamic quantized
-        torch.save({
-            'model_state_dict': quantized_model.quantized_model.state_dict(),
-            'model_type': 'dynamic_quantized'
-        }, quantized_path)
-    elif isinstance(quantized_model, FP16OptimizedAlphaZeroNet):
-        # Save FP16 model with metadata
-        torch.save({
-            'model_state_dict': quantized_model.model.state_dict(),
-            'model_type': 'fp16',
-            'device_type': quantized_model.device.type
-        }, quantized_path)
-    elif hasattr(quantized_model, 'qconfig'):
-        # For static quantized models, save the state dict with metadata
-        # TorchScript saving can fail for some quantized models
-        torch.save({
-            'model_state_dict': quantized_model.state_dict(),
-            'model_type': 'static_quantized',
-            'quantization_backend': torch.backends.quantized.engine
-        }, quantized_path)
-    else:
-        # For regular models, save normally
+    # Try to save as TorchScript (for static quantization)
+    try:
+        torch.jit.save(torch.jit.script(quantized_model), quantized_path)
+    except:
+        # Fallback to regular save for dynamic quantization
         torch.save(quantized_model.state_dict(), quantized_path)
     
     # Print size comparison
-    original_size = os.path.getsize(original_path) / (1024 * 1024)  # MB
-    quantized_size = os.path.getsize(quantized_path) / (1024 * 1024)  # MB
-    reduction = (1 - quantized_size / original_size) * 100
-    
-    print(f"\nModel size comparison:")
-    print(f"Original: {original_size:.2f} MB")
-    print(f"Quantized: {quantized_size:.2f} MB")
-    print(f"Size reduction: {reduction:.1f}%")
+    if os.path.exists(original_path):
+        original_size = os.path.getsize(original_path) / (1024 * 1024)  # MB
+        quantized_size = os.path.getsize(quantized_path) / (1024 * 1024)  # MB
+        reduction = (1 - quantized_size / original_size) * 100
+        
+        print(f"\nModel size comparison:")
+        print(f"  Original: {original_size:.2f} MB")
+        print(f"  Quantized: {quantized_size:.2f} MB")
+        print(f"  Size reduction: {reduction:.1f}%")
+        print(f"\nExpected speedup: 2-4x on CPU inference")
     
     return quantized_path
 
 
-def load_quantized_model(model_path: str, device: torch.device, 
-                        num_blocks: int = None, num_filters: int = None) -> nn.Module:
+def load_quantized_model(model_path: str) -> nn.Module:
     """
-    Load a quantized model from file.
+    Load a quantized PieNano model from file.
     
     Args:
         model_path: Path to quantized model file
-        device: Device to load model on
-        num_blocks: Number of residual blocks (for dynamic quantized models)
-        num_filters: Number of filters (for dynamic quantized models)
         
     Returns:
-        Loaded quantized model
+        Loaded quantized model ready for inference
     """
-    try:
-        # Try loading as TorchScript (static quantized)
-        model = torch.jit.load(model_path, map_location=device)
-        model.eval()
-        return model
-    except:
-        # Try loading as state dict
-        checkpoint = torch.load(model_path, map_location=device)
-        
-        # Check if it's a static quantized model by its structure
-        is_static_quantized = (isinstance(checkpoint, dict) and 
-                             'quant.scale' in checkpoint and 
-                             any(k.startswith('base_model.') for k in checkpoint.keys()))
-        
-        if checkpoint.get('model_type') == 'dynamic_quantized':
-            # Need to reconstruct the model
-            if num_blocks is None or num_filters is None:
-                raise ValueError("For dynamic quantized models, num_blocks and num_filters must be provided")
-            
-            # Create base model
-            base_model = AlphaZeroNetwork.AlphaZeroNet(num_blocks, num_filters)
-            base_model.load_state_dict(checkpoint['model_state_dict'])
-            
-            # Apply dynamic quantization
-            quantized_model = apply_dynamic_quantization(base_model)
-            return quantized_model
-        elif checkpoint.get('model_type') == 'static_quantized' or is_static_quantized:
-            # Static quantized model saved as state dict
-            if num_blocks is None or num_filters is None:
-                raise ValueError("For static quantized models, num_blocks and num_filters must be provided")
-            
-            # For static quantized models that can't be loaded as TorchScript,
-            # we'll dequantize them and use as regular models
-            # This is a fallback for platforms without quantization support
-            print("Loading static quantized model as dequantized regular model...")
-            
-            # Create a regular model
-            model = AlphaZeroNetwork.AlphaZeroNet(num_blocks, num_filters)
-            
-            # Extract and dequantize weights
-            new_state_dict = {}
-            for key, value in checkpoint.items():
-                if key.startswith('base_model.'):
-                    new_key = key.replace('base_model.', '')
-                    # Skip quantization-specific keys
-                    if any(x in new_key for x in ['.scale', '.zero_point', '_packed_params']):
-                        continue
-                    # Dequantize if needed
-                    if hasattr(value, 'dequantize'):
-                        new_state_dict[new_key] = value.dequantize()
-                    elif hasattr(value, '_data'):  # QuantizedTensor
-                        new_state_dict[new_key] = value.dequantize()
-                    else:
-                        new_state_dict[new_key] = value
-                elif not any(x in key for x in ['quant.', 'dequant.']):
-                    # For non-base_model keys that aren't quant/dequant
-                    if hasattr(value, 'dequantize'):
-                        new_state_dict[key] = value.dequantize()
-                    elif hasattr(value, '_data'):  # QuantizedTensor
-                        new_state_dict[key] = value.dequantize()
-                    else:
-                        new_state_dict[key] = value
-            
-            model.load_state_dict(new_state_dict, strict=False)
-            model.to(device)
-            model.eval()
-            print("Loaded dequantized model successfully")
-            return model
-        else:
-            raise ValueError(f"Unknown model format in {model_path}")
+    # Load as TorchScript
+    model = torch.jit.load(model_path, map_location='cpu')
+    model.eval()
+    
+    print(f"Loaded quantized model from {model_path}")
+    print("Model is ready for CPU inference")
+    
+    return model
 
 
-def compare_model_outputs(original_model: nn.Module, quantized_model: nn.Module,
-                         test_positions: List[Tuple[torch.Tensor, torch.Tensor]],
-                         device: torch.device) -> dict:
+def benchmark_quantized_model(original_model: PieNano, quantized_model: nn.Module,
+                             num_positions: int = 100) -> dict:
     """
-    Compare outputs between original and quantized models.
+    Benchmark the quantized model against the original.
     
     Args:
-        original_model: Original FP32 model
-        quantized_model: Quantized model
-        test_positions: List of test positions
-        device: Device to run comparison on
+        original_model: Original FP32 PieNano model
+        quantized_model: Quantized INT8 model
+        num_positions: Number of test positions
         
     Returns:
-        Dictionary with comparison metrics
+        Dictionary with benchmark results
     """
+    import time
+    
+    print(f"\nBenchmarking models on {num_positions} positions...")
+    
+    # Detect encoder type
+    num_input_planes = original_model.conv_block[0].in_channels
+    enhanced = (num_input_planes == 112)
+    
+    # Generate test positions
+    test_positions = []
+    for _ in range(num_positions):
+        board = chess.Board()
+        num_moves = np.random.randint(0, 60)
+        for _ in range(num_moves):
+            legal_moves = list(board.legal_moves)
+            if not legal_moves:
+                break
+            board.push(np.random.choice(legal_moves))
+        
+        if enhanced:
+            import encoder_enhanced
+            input_planes = encoder_enhanced.encode_enhanced_position(board)
+        else:
+            input_planes = encoder.encodePosition(board)
+        
+        test_positions.append(torch.tensor(input_planes, dtype=torch.float32).unsqueeze(0))
+    
+    # Benchmark original model
     original_model.eval()
-    quantized_model.eval()
-    original_model.to(device)
+    original_model.cpu()
     
-    value_diffs = []
-    policy_diffs = []
-    
+    start_time = time.time()
     with torch.no_grad():
-        for input_tensor, mask_tensor in test_positions:
-            input_tensor = input_tensor.to(device)
-            mask_tensor = mask_tensor.to(device)
-            
-            # Get outputs from both models
-            orig_value, orig_policy = original_model(input_tensor, policyMask=mask_tensor)
-            
-            # For quantized model, need to handle CPU execution
-            if hasattr(quantized_model, 'forward'):
-                input_cpu = input_tensor.cpu()
-                mask_cpu = mask_tensor.cpu()
-                quant_value, quant_policy = quantized_model(input_cpu, policyMask=mask_cpu)
-                quant_value = quant_value.to(device)
-                quant_policy = quant_policy.to(device)
-            else:
-                quant_value, quant_policy = quantized_model(input_tensor, policyMask=mask_tensor)
-            
-            # Calculate differences
-            value_diff = torch.abs(orig_value - quant_value).mean().item()
-            policy_diff = torch.abs(orig_policy - quant_policy).mean().item()
-            
-            value_diffs.append(value_diff)
-            policy_diffs.append(policy_diff)
+        for pos in test_positions:
+            _ = original_model(pos)
+    original_time = time.time() - start_time
     
-    return {
-        'avg_value_diff': np.mean(value_diffs),
-        'max_value_diff': np.max(value_diffs),
-        'avg_policy_diff': np.mean(policy_diffs),
-        'max_policy_diff': np.max(policy_diffs),
-        'value_rmse': np.sqrt(np.mean(np.square(value_diffs))),
-        'policy_rmse': np.sqrt(np.mean(np.square(policy_diffs)))
+    # Benchmark quantized model
+    quantized_model.eval()
+    
+    start_time = time.time()
+    with torch.no_grad():
+        for pos in test_positions:
+            _ = quantized_model(pos)
+    quantized_time = time.time() - start_time
+    
+    # Calculate speedup
+    speedup = original_time / quantized_time
+    
+    # Compare outputs on a sample
+    with torch.no_grad():
+        sample_input = test_positions[0]
+        orig_policy, orig_value = original_model(sample_input)
+        quant_policy, quant_value = quantized_model(sample_input)
+        
+        policy_diff = torch.abs(orig_policy - quant_policy).mean().item()
+        value_diff = torch.abs(orig_value - quant_value).mean().item()
+    
+    results = {
+        'original_time': original_time,
+        'quantized_time': quantized_time,
+        'speedup': speedup,
+        'positions_per_second_original': num_positions / original_time,
+        'positions_per_second_quantized': num_positions / quantized_time,
+        'policy_diff': policy_diff,
+        'value_diff': value_diff
     }
+    
+    print(f"\nBenchmark Results:")
+    print(f"  Original model: {results['positions_per_second_original']:.1f} pos/sec")
+    print(f"  Quantized model: {results['positions_per_second_quantized']:.1f} pos/sec")
+    print(f"  Speedup: {speedup:.2f}x")
+    print(f"  Policy difference: {policy_diff:.6f}")
+    print(f"  Value difference: {value_diff:.6f}")
+    
+    return results
