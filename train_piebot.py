@@ -17,8 +17,8 @@ from tqdm import tqdm
 
 # Training params (defaults)
 default_epochs = 500
-default_blocks = 24
-default_filters = 256
+default_blocks = 36
+default_filters = 384
 default_lr = 0.001
 default_policy_weight = 1.0
 ccrl_dir = os.path.abspath('games_training_data/reformatted/')
