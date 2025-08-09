@@ -24,8 +24,8 @@ default_num_layers = 15
 default_d_model = 1024
 default_num_heads = 16
 default_d_ff = 4096
-default_lr = 1e-4
-default_warmup_epochs = 1
+default_lr = 5e-5
+default_warmup_epochs = 3
 default_policy_weight = 1.0
 ccrl_dir = os.path.abspath('games_training_data/reformatted/')
 rl_dir = os.path.abspath('games_training_data/selfplay/')
@@ -367,8 +367,8 @@ def train():
     try:
         if not (0.0 < pct < 1.0):
             raise ValueError
-        scheduler = OneCycleLR(optimizer, max_lr=args.lr * 3, total_steps=total_steps, pct_start=pct,
-                               anneal_strategy='cos', div_factor=10, final_div_factor=100)
+        scheduler = OneCycleLR(optimizer, max_lr=args.lr * 2, total_steps=total_steps, pct_start=pct,
+                               anneal_strategy='cos', div_factor=25, final_div_factor=100)
     except Exception:
         scheduler = None
 
