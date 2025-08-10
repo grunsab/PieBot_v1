@@ -91,8 +91,15 @@ class PieNanoV2(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
     
-    def forward(self, x, value_targets=None, policy_targets=None):
-        """Forward pass with optional loss computation."""
+    def forward(self, x, value_targets=None, policy_targets=None, policyMask=None):
+        """Forward pass with optional loss computation.
+        
+        Args:
+            x: Input board positions
+            value_targets: Target values for training (optional)
+            policy_targets: Target policies for training (optional)
+            policyMask: Legal move mask (optional, not used but accepted for compatibility)
+        """
         # Feature extraction
         x = self.conv_block(x)
         x = self.residual_tower(x)
@@ -106,8 +113,13 @@ class PieNanoV2(nn.Module):
             # Training mode - compute losses
             return self._compute_loss(value_logits, policy_logits, value_targets, policy_targets)
         else:
-            # Inference mode
-            return policy_logits, value_logits
+            # Inference mode - return value first (as expected by MCTS)
+            # Convert WDL logits to scalar value for MCTS
+            # Apply softmax to get probabilities
+            wdl_probs = F.softmax(value_logits, dim=1)
+            # Convert to scalar: win_prob - loss_prob (draw_prob is neutral)
+            value_scalar = wdl_probs[:, 0:1] - wdl_probs[:, 2:3]  # Keep dimensions for compatibility
+            return value_scalar, policy_logits
     
     def _compute_loss(self, value_logits, policy_logits, value_targets, policy_targets):
         """Compute training losses."""

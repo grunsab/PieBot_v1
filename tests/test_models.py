@@ -8,12 +8,41 @@ import chess.pgn
 import MCTS
 import torch
 import AlphaZeroNetwork
+import PieBotNetwork
+import PieNanoNetwork
+import PieNanoNetwork_v2
 import time
 from device_utils import get_optimal_device, optimize_for_device
 from quantization_utils import load_quantized_model
 from datetime import datetime
 import io
 from chess_openings import get_opening, get_total_openings
+
+def detect_model_type(weights):
+    """Detect whether this is an AlphaZeroNet, PieBotNet, PieNano, or PieNanoV2 model."""
+    if isinstance(weights, dict):
+        # Check state dict keys to determine model type
+        state_dict = weights.get('model_state_dict', weights)
+        
+        # PieBotNet has specific modules like positional_encoding and transformer_blocks
+        has_positional_encoding = any('positional_encoding' in key for key in state_dict.keys())
+        has_transformer = any('transformer_blocks' in key for key in state_dict.keys())
+        
+        # PieNano models have SE (Squeeze-Excitation) modules and depthwise convolutions
+        has_se = any('se.' in key or 'squeeze' in key or 'excitation' in key for key in state_dict.keys())
+        has_depthwise = any('depthwise' in key for key in state_dict.keys())
+        has_wdl_value = any('value_head.fc2' in key for key in state_dict.keys())
+        
+        # PieNanoV2 has the improved policy head with fc1 and fc2 in policy_head
+        has_improved_policy = any('policy_head.fc1' in key or 'policy_head.fc2' in key for key in state_dict.keys())
+        
+        if has_positional_encoding or has_transformer:
+            return 'PieBotNet'
+        elif has_improved_policy and (has_se or has_depthwise):
+            return 'PieNanoV2'
+        elif (has_se or has_depthwise) and has_wdl_value:
+            return 'PieNano'
+    return 'AlphaZeroNet'
 
 def load_model(model_file, device_hint=None):
     """
@@ -34,7 +63,7 @@ def load_model(model_file, device_hint=None):
         device_str = str(device)
     
     # Always load to CPU first to check model type
-    weights = torch.load(model_file, map_location='cpu')
+    weights = torch.load(model_file, map_location='cpu', weights_only=False)
     
     # Check if it's a static quantized model
     is_static_quantized = (isinstance(weights, dict) and 
@@ -77,8 +106,21 @@ def load_model(model_file, device_hint=None):
                 model.eval()
                 print(f"Loaded dequantized model on {device_str} for {model_file}")
     else:
-        # Create regular model
-        model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
+        # Detect and create the appropriate model type
+        model_type = detect_model_type(weights)
+        
+        if model_type == 'PieBotNet':
+            model = PieBotNetwork.PieBotNet()
+            print(f"Detected PieBotNet model")
+        elif model_type == 'PieNanoV2':
+            model = PieNanoNetwork_v2.PieNanoV2(num_blocks=8, num_filters=128)
+            print(f"Detected PieNanoV2 model")
+        elif model_type == 'PieNano':
+            model = PieNanoNetwork.PieNano(num_blocks=8, num_filters=128)
+            print(f"Detected PieNano model")
+        else:
+            model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
+            print(f"Detected AlphaZeroNet model")
         
         # Handle different model formats
         if isinstance(weights, dict) and 'model_state_dict' in weights:
@@ -87,6 +129,8 @@ def load_model(model_file, device_hint=None):
             if weights.get('model_type') == 'fp16':
                 model = model.half()
                 print(f"Loaded FP16 model on {device_str} for {model_file}")
+            else:
+                print(f"Loaded model on {device_str} for {model_file}")
         else:
             # Regular model format
             model.load_state_dict(weights)

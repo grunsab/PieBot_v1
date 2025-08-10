@@ -15,6 +15,9 @@ import random
 import multiprocessing as mp
 from functools import partial
 from AlphaZeroNetwork import AlphaZeroNet
+import PieBotNetwork
+import PieNanoNetwork
+import PieNanoNetwork_v2
 from encoder import encodePositionForInference, callNeuralNetworkBatched, decodePolicyOutput
 from device_utils import get_optimal_device, optimize_for_device, get_batch_size_for_device
 import sys
@@ -167,18 +170,63 @@ def benchmark_neural_network(model_path, num_positions=10000, batch_size=None, s
     
     # Load model
     print(f"Loading model from {model_path}...")
-    checkpoint = torch.load(model_path, map_location=device)
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
 
-    # Extract model configuration
-    if 'model_config' in checkpoint:
-        num_blocks = checkpoint['model_config']['num_blocks']
-        num_filters = checkpoint['model_config']['num_filters']
-    else:
-        # Default configuration
-        num_blocks = 20
-        num_filters = 256
+    # Detect model type
+    def detect_model_type(weights):
+        """Detect whether this is an AlphaZeroNet, PieBotNet, PieNano, or PieNanoV2 model."""
+        if isinstance(weights, dict):
+            state_dict = weights.get('model_state_dict', weights)
+            
+            # PieBotNet has specific modules
+            has_positional_encoding = any('positional_encoding' in key for key in state_dict.keys())
+            has_transformer = any('transformer_blocks' in key for key in state_dict.keys())
+            
+            # PieNano models have SE modules and depthwise convolutions
+            has_se = any('se.' in key or 'squeeze' in key or 'excitation' in key for key in state_dict.keys())
+            has_depthwise = any('depthwise' in key for key in state_dict.keys())
+            has_wdl_value = any('value_head.fc2' in key for key in state_dict.keys())
+            
+            # PieNanoV2 has improved policy head
+            has_improved_policy = any('policy_head.fc1' in key or 'policy_head.fc2' in key for key in state_dict.keys())
+            
+            if has_positional_encoding or has_transformer:
+                return 'PieBotNet'
+            elif has_improved_policy and (has_se or has_depthwise):
+                return 'PieNanoV2'
+            elif (has_se or has_depthwise) and has_wdl_value:
+                return 'PieNano'
+        return 'AlphaZeroNet'
     
-    model = AlphaZeroNet(num_blocks, num_filters)
+    model_type = detect_model_type(checkpoint)
+    
+    # Create appropriate model
+    if model_type == 'PieBotNet':
+        model = PieBotNetwork.PieBotNet()
+        print(f"Detected PieBotNet model")
+        num_blocks = "N/A"
+        num_filters = "N/A"
+    elif model_type == 'PieNanoV2':
+        model = PieNanoNetwork_v2.PieNanoV2(num_blocks=8, num_filters=128)
+        print(f"Detected PieNanoV2 model")
+        num_blocks = 8
+        num_filters = 128
+    elif model_type == 'PieNano':
+        model = PieNanoNetwork.PieNano(num_blocks=8, num_filters=128)
+        print(f"Detected PieNano model")
+        num_blocks = 8
+        num_filters = 128
+    else:
+        # Extract model configuration for AlphaZeroNet
+        if 'model_config' in checkpoint:
+            num_blocks = checkpoint['model_config']['num_blocks']
+            num_filters = checkpoint['model_config']['num_filters']
+        else:
+            # Default configuration
+            num_blocks = 20
+            num_filters = 256
+        model = AlphaZeroNet(num_blocks, num_filters)
+        print(f"Detected AlphaZeroNet model")
     # Create and load model
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
         # FP16 model format
@@ -351,7 +399,10 @@ def benchmark_neural_network(model_path, num_positions=10000, batch_size=None, s
     print("BENCHMARK RESULTS")
     print("="*60)
     print(f"Device: {device_str}")
-    print(f"Model: {num_blocks} blocks x {num_filters} filters")
+    if isinstance(num_blocks, int) and isinstance(num_filters, int):
+        print(f"Model: {num_blocks} blocks x {num_filters} filters")
+    else:
+        print(f"Model: {model_type}")
     print(f"Batch size: {batch_size}")
     print(f"CPU processes: {num_processes}")
     print(f"Total positions evaluated: {total_evaluations}")

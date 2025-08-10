@@ -204,7 +204,7 @@ class PieNano(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
                     
-    def forward(self, x, value_targets=None, policy_targets=None):
+    def forward(self, x, value_targets=None, policy_targets=None, policyMask=None):
         """
         Performs the forward pass of the network.
         
@@ -212,6 +212,7 @@ class PieNano(nn.Module):
             x: Input board positions
             value_targets: Target values for training (optional)
             policy_targets: Target policies for training (optional)
+            policyMask: Legal move mask (optional, not used by PieNano but accepted for compatibility)
             
         Returns:
             During training: (loss, value_loss, policy_loss)
@@ -270,6 +271,11 @@ class PieNano(nn.Module):
             
             return total_loss, value_loss, policy_loss
         else:
-            # Inference mode
-            return policy_logits, value_logits
+            # Inference mode - return value first (as expected by MCTS)
+            # Convert WDL logits to scalar value for MCTS
+            # Apply softmax to get probabilities
+            wdl_probs = F.softmax(value_logits, dim=1)
+            # Convert to scalar: win_prob - loss_prob (draw_prob is neutral)
+            value_scalar = wdl_probs[:, 0:1] - wdl_probs[:, 2:3]  # Keep dimensions for compatibility
+            return value_scalar, policy_logits
 

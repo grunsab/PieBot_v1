@@ -1,10 +1,12 @@
 
 import argparse
 import chess
-import MCTS_root_parallel as MCTS
+import MCTS_profiling_speedups_v2 as MCTS
 import torch
 import AlphaZeroNetwork
 import PieBotNetwork
+import PieNanoNetwork
+import PieNanoNetwork_v2
 import time
 from device_utils import get_optimal_device, optimize_for_device, get_gpu_count
 
@@ -24,7 +26,7 @@ def tolist( move_generator ):
     return moves
 
 def detect_model_type(weights):
-    """Detect whether this is an AlphaZeroNet or PieBotNet model."""
+    """Detect whether this is an AlphaZeroNet, PieBotNet, PieNano, or PieNanoV2 model."""
     if isinstance(weights, dict):
         # Check state dict keys to determine model type
         state_dict = weights.get('model_state_dict', weights)
@@ -33,8 +35,20 @@ def detect_model_type(weights):
         has_positional_encoding = any('positional_encoding' in key for key in state_dict.keys())
         has_transformer = any('transformer_blocks' in key for key in state_dict.keys())
         
+        # PieNano models have SE (Squeeze-Excitation) modules and depthwise convolutions
+        has_se = any('se.' in key or 'squeeze' in key or 'excitation' in key for key in state_dict.keys())
+        has_depthwise = any('depthwise' in key for key in state_dict.keys())
+        has_wdl_value = any('value_head.fc2' in key for key in state_dict.keys())
+        
+        # PieNanoV2 has the improved policy head with fc1 and fc2 in policy_head
+        has_improved_policy = any('policy_head.fc1' in key or 'policy_head.fc2' in key for key in state_dict.keys())
+        
         if has_positional_encoding or has_transformer:
             return 'PieBotNet'
+        elif has_improved_policy and (has_se or has_depthwise):
+            return 'PieNanoV2'
+        elif (has_se or has_depthwise) and has_wdl_value:
+            return 'PieNano'
     return 'AlphaZeroNet'
 
 def load_model_multi_gpu(model_file, gpu_ids=None):
@@ -63,7 +77,7 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
         print(f'Using device: {device_str}')
         
         # Load weights to check model type
-        weights = torch.load(model_file, map_location='cpu')
+        weights = torch.load(model_file, map_location='cpu', weights_only=False)
         
         # Detect and create the appropriate model type
         model_type = detect_model_type(weights)
@@ -71,6 +85,14 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
             # Use default PieBotNet configuration
             model = PieBotNetwork.PieBotNet()
             print(f"Loading PieBotNet model on {device_str}")
+        elif model_type == 'PieNanoV2':
+            # Use default PieNanoV2 configuration (8 blocks, 128 filters)
+            model = PieNanoNetwork_v2.PieNanoV2(num_blocks=8, num_filters=128)
+            print(f"Loading PieNanoV2 model on {device_str}")
+        elif model_type == 'PieNano':
+            # Use default PieNano configuration (8 blocks, 128 filters)
+            model = PieNanoNetwork.PieNano(num_blocks=8, num_filters=128)
+            print(f"Loading PieNano model on {device_str}")
         else:
             model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
             print(f"Loading AlphaZeroNet model on {device_str}")
@@ -107,7 +129,7 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
         devices.append(device)
         
         # Load weights to check model type
-        weights = torch.load(model_file, map_location='cpu')
+        weights = torch.load(model_file, map_location='cpu', weights_only=False)
         
         # Detect and create the appropriate model type
         model_type = detect_model_type(weights)
@@ -115,6 +137,14 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
             # Use default PieBotNet configuration
             model = PieBotNetwork.PieBotNet()
             print(f"Loading PieBotNet model on GPU {gpu_id}")
+        elif model_type == 'PieNanoV2':
+            # Use default PieNanoV2 configuration (8 blocks, 128 filters)
+            model = PieNanoNetwork_v2.PieNanoV2(num_blocks=8, num_filters=128)
+            print(f"Loading PieNanoV2 model on GPU {gpu_id}")
+        elif model_type == 'PieNano':
+            # Use default PieNano configuration (8 blocks, 128 filters)
+            model = PieNanoNetwork.PieNano(num_blocks=8, num_filters=128)
+            print(f"Loading PieNano model on GPU {gpu_id}")
         else:
             model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
             print(f"Loading AlphaZeroNet model on GPU {gpu_id}")
