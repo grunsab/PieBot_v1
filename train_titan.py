@@ -389,8 +389,14 @@ def train():
         scheduler = MultiStepLR(optimizer, milestones=milestones_steps, gamma=0.3)
     elif args.scheduler == 'plateau':
         # Reduce on plateau - will be called differently
-        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=args.lr_patience, 
-                                      min_lr=args.min_lr, verbose=True if is_main else False)
+        # Note: verbose parameter may not be available in all PyTorch versions
+        try:
+            scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=args.lr_patience, 
+                                          min_lr=args.min_lr, verbose=True if is_main else False)
+        except TypeError:
+            # Fallback for PyTorch versions without verbose parameter
+            scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=args.lr_patience, 
+                                          min_lr=args.min_lr)
     else:
         scheduler = None
     
