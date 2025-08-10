@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.distributed as dist
 from torch.utils.data import DataLoader, ConcatDataset, Subset, random_split, Dataset
 from torch.utils.data.distributed import DistributedSampler
-from torch.optim.lr_scheduler import OneCycleLR
+from torch.optim.lr_scheduler import OneCycleLR, CosineAnnealingLR, MultiStepLR, ReduceLROnPlateau
 from CCRLDataset import CCRLDataset
 from RLDataset import RLDataset
 from TitanNetwork import Titan, count_parameters
@@ -26,6 +26,7 @@ default_num_heads = 16
 default_d_ff = 4096
 default_lr = 5e-6
 default_warmup_epochs = 20
+default_scheduler = 'cosine'  # Better for long training
 default_policy_weight = 1.0
 ccrl_dir = os.path.abspath('games_training_data/reformatted/')
 rl_dir = os.path.abspath('games_training_data/selfplay/')
@@ -50,9 +51,12 @@ def parse_args():
     p.add_argument('--batch-size', type=int, default=None)
     p.add_argument('--batch-size-total', type=int, default=None)
     p.add_argument('--gradient-accumulation', type=int, default=1)
-    p.add_argument('--grad-clip', type=float, default=1.0)
+    p.add_argument('--grad-clip', type=float, default=0.5)  # More aggressive clipping for stability
     p.add_argument('--mixed-precision', action='store_true')
     p.add_argument('--compile', action='store_true')
+    p.add_argument('--scheduler', choices=['onecycle', 'cosine', 'multistep', 'plateau'], default=default_scheduler)
+    p.add_argument('--min-lr', type=float, default=1e-8, help='Minimum learning rate')
+    p.add_argument('--lr-patience', type=int, default=10, help='Patience for ReduceLROnPlateau')
 
     # Data
     p.add_argument('--mode', choices=['supervised', 'rl', 'mixed'], default='mixed')
@@ -75,6 +79,7 @@ def parse_args():
     p.add_argument('--checkpoint-dir', type=str, default='checkpoints/titan')
     p.add_argument('--save-every', type=int, default=1)
     p.add_argument('--output', type=str, default=None)
+    p.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from')
     return p.parse_args()
 
 
@@ -148,7 +153,7 @@ def create_data_loaders(args, *, distributed=False, rank=0, world_size=1, is_mai
     return train_loader, val_loader
 
 
-def train_epoch(model, train_loader, optimizer, scheduler, args, epoch, writer, *, is_main=True):
+def train_epoch(model, train_loader, optimizer, scheduler, args, epoch, writer, *, is_main=True, warmup_scheduler=None):
     model.train()
     total_loss = total_v = total_p = 0.0
     steps = 0
@@ -208,7 +213,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, args, epoch, writer, 
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
-                if scheduler is not None:
+                if scheduler is not None and args.scheduler != 'plateau':
                     scheduler.step()
         else:
             with amp_ctx:
@@ -222,7 +227,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, args, epoch, writer, 
                     print(f"WARNING: Large/invalid gradient norm: {grad_norm:.2f} at epoch {epoch} batch {batch_idx}")
                 optimizer.step()
                 optimizer.zero_grad()
-                if scheduler is not None:
+                if scheduler is not None and args.scheduler != 'plateau':
                     scheduler.step()
 
         total_loss += loss.item() * args.gradient_accumulation
@@ -361,36 +366,132 @@ def train():
     train_loader, val_loader = create_data_loaders(args, distributed=distributed, rank=rank, world_size=world_size, is_main=is_main)
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01)
-    total_steps = len(train_loader) * args.epochs
-    warmup_steps = len(train_loader) * args.warmup_epochs
-    pct = warmup_steps / total_steps if total_steps > 0 else 0.1
-    try:
-        if not (0.0 < pct < 1.0):
-            raise ValueError
-        scheduler = OneCycleLR(optimizer, max_lr=args.lr * 2, total_steps=total_steps, pct_start=pct,
-                               anneal_strategy='cos', div_factor=25, final_div_factor=100)
-    except Exception:
+    total_steps = len(train_loader) * args.epochs // args.gradient_accumulation
+    warmup_steps = len(train_loader) * args.warmup_epochs // args.gradient_accumulation
+    
+    # Create scheduler based on args
+    if args.scheduler == 'onecycle':
+        pct = warmup_steps / total_steps if total_steps > 0 else 0.1
+        try:
+            if not (0.0 < pct < 1.0):
+                raise ValueError
+            scheduler = OneCycleLR(optimizer, max_lr=args.lr * 2, total_steps=total_steps, pct_start=pct,
+                                   anneal_strategy='cos', div_factor=25, final_div_factor=10000)
+        except Exception:
+            scheduler = None
+    elif args.scheduler == 'cosine':
+        # Cosine annealing to very low LR for long training
+        scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=args.min_lr)
+    elif args.scheduler == 'multistep':
+        # Progressive reduction at specific epochs
+        milestones = [100, 200, 300, 400, 450]  # Epochs where LR drops
+        milestones_steps = [m * len(train_loader) // args.gradient_accumulation for m in milestones]
+        scheduler = MultiStepLR(optimizer, milestones=milestones_steps, gamma=0.3)
+    elif args.scheduler == 'plateau':
+        # Reduce on plateau - will be called differently
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=args.lr_patience, 
+                                      min_lr=args.min_lr, verbose=is_main)
+    else:
         scheduler = None
+    
+    # Create warmup scheduler if needed
+    warmup_scheduler = None
+    if args.warmup_epochs > 0 and args.scheduler != 'onecycle':
+        def warmup_lambda(step):
+            if step < warmup_steps:
+                return float(step) / float(max(1, warmup_steps))
+            return 1.0
+        warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lambda)
 
+    # Load checkpoint if resuming
+    start_epoch = 0
+    best_val_loss = float('inf')
+    
+    if args.resume and is_main:
+        if os.path.exists(args.resume):
+            print(f"Loading checkpoint from {args.resume}")
+            checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+            
+            # Load model state
+            if 'model_state_dict' in checkpoint:
+                if isinstance(model, DDP):
+                    model.module.load_state_dict(checkpoint['model_state_dict'])
+                else:
+                    model.load_state_dict(checkpoint['model_state_dict'])
+            
+            # Load optimizer state
+            if 'optimizer_state_dict' in checkpoint:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            
+            # Load scheduler state if available and matching
+            if 'scheduler_state_dict' in checkpoint and scheduler is not None:
+                try:
+                    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                except Exception as e:
+                    print(f"Warning: Could not load scheduler state: {e}")
+                    print("Scheduler will start fresh with current settings")
+            
+            # Get epoch to resume from
+            if 'epoch' in checkpoint:
+                start_epoch = checkpoint['epoch'] + 1
+            
+            # Get best validation loss if available
+            if 'val_loss' in checkpoint:
+                best_val_loss = checkpoint['val_loss']
+            
+            print(f"Resumed from epoch {start_epoch}")
+            if best_val_loss != float('inf'):
+                print(f"Best validation loss so far: {best_val_loss:.4f}")
+        else:
+            print(f"Warning: Resume checkpoint {args.resume} not found, starting from scratch")
+    
     # train loop (short for dry-run)
     if is_main:
-        print(f"\nStarting training for {args.epochs} epochs...")
-    for epoch in range(args.epochs):
+        print(f"\nStarting training for {args.epochs} epochs (from epoch {start_epoch})...")
+        print(f"Scheduler: {args.scheduler}, Initial LR: {args.lr}, Min LR: {args.min_lr}")
+    
+    for epoch in range(start_epoch, args.epochs):
         if hasattr(train_loader, 'sampler') and hasattr(train_loader.sampler, 'set_epoch'):
             train_loader.sampler.set_epoch(epoch)
 
-        tr_l, tr_v, tr_p = train_epoch(model, train_loader, optimizer, scheduler, args, epoch, writer, is_main=is_main)
+        # Pass the appropriate scheduler to train_epoch
+        if args.scheduler != 'plateau':
+            if warmup_scheduler is not None and epoch < args.warmup_epochs:
+                epoch_scheduler = warmup_scheduler
+            else:
+                epoch_scheduler = scheduler
+        else:
+            epoch_scheduler = None
+        tr_l, tr_v, tr_p = train_epoch(model, train_loader, optimizer, epoch_scheduler, args, epoch, writer, is_main=is_main, warmup_scheduler=warmup_scheduler)
         if is_main:
             print(f'Train - Loss: {tr_l:.4f}, Value: {tr_v:.4f}, Policy: {tr_p:.4f}')
         va_l, va_v, va_p = validate(model, val_loader, args, epoch, writer)
         if is_main:
-            print(f'Val - Loss: {va_l:.4f}, Value: {va_v:.4f}, Policy: {va_p:.4f}')
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f'Val - Loss: {va_l:.4f}, Value: {va_v:.4f}, Policy: {va_p:.4f}, LR: {current_lr:.2e}')
+            
+            # Step plateau scheduler if used
+            if args.scheduler == 'plateau' and scheduler is not None:
+                scheduler.step(va_l)
+            
+            # Track best model
+            if va_l < best_val_loss:
+                best_val_loss = va_l
+                best_ckpt = os.path.join(args.checkpoint_dir, 'titan_best.pt')
+                torch.save({'epoch': epoch,
+                            'model_state_dict': (model if not isinstance(model, DDP) else model.module).state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'val_loss': va_l}, best_ckpt)
+                print(f'New best model saved to {best_ckpt} (val_loss: {va_l:.4f})')
 
         if is_main and (epoch + 1) % args.save_every == 0:
             ckpt = os.path.join(args.checkpoint_dir, f'titan_epoch_{epoch+1}.pt')
             torch.save({'epoch': epoch,
                         'model_state_dict': (model if not isinstance(model, DDP) else model.module).state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict()}, ckpt)
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+                        'val_loss': va_l,
+                        'args': vars(args)}, ckpt)
             print(f'Saved checkpoint to {ckpt}')
 
     if is_main:
