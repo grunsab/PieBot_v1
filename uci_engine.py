@@ -237,7 +237,7 @@ class UCIEngine:
             )
     
     def detect_model_type(self, weights, model_path=None):
-        """Detect whether this is an AlphaZeroNet, PieBotNet, or PieNano model."""
+        """Detect whether this is an AlphaZeroNet, PieBotNet, PieNano, or PieNanoV2 model."""
         # Check if it's a quantized model by filename
         if model_path and ('quantized' in model_path.lower() or 'quant' in model_path.lower()):
             # Try to determine the base model type from filename
@@ -251,21 +251,27 @@ class UCIEngine:
             # Check state dict keys to determine model type
             state_dict = weights.get('model_state_dict', weights)
             
-            # Check for PieNano specific features (depthwise convolutions, WDL head)
-            has_depthwise = any('depthwise' in key for key in state_dict.keys())
-            has_wdl = any('value_head.fc2.weight' in key for key in state_dict.keys())
-            if has_depthwise and has_wdl:
-                # Check the shape of value head output to distinguish PieNano
-                value_fc2_weight = state_dict.get('value_head.fc2.weight')
-                if value_fc2_weight is not None and value_fc2_weight.shape[0] == 3:
-                    return 'PieNano'
-            
             # PieBotNet has specific modules like positional_encoding and transformer_blocks
             has_positional_encoding = any('positional_encoding' in key for key in state_dict.keys())
             has_transformer = any('transformer_blocks' in key for key in state_dict.keys())
             
+            # PieNano models have SE (Squeeze-Excitation) modules and depthwise convolutions
+            has_se = any('se.' in key or 'squeeze' in key or 'excitation' in key for key in state_dict.keys())
+            has_depthwise = any('depthwise' in key for key in state_dict.keys())
+            has_wdl_value = any('value_head.fc2' in key for key in state_dict.keys())
+            
+            # PieNanoV2 has the improved policy head with fc1 and fc2 in policy_head
+            has_improved_policy = any('policy_head.fc1' in key or 'policy_head.fc2' in key for key in state_dict.keys())
+            
             if has_positional_encoding or has_transformer:
                 return 'PieBotNet'
+            elif has_improved_policy and (has_se or has_depthwise):
+                return 'PieNanoV2'
+            elif (has_se or has_depthwise) and has_wdl_value:
+                # Check the shape of value head output to distinguish PieNano
+                value_fc2_weight = state_dict.get('value_head.fc2.weight')
+                if value_fc2_weight is not None and value_fc2_weight.shape[0] == 3:
+                    return 'PieNano'
         return 'AlphaZeroNet'
     
     def load_model(self):
@@ -304,7 +310,7 @@ class UCIEngine:
                     sys.stdout.flush()
             except:
                 # Not a TorchScript file, load normally
-                weights = torch.load(full_path, map_location='cpu')
+                weights = torch.load(full_path, map_location='cpu', weights_only=False)
                 is_quantized = False
             
             # If not quantized, detect and create the appropriate model type
@@ -326,6 +332,11 @@ class UCIEngine:
                         self.model = self._create_pienano_from_weights(weights)
                         if self.verbose:
                             print(f"info string Loaded PieNano model (dequantized fallback)")
+                elif model_type == 'PieNanoV2':
+                    # Use PieNanoV2 configuration
+                    self.model = self._create_pienano_from_weights(weights)
+                    if self.verbose:
+                        print(f"info string Detected PieNanoV2 model")
                 elif model_type == 'PieNano':
                     # Use default PieNano configuration
                     self.model = self._create_pienano_from_weights(weights)

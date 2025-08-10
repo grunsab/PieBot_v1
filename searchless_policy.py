@@ -2,8 +2,9 @@
 Searchless Policy-based Move Selection
 
 This module provides a drop-in replacement for MCTS that selects moves
-based directly on the neural network's policy output. No tree search or
-value evaluation is performed - just direct policy-based selection.
+based directly on the neural network's policy output for the current position.
+No tree search or lookahead is performed - just direct policy-based selection
+from the current board state.
 """
 
 import encoder
@@ -84,6 +85,7 @@ class Root:
     def _setup_edges(self, move_probabilities):
         """
         Set up edges for all legal moves with their policy probabilities.
+        The policy probabilities directly correspond to legal moves in order.
         
         Args:
             move_probabilities (numpy.array): Policy probabilities from neural network
@@ -95,6 +97,7 @@ class Root:
             return
         
         # Create edges for all moves with their policy probabilities
+        # The neural network returns probabilities for each legal move in order
         for i, move in enumerate(legal_moves):
             policy_prob = move_probabilities[i] if i < len(move_probabilities) else 0.0
             edge = Edge(move, policy_prob, visits=1)

@@ -3,7 +3,7 @@ import torch
 import torch.optim as optim
 import torch.nn as nn
 from torch.utils.data import DataLoader, ConcatDataset
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, OneCycleLR
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, OneCycleLR, CosineAnnealingLR, MultiStepLR
 from CCRLDataset import CCRLDataset
 from RLDataset import RLDataset
 from PieNanoNetwork_v2 import PieNanoV2
@@ -54,7 +54,7 @@ def parse_args():
                         help='Number of gradient accumulation steps (default: 2)')
     parser.add_argument('--warmup-epochs', type=int, default=5,
                         help='Number of warmup epochs for learning rate (default: 5)')
-    parser.add_argument('--scheduler', choices=['cosine', 'onecycle', 'none'], default='cosine',
+    parser.add_argument('--scheduler', choices=['cosine', 'onecycle', 'step', 'none'], default='cosine',
                         help='Learning rate scheduler (default: cosine)')
     parser.add_argument('--dropout', type=float, default=0.1,
                         help='Dropout rate (default: 0.1)')
@@ -117,13 +117,39 @@ def create_scheduler(optimizer, args, steps_per_epoch):
     warmup_steps = steps_per_epoch * args.warmup_epochs
     
     if args.scheduler == 'cosine':
-        # Cosine annealing with warm restarts
-        scheduler = CosineAnnealingWarmRestarts(
-            optimizer,
-            T_0=steps_per_epoch * 10,  # Restart every 10 epochs
-            T_mult=2,  # Double the period after each restart
-            eta_min=args.lr * 0.001  # Minimum LR is 0.1% of initial
-        )
+        # Progressive cosine annealing for better long-term convergence
+        # Instead of restarts, use a single cosine decay over all epochs
+        # with milestone-based reductions for fine-tuning
+        
+        if args.epochs <= 50:
+            # For shorter training, use original warm restarts
+            scheduler = CosineAnnealingWarmRestarts(
+                optimizer,
+                T_0=steps_per_epoch * 10,
+                T_mult=2,
+                eta_min=args.lr * 0.0001
+            )
+        else:
+            # For longer training (100+ epochs), use progressive reduction
+            # Cosine annealing over the full training duration
+            
+            # Create a composite scheduler with milestones
+            milestones = [30, 60, 80, 90]  # Reduce LR at these epochs
+            gamma = 0.5  # Reduce by 50% at each milestone
+            
+            # Use MultiStepLR with cosine annealing between milestones
+            scheduler = MultiStepLR(
+                optimizer,
+                milestones=[m * steps_per_epoch // args.gradient_accumulation for m in milestones],
+                gamma=gamma
+            )
+            
+            # Alternative: Pure cosine annealing to very low LR
+            # scheduler = CosineAnnealingLR(
+            #     optimizer,
+            #     T_max=total_steps,
+            #     eta_min=args.lr * 0.00001  # 0.001% of initial LR
+            # )
         
         # Create a warmup scheduler wrapper
         def warmup_scheduler(step):
@@ -135,17 +161,36 @@ def create_scheduler(optimizer, args, steps_per_epoch):
         return {'main': scheduler, 'warmup': warmup, 'warmup_steps': warmup_steps}
         
     elif args.scheduler == 'onecycle':
+        # Adjusted OneCycleLR for better convergence
         scheduler = OneCycleLR(
             optimizer,
-            max_lr=args.lr * 10,  # Peak LR is 10x initial
+            max_lr=args.lr * 3,  # Reduced peak LR for stability
             total_steps=total_steps,
-            pct_start=0.1,  # 10% of training for warmup
+            pct_start=0.05,  # Shorter warmup
             anneal_strategy='cos',
             cycle_momentum=True,
             base_momentum=0.85,
-            max_momentum=0.95
+            max_momentum=0.95,
+            final_div_factor=10000  # End at 0.01% of max LR
         )
         return {'main': scheduler, 'warmup': None, 'warmup_steps': 0}
+    elif args.scheduler == 'step':
+        # New step-based scheduler option for manual control
+        milestones = [30, 50, 70, 85, 95]  # Reduce at these epochs
+        scheduler = MultiStepLR(
+            optimizer,
+            milestones=[m * steps_per_epoch // args.gradient_accumulation for m in milestones],
+            gamma=0.3  # Aggressive reduction for fine-tuning
+        )
+        
+        # Create a warmup scheduler wrapper
+        def warmup_scheduler(step):
+            if step < warmup_steps:
+                return float(step) / float(max(1, warmup_steps))
+            return 1.0
+        
+        warmup = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_scheduler)
+        return {'main': scheduler, 'warmup': warmup, 'warmup_steps': warmup_steps}
     else:
         return {'main': None, 'warmup': None, 'warmup_steps': 0}
 
