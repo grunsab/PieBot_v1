@@ -336,7 +336,9 @@ def main():
     
     if args.resume:
         print(f"Loading checkpoint from {args.resume}")
-        checkpoint = torch.load(args.resume, map_location=device)
+        # Use weights_only=False to load checkpoints with saved args
+        # This is safe since we're loading our own training checkpoints
+        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint)
         if 'epoch' in checkpoint:
             start_epoch = checkpoint['epoch'] + 1
