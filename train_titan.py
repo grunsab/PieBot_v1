@@ -390,7 +390,7 @@ def train():
     elif args.scheduler == 'plateau':
         # Reduce on plateau - will be called differently
         scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=args.lr_patience, 
-                                      min_lr=args.min_lr, verbose=is_main)
+                                      min_lr=args.min_lr, verbose=True if is_main else False)
     else:
         scheduler = None
     
