@@ -11,6 +11,9 @@ import torch.nn as nn
 import torch.quantization as quantization
 from torch.quantization import QuantStub, DeQuantStub
 import os
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import chess
 import numpy as np
 from typing import List, Tuple, Optional

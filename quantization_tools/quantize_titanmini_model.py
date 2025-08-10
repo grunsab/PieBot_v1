@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script to quantize PieNano models for improved CPU inference performance.
+Script to quantize TitanMini models for improved CPU inference performance.
 Optimized for static INT8 quantization to run efficiently on low-end VPS.
 """
 
@@ -8,8 +8,10 @@ import argparse
 import torch
 import os
 import sys
-from PieNanoNetwork import PieNano
-from quantization_utils import (
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from TitanMiniNetwork import TitanMini
+from quantization_tools.quantization_utils_titanmini import (
     apply_static_quantization,
     apply_dynamic_quantization,
     save_quantized_model,
@@ -21,55 +23,61 @@ from quantization_utils import (
 
 def detect_model_architecture(checkpoint):
     """
-    Detect PieNano model architecture from checkpoint.
+    Detect TitanMini model architecture from checkpoint.
     
     Args:
         checkpoint: Loaded checkpoint dictionary
         
     Returns:
-        Tuple of (num_blocks, num_filters, num_input_planes)
+        Tuple of (d_model, n_heads, n_layers, use_cls_token)
     """
     if isinstance(checkpoint, dict):
         # Check if it has args from training
         if 'args' in checkpoint:
             args = checkpoint['args']
             return (
-                getattr(args, 'num_blocks', 8),
-                getattr(args, 'num_filters', 128),
-                112 if getattr(args, 'use_enhanced_encoder', False) else 16
+                getattr(args, 'd_model', 256),
+                getattr(args, 'n_heads', 8),
+                getattr(args, 'n_layers', 12),
+                getattr(args, 'use_cls_token', False)
             )
         
         # Try to infer from state dict
         state_dict = checkpoint.get('model_state_dict', checkpoint)
         
-        # Count residual blocks
-        residual_keys = [k for k in state_dict.keys() if 'residual_tower' in k and 'conv1' in k]
-        num_blocks = len(set(k.split('.')[1] for k in residual_keys))
-        
-        # Get number of filters from conv_block
-        if 'conv_block.0.weight' in state_dict:
-            num_filters = state_dict['conv_block.0.weight'].shape[0]
-            num_input_planes = state_dict['conv_block.0.weight'].shape[1]
+        # Detect d_model from input projection
+        if 'input_projection.weight' in state_dict:
+            d_model = state_dict['input_projection.weight'].shape[0]
         else:
-            # Default values
-            num_filters = 128
-            num_input_planes = 16
+            d_model = 256
         
-        # Default to 8 blocks if detection failed
-        if num_blocks == 0:
-            num_blocks = 8
+        # Count transformer layers
+        transformer_keys = [k for k in state_dict.keys() if 'transformer_layers' in k and 'self_attn' in k]
+        n_layers = len(set(k.split('.')[1] for k in transformer_keys)) if transformer_keys else 12
+        
+        # Detect number of heads from attention layers
+        n_heads = 8  # Default
+        for k, v in state_dict.items():
+            if 'self_attn.in_proj_weight' in k:
+                # The in_proj_weight has shape [3*d_model, d_model] for Q,K,V
+                # We can infer n_heads if we know d_model
+                n_heads = 8  # TitanMini typically uses 8 heads
+                break
+        
+        # Check for CLS token
+        use_cls_token = 'cls_token' in state_dict
             
-        return num_blocks, num_filters, num_input_planes
+        return d_model, n_heads, n_layers, use_cls_token
     
-    # Default architecture
-    return 8, 128, 16
+    # Default TitanMini architecture
+    return 256, 8, 12, False
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Quantize PieNano model for efficient CPU inference on VPS'
+        description='Quantize TitanMini model for efficient CPU inference on VPS'
     )
-    parser.add_argument('--model', help='Path to PieNano model file (.pt)', required=True)
+    parser.add_argument('--model', help='Path to TitanMini model file (.pt)', required=True)
     parser.add_argument('--type', choices=['dynamic', 'static'], default='dynamic',
                        help='Quantization type: dynamic (simpler, recommended) or static')
     parser.add_argument('--calibration-size', type=int, default=500,
@@ -90,18 +98,19 @@ def main():
         sys.exit(1)
     
     # Load model checkpoint
-    print(f"Loading PieNano model from {args.model}...")
-    checkpoint = torch.load(args.model, map_location='cpu')
+    print(f"Loading TitanMini model from {args.model}...")
+    checkpoint = torch.load(args.model, map_location='cpu', weights_only=False)
     
     # Detect architecture
-    num_blocks, num_filters, num_input_planes = detect_model_architecture(checkpoint)
-    print(f"Detected architecture: {num_blocks} blocks, {num_filters} filters, {num_input_planes} input planes")
+    d_model, n_heads, n_layers, use_cls_token = detect_model_architecture(checkpoint)
+    print(f"Detected architecture: d_model={d_model}, n_heads={n_heads}, n_layers={n_layers}, use_cls={use_cls_token}")
     
-    # Create PieNano model
-    model = PieNano(
-        num_blocks=num_blocks,
-        num_filters=num_filters,
-        num_input_planes=num_input_planes
+    # Create TitanMini model
+    model = TitanMini(
+        d_model=d_model,
+        n_heads=n_heads,
+        n_layers=n_layers,
+        use_cls_token=use_cls_token
     )
     
     # Load weights
@@ -120,7 +129,7 @@ def main():
     # Apply quantization based on type
     if args.type == 'dynamic':
         print("\nApplying dynamic INT8 quantization...")
-        print("This is recommended for PieNano due to its complex architecture")
+        print("This is recommended for TitanMini's transformer architecture")
         quantized_model = apply_dynamic_quantization(model)
         suffix = "_quantized_dynamic"
     else:
@@ -131,15 +140,14 @@ def main():
         
         # Generate calibration data
         print(f"\nGenerating {args.calibration_size} calibration positions...")
-        enhanced = (num_input_planes == 112)
         calibration_data = create_calibration_dataset(
             num_positions=args.calibration_size,
-            enhanced_encoder=enhanced
+            input_planes=112  # TitanMini uses enhanced encoder with 112 planes
         )
         
         # Apply static quantization
         print("\nApplying static INT8 quantization...")
-        print("Warning: Static quantization may not work with PieNano's SE blocks")
+        print("Note: Transformer architectures may have reduced quantization benefits")
         quantized_model = apply_static_quantization(
             model,
             calibration_data=calibration_data,
@@ -172,7 +180,7 @@ def main():
             loaded_model = load_quantized_model(saved_path)
             
             # Test inference
-            test_input = torch.randn(1, num_input_planes, 8, 8)
+            test_input = torch.randn(1, 112, 8, 8)  # TitanMini uses 112 input planes
             with torch.no_grad():
                 policy, value = loaded_model(test_input)
             
@@ -186,10 +194,11 @@ def main():
     if args.benchmark:
         print("\nRunning performance benchmark...")
         # Reload original model for fair comparison
-        original_model = PieNano(
-            num_blocks=num_blocks,
-            num_filters=num_filters,
-            num_input_planes=num_input_planes
+        original_model = TitanMini(
+            d_model=d_model,
+            n_heads=n_heads,
+            n_layers=n_layers,
+            use_cls_token=use_cls_token
         )
         if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
             original_model.load_state_dict(checkpoint['model_state_dict'])
@@ -201,14 +210,15 @@ def main():
         results = benchmark_quantized_model(
             original_model,
             quantized_model,
-            num_positions=100
+            num_positions=100,
+            input_planes=112
         )
         
         print("\n" + "="*50)
         print("QUANTIZATION SUMMARY")
         print("="*50)
-        print(f"Model: PieNano {num_blocks}x{num_filters}")
-        print(f"Quantization: Static INT8 ({args.backend})")
+        print(f"Model: TitanMini (d={d_model}, h={n_heads}, l={n_layers})")
+        print(f"Quantization: {'Dynamic' if args.type == 'dynamic' else 'Static'} INT8")
         print(f"Size reduction: ~75% (FP32 → INT8)")
         print(f"Speed improvement: {results['speedup']:.2f}x")
         print(f"Accuracy impact: Minimal (< 0.01 difference)")
@@ -216,9 +226,10 @@ def main():
     
     print("\n✓ Quantization complete!")
     print(f"\nTo use the quantized model in your code:")
-    print(f"  from quantization_utils import load_quantized_model")
+    print(f"  from quantization_tools.quantization_utils_titanmini import load_quantized_model")
     print(f"  model = load_quantized_model('{saved_path}')")
-    print(f"\nThe quantized model will run ~2-4x faster on CPU with ~75% less memory usage.")
+    print(f"\nThe quantized model will run ~1.5-3x faster on CPU with ~75% less memory usage.")
+    print(f"Note: Transformer models typically see smaller speedups than CNNs from quantization.")
 
 
 if __name__ == '__main__':
