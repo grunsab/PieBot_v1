@@ -31,6 +31,8 @@ def detect_model_type(weights, model_path=None):
             return 'TitanMini_Quantized'
         elif 'pienano' in model_path.lower() or 'pie_nano' in model_path.lower():
             return 'PieNano_Quantized'
+        elif 'alphazero' in model_path.lower() or 'alpha_zero' in model_path.lower():
+            return 'AlphaZeroNet_Quantized'
         # Could be a quantized model without clear naming
         return 'Unknown_Quantized'
     
@@ -343,6 +345,14 @@ def load_model(model_path, device=None):
     elif model_type == 'TitanMini':
         model = create_titanmini_from_weights(weights)
         print(f"Loading TitanMini model on {device_str}")
+    elif model_type == 'AlphaZeroNet_Quantized':
+        # Handle quantized AlphaZeroNet
+        # AlphaZeroNet quantized models are saved as TorchScript, which should be loaded above
+        # If we reach here, it means the TorchScript loading failed
+        print(f"Note: AlphaZeroNet quantized model should be loaded as TorchScript")
+        # Fallback to regular AlphaZeroNet
+        model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
+        print(f"Loading AlphaZeroNet model (dequantized fallback) on {device_str}")
     elif model_type == 'PieNano_Quantized':
         # Try to load quantized PieNano
         try:

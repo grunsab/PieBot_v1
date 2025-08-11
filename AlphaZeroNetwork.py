@@ -130,7 +130,7 @@ class PolicyHead( nn.Module ):
         x = self.conv1( x )
         x = self.bn1( x )
         x = self.relu1( x )
-        x = x.view( x.shape[0], 128 )
+        x = x.reshape( x.shape[0], 128 )
         x = self.fc1( x )
 
         return x

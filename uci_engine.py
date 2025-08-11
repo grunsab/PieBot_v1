@@ -299,8 +299,10 @@ class UCIEngine:
                 return 'TitanMini_Quantized'
             elif 'pienano' in model_path.lower() or 'pie_nano' in model_path.lower():
                 return 'PieNano_Quantized'
-            # If can't determine from filename, check for TitanMini patterns
-            return 'PieNano_Quantized'
+            elif 'alphazero' in model_path.lower() or 'alpha_zero' in model_path.lower():
+                return 'AlphaZeroNet_Quantized'
+            # If can't determine from filename, assume AlphaZeroNet
+            return 'AlphaZeroNet_Quantized'
         
         if isinstance(weights, dict):
             # Check state dict keys to determine model type
