@@ -29,48 +29,68 @@ def detect_model_architecture(checkpoint):
         checkpoint: Loaded checkpoint dictionary
         
     Returns:
-        Tuple of (d_model, n_heads, n_layers, use_cls_token)
+        Tuple of (d_model, num_heads, num_layers)
     """
     if isinstance(checkpoint, dict):
         # Check if it has args from training
         if 'args' in checkpoint:
             args = checkpoint['args']
             return (
-                getattr(args, 'd_model', 256),
-                getattr(args, 'n_heads', 8),
-                getattr(args, 'n_layers', 12),
-                getattr(args, 'use_cls_token', False)
+                getattr(args, 'd_model', 384),
+                getattr(args, 'num_heads', 6),
+                getattr(args, 'num_layers', 10)
             )
         
         # Try to infer from state dict
         state_dict = checkpoint.get('model_state_dict', checkpoint)
         
         # Detect d_model from input projection
-        if 'input_projection.weight' in state_dict:
-            d_model = state_dict['input_projection.weight'].shape[0]
-        else:
-            d_model = 256
-        
-        # Count transformer layers
-        transformer_keys = [k for k in state_dict.keys() if 'transformer_layers' in k and 'self_attn' in k]
-        n_layers = len(set(k.split('.')[1] for k in transformer_keys)) if transformer_keys else 12
-        
-        # Detect number of heads from attention layers
-        n_heads = 8  # Default
+        d_model = 384  # Default TitanMini d_model
         for k, v in state_dict.items():
-            if 'self_attn.in_proj_weight' in k:
-                # The in_proj_weight has shape [3*d_model, d_model] for Q,K,V
-                # We can infer n_heads if we know d_model
-                n_heads = 8  # TitanMini typically uses 8 heads
+            clean_k = k.replace('_orig_mod.', '')
+            if clean_k == 'input_projection.weight':
+                d_model = v.shape[0]
                 break
         
-        # Check for CLS token
-        use_cls_token = 'cls_token' in state_dict
+        # Count transformer blocks
+        # Handle both regular and _orig_mod prefixed keys
+        transformer_keys = []
+        for k in state_dict.keys():
+            clean_k = k.replace('_orig_mod.', '')
+            if 'transformer_blocks' in clean_k and 'norm1' in clean_k:
+                transformer_keys.append(clean_k)
+        
+        if transformer_keys:
+            # Extract layer numbers from keys like 'transformer_blocks.0.norm1.weight'
+            layer_nums = set()
+            for k in transformer_keys:
+                parts = k.split('.')
+                if len(parts) >= 2 and parts[1].isdigit():
+                    layer_nums.add(int(parts[1]))
+            num_layers = len(layer_nums) if layer_nums else 10
+        else:
+            num_layers = 10
+        
+        # Detect number of heads - TitanMini default is 6
+        num_heads = 6  # Default for TitanMini
+        
+        # Try to get more accurate values from attention weights if available
+        for k, v in state_dict.items():
+            if 'attention.W_q.weight' in k and 'transformer_blocks.0' in k:
+                # The W_q weight has shape [d_model, d_model]
+                # We already have d_model, num_heads is typically d_model // 64 for TitanMini
+                if d_model == 384:
+                    num_heads = 6
+                elif d_model == 256:
+                    num_heads = 4
+                else:
+                    num_heads = max(1, d_model // 64)
+                break
             
-        return d_model, n_heads, n_layers, use_cls_token
+        return d_model, num_heads, num_layers
     
     # Default TitanMini architecture
-    return 256, 8, 12, False
+    return 384, 6, 10
 
 
 def main():
@@ -102,22 +122,37 @@ def main():
     checkpoint = torch.load(args.model, map_location='cpu', weights_only=False)
     
     # Detect architecture
-    d_model, n_heads, n_layers, use_cls_token = detect_model_architecture(checkpoint)
-    print(f"Detected architecture: d_model={d_model}, n_heads={n_heads}, n_layers={n_layers}, use_cls={use_cls_token}")
+    d_model, num_heads, num_layers = detect_model_architecture(checkpoint)
+    print(f"Detected architecture: d_model={d_model}, num_heads={num_heads}, num_layers={num_layers}")
     
     # Create TitanMini model
     model = TitanMini(
+        num_layers=num_layers,
         d_model=d_model,
-        n_heads=n_heads,
-        n_layers=n_layers,
-        use_cls_token=use_cls_token
+        num_heads=num_heads,
+        d_ff=d_model * 4,  # Standard practice: 4 * d_model
+        dropout=0.1,
+        policy_weight=1.0,
+        input_planes=112
     )
     
     # Load weights
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
+        state_dict = checkpoint['model_state_dict']
     else:
-        model.load_state_dict(checkpoint)
+        state_dict = checkpoint
+    
+    # Handle _orig_mod prefix from torch.compile
+    if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith('_orig_mod.'):
+                new_state_dict[k[10:]] = v  # Remove '_orig_mod.' prefix
+            else:
+                new_state_dict[k] = v
+        state_dict = new_state_dict
+    
+    model.load_state_dict(state_dict)
     
     model.eval()
     
@@ -195,15 +230,16 @@ def main():
         print("\nRunning performance benchmark...")
         # Reload original model for fair comparison
         original_model = TitanMini(
+            num_layers=num_layers,
             d_model=d_model,
-            n_heads=n_heads,
-            n_layers=n_layers,
-            use_cls_token=use_cls_token
+            num_heads=num_heads,
+            d_ff=d_model * 4,
+            dropout=0.1,
+            policy_weight=1.0,
+            input_planes=112
         )
-        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-            original_model.load_state_dict(checkpoint['model_state_dict'])
-        else:
-            original_model.load_state_dict(checkpoint)
+        # Load the same cleaned state dict
+        original_model.load_state_dict(state_dict)
         original_model.eval()
         
         # Run benchmark
@@ -217,7 +253,7 @@ def main():
         print("\n" + "="*50)
         print("QUANTIZATION SUMMARY")
         print("="*50)
-        print(f"Model: TitanMini (d={d_model}, h={n_heads}, l={n_layers})")
+        print(f"Model: TitanMini (d={d_model}, h={num_heads}, l={num_layers})")
         print(f"Quantization: {'Dynamic' if args.type == 'dynamic' else 'Static'} INT8")
         print(f"Size reduction: ~75% (FP32 → INT8)")
         print(f"Speed improvement: {results['speedup']:.2f}x")

@@ -12,6 +12,7 @@ import multiprocessing as mp
 # Global caches for optimization
 position_cache = {}  # Cache for position encodings
 legal_moves_cache = {}  # Cache for legal move generation
+model_encoder_cache = {}  # Cache for model encoder types to avoid repeated detection
 CACHE_MAX_SIZE = 20  # Maximum cache size to prevent memory issues
 
 # Object pools for Node/Edge creation
@@ -605,7 +606,7 @@ class Root( Node ):
                     edge.clearVirtualLoss()
 
     def parallelRolloutsProgressive( self, board, neuralNetwork, total_rollouts, 
-                                   initial_batch_size=50, max_batch_size=512 ):
+                                   initial_batch_size=16, max_batch_size=256 ):
         """
         Progressive batching to reduce path collisions while maintaining high throughput.
         
@@ -706,123 +707,22 @@ class Root( Node ):
 
 def callNeuralNetworkOptimized( board, neuralNetwork ):
     """
-    Optimized version that keeps tensors on device as long as possible.
-    Only transfers the final results to CPU.
+    Optimized version that delegates to encoder.callNeuralNetwork
+    which handles model detection and encoding correctly.
     """
-    board_hash = get_position_hash(board)
-    
-    # Check position cache
-    if board_hash in position_cache:
-        cached_position, cached_mask = position_cache[board_hash]
-        position = cached_position.clone()
-        mask = cached_mask.clone()
-    else:
-        position, mask = encoder.encodePositionForInference( board )
-        position = torch.from_numpy( position )
-        mask = torch.from_numpy( mask )
-        
-        # Cache the position if cache not full
-        if len(position_cache) < CACHE_MAX_SIZE:
-            position_cache[board_hash] = (position.clone(), mask.clone())
-    
-    # Ensure 4D tensor (batch dimension)
-    if position.dim() == 3:
-        position = position.unsqueeze(0)
-    if mask.dim() == 3:
-        mask = mask.unsqueeze(0)
-    
-    # Get the device from the model parameters
-    model_device = next(neuralNetwork.parameters()).device
-    position = position.to(model_device)
-    mask = mask.to(model_device)
-    
-    # Convert to half precision if model is FP16
-    if next(neuralNetwork.parameters()).dtype == torch.float16:
-        position = position.half()
-        mask = mask.half()
-    
-    # Flatten mask to match expected shape
-    mask_flat = mask.view(mask.shape[0], -1)
-    
-    with torch.no_grad():
-        value, policy = neuralNetwork( position, policyMask=mask_flat )
-    
-    # Only convert to CPU at the very end
-    value = value.item()  # More efficient than .cpu().numpy()[0, 0]
-    policy = policy[0].cpu().numpy()  # Keep on GPU until needed
-    
-    move_probabilities = encoder.decodePolicyOutput( board, policy )
-    
-    return value, move_probabilities
+    # Use the fixed encoder.callNeuralNetwork which properly detects
+    # TitanMini and uses the correct encoder (standard vs enhanced)
+    return encoder.callNeuralNetwork( board, neuralNetwork )
 
 
 def callNeuralNetworkBatchedOptimized( boards, neuralNetwork ):
     """
-    Optimized batch version that minimizes CPU/GPU transfers.
+    Optimized batch version that delegates to encoder.callNeuralNetworkBatched
+    which handles model detection and encoding correctly.
     """
-    num_inputs = len( boards )
-    
-    # Collect unique positions to avoid redundant encoding
-    unique_positions = {}
-    board_hashes = []
-    
-    for board in boards:
-        board_hash = get_position_hash(board)
-        board_hashes.append(board_hash)
-        
-        if board_hash not in unique_positions:
-            if board_hash in position_cache:
-                unique_positions[board_hash] = position_cache[board_hash]
-            else:
-                position, mask = encoder.encodePositionForInference(board)
-                position_tensor = torch.from_numpy(position)
-                mask_tensor = torch.from_numpy(mask)
-                unique_positions[board_hash] = (position_tensor, mask_tensor)
-                
-                # Cache if not full
-                if len(position_cache) < CACHE_MAX_SIZE:
-                    position_cache[board_hash] = (position_tensor.clone(), mask_tensor.clone())
-    
-    # Create batch tensors
-    inputs = torch.zeros( (num_inputs, 16, 8, 8), dtype=torch.float32 )
-    masks = torch.zeros( (num_inputs, 72, 8, 8), dtype=torch.float32 )
-    
-    # Fill batch tensors
-    for i, board_hash in enumerate(board_hashes):
-        position, mask = unique_positions[board_hash]
-        inputs[i] = position
-        masks[i] = mask
-    
-    # Get the device from the model parameters
-    model_device = next(neuralNetwork.parameters()).device
-    inputs = inputs.to(model_device)
-    masks = masks.to(model_device)
-    
-    # Convert to half precision if model is FP16
-    if next(neuralNetwork.parameters()).dtype == torch.float16:
-        inputs = inputs.half()
-        masks = masks.half()
-    
-    # Flatten masks to match expected shape
-    masks_flat = masks.view(masks.shape[0], -1)
-    
-    with torch.no_grad():
-        value, policy = neuralNetwork( inputs, policyMask=masks_flat )
-    
-    # Process outputs more efficiently
-    move_probabilities = np.zeros( ( num_inputs, 200 ), dtype=np.float32 )
-    
-    # Convert values to numpy in one operation
-    value = value.cpu().numpy().reshape( (num_inputs) )
-    
-    # Keep policy on GPU until needed for each board
-    policy_cpu = policy.cpu().numpy()
-    
-    for i in range( num_inputs ):
-        move_probabilities_tmp = encoder.decodePolicyOutput( boards[ i ], policy_cpu[ i ] )
-        move_probabilities[ i, : move_probabilities_tmp.shape[0] ] = move_probabilities_tmp
-    
-    return value, move_probabilities
+    # Use the fixed encoder.callNeuralNetworkBatched which properly detects
+    # TitanMini and uses the correct encoder (standard vs enhanced)
+    return encoder.callNeuralNetworkBatched( boards, neuralNetwork )
 
 # Clear caches periodically to prevent memory issues
 def clear_caches():

@@ -207,7 +207,7 @@ class ImprovedValueHead(nn.Module):
         self.fc2 = nn.Linear(hidden_dim, hidden_dim // 2)
         self.relu3 = nn.ReLU(inplace=True)
         self.fc3 = nn.Linear(hidden_dim // 2, 1)
-        self.tanh = nn.Tanh()
+        self.sigmoid = nn.Sigmoid()  # Changed to Sigmoid to match [0, 1] training targets
         
     def forward(self, x):
         x = self.conv(x)
@@ -220,7 +220,7 @@ class ImprovedValueHead(nn.Module):
         x = self.fc2(x)
         x = self.relu3(x)
         x = self.fc3(x)
-        x = self.tanh(x)
+        x = self.sigmoid(x)
         return x
 
 class ImprovedPolicyHead(nn.Module):

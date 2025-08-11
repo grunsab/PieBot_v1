@@ -19,12 +19,8 @@ import time
 import threading
 from queue import Queue
 import multiprocessing as mp
-import AlphaZeroNetwork
-import PieBotNetwork
-import PieNanoNetwork
-import PieNanoNetwork_v2
-from device_utils import get_optimal_device, optimize_for_device
-from quantization_utils import load_quantized_model
+from model_utils import load_model, detect_model_type, clean_state_dict
+from device_utils import get_optimal_device
 
 import sys
 
@@ -177,6 +173,64 @@ class UCIEngine:
         self.move_overhead = 30  # Default move overhead in milliseconds
         self.use_multiprocess = use_multiprocess
         
+    def _create_titanmini_from_weights(self, weights):
+        """Create TitanMini model with correct architecture from weights."""
+        # Try to detect architecture from weights
+        if isinstance(weights, dict):
+            # Check if it has args from training
+            if 'args' in weights:
+                args = weights['args']
+                num_layers = getattr(args, 'num_layers', 10)
+                d_model = getattr(args, 'd_model', 384)
+                num_heads = getattr(args, 'num_heads', 6)
+                d_ff = getattr(args, 'd_ff', 1536)
+                dropout = getattr(args, 'dropout', 0.1)
+                policy_weight = getattr(args, 'policy_weight', 1.0)
+                input_planes = getattr(args, 'input_planes', 112)
+            else:
+                # Try to infer from state dict
+                state_dict = weights.get('model_state_dict', weights)
+                
+                # Default TitanMini configuration
+                num_layers = 10
+                d_model = 384
+                num_heads = 6
+                d_ff = 1536
+                dropout = 0.1
+                policy_weight = 1.0
+                input_planes = 112
+                
+                # Try to infer d_model from input_projection weight
+                if 'input_projection.weight' in state_dict:
+                    d_model = state_dict['input_projection.weight'].shape[0]
+                    d_ff = d_model * 4  # Usually 4x d_model
+                
+                # Try to infer num_layers from transformer blocks
+                transformer_keys = [k for k in state_dict.keys() if 'transformer_blocks' in k and 'norm1' in k]
+                if transformer_keys:
+                    num_layers = len(set(k.split('.')[1] for k in transformer_keys if len(k.split('.')) > 1))
+                    if num_layers == 0:
+                        num_layers = 10  # Default fallback
+        else:
+            # Default TitanMini configuration
+            num_layers = 10
+            d_model = 384
+            num_heads = 6
+            d_ff = 1536
+            dropout = 0.1
+            policy_weight = 1.0
+            input_planes = 112
+        
+        return TitanMiniNetwork.TitanMini(
+            num_layers=num_layers,
+            d_model=d_model,
+            num_heads=num_heads,
+            d_ff=d_ff,
+            dropout=dropout,
+            policy_weight=policy_weight,
+            input_planes=input_planes
+        )
+    
     def _create_pienano_from_weights(self, weights):
         """Create PieNano model with correct architecture from weights."""
         # Try to detect architecture from weights
@@ -237,19 +291,26 @@ class UCIEngine:
             )
     
     def detect_model_type(self, weights, model_path=None):
-        """Detect whether this is an AlphaZeroNet, PieBotNet, PieNano, or PieNanoV2 model."""
+        """Detect whether this is an AlphaZeroNet, PieBotNet, PieNano, PieNanoV2, or TitanMini model."""
         # Check if it's a quantized model by filename
         if model_path and ('quantized' in model_path.lower() or 'quant' in model_path.lower()):
             # Try to determine the base model type from filename
-            if 'pienano' in model_path.lower() or 'pie_nano' in model_path.lower():
+            if 'titan' in model_path.lower() or 'titanmini' in model_path.lower():
+                return 'TitanMini_Quantized'
+            elif 'pienano' in model_path.lower() or 'pie_nano' in model_path.lower():
                 return 'PieNano_Quantized'
-            # If can't determine from filename, assume it's a quantized PieNano
-            # since that's the only model we support quantization for
+            # If can't determine from filename, check for TitanMini patterns
             return 'PieNano_Quantized'
         
         if isinstance(weights, dict):
             # Check state dict keys to determine model type
             state_dict = weights.get('model_state_dict', weights)
+            
+            # TitanMini has specific modules like chess_positional_encoding and relative_position_bias
+            has_chess_pos_encoding = any('chess_positional_encoding' in key for key in state_dict.keys())
+            has_relative_pos_bias = any('relative_position_bias' in key for key in state_dict.keys())
+            has_geglu = any('geglu' in key.lower() for key in state_dict.keys())
+            has_cls_token = any('cls_token' in key for key in state_dict.keys())
             
             # PieBotNet has specific modules like positional_encoding and transformer_blocks
             has_positional_encoding = any('positional_encoding' in key for key in state_dict.keys())
@@ -263,7 +324,9 @@ class UCIEngine:
             # PieNanoV2 has the improved policy head with fc1 and fc2 in policy_head
             has_improved_policy = any('policy_head.fc1' in key or 'policy_head.fc2' in key for key in state_dict.keys())
             
-            if has_positional_encoding or has_transformer:
+            if has_chess_pos_encoding or has_relative_pos_bias or has_geglu or has_cls_token:
+                return 'TitanMini'
+            elif has_positional_encoding or has_transformer:
                 return 'PieBotNet'
             elif has_improved_policy and (has_se or has_depthwise):
                 return 'PieNanoV2'
@@ -291,86 +354,17 @@ class UCIEngine:
                 sys.stdout.flush()
                 return False
                 
-            self.device, device_str = get_optimal_device()
             if self.verbose:
-                print(f"info string Loading model from: {full_path} on {device_str}")
+                print(f"info string Loading model from: {full_path}")
                 sys.stdout.flush()
             
-            # Check if it's a quantized model (TorchScript file)
-            is_quantized = False
-            weights = None
+            # Use the shared model loading utility
+            self.model, self.device, is_quantized = load_model(full_path)
             
-            # Try loading as TorchScript first (for quantized models)
-            try:
-                # Attempt to load as TorchScript
-                self.model = torch.jit.load(full_path, map_location='cpu')
-                is_quantized = True
-                if self.verbose:
-                    print(f"info string Loaded quantized PieNano model (TorchScript)")
-                    sys.stdout.flush()
-            except:
-                # Not a TorchScript file, load normally
-                weights = torch.load(full_path, map_location='cpu', weights_only=False)
-                is_quantized = False
+            if is_quantized and self.verbose:
+                print(f"info string Note: Quantized model will run on CPU")
+                sys.stdout.flush()
             
-            # If not quantized, detect and create the appropriate model type
-            if not is_quantized:
-                model_type = self.detect_model_type(weights, full_path)
-                
-                if model_type == 'PieNano_Quantized':
-                    # Handle quantized PieNano saved as state dict
-                    try:
-                        # Try loading with quantization utils
-                        self.model = load_quantized_model(full_path)
-                        is_quantized = True
-                        if self.verbose:
-                            print(f"info string Loaded quantized PieNano model")
-                            sys.stdout.flush()
-                    except:
-                        # Fallback: create regular PieNano and load state dict
-                        # This might happen if quantized model was saved as regular state dict
-                        self.model = self._create_pienano_from_weights(weights)
-                        if self.verbose:
-                            print(f"info string Loaded PieNano model (dequantized fallback)")
-                elif model_type == 'PieNanoV2':
-                    # Use PieNanoV2 configuration
-                    self.model = self._create_pienano_from_weights(weights)
-                    if self.verbose:
-                        print(f"info string Detected PieNanoV2 model")
-                elif model_type == 'PieNano':
-                    # Use default PieNano configuration
-                    self.model = self._create_pienano_from_weights(weights)
-                    if self.verbose:
-                        print(f"info string Detected PieNano model")
-                elif model_type == 'PieBotNet':
-                    # Use default PieBotNet configuration
-                    self.model = PieBotNetwork.PieBotNet()
-                    if self.verbose:
-                        print(f"info string Detected PieBotNet model")
-                else:
-                    self.model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
-                    if self.verbose:
-                        print(f"info string Detected AlphaZeroNet model")
-                
-                # Handle different model formats (only for non-quantized models)
-                if isinstance(weights, dict) and 'model_state_dict' in weights:
-                    self.model.load_state_dict(weights['model_state_dict'])
-                    if weights.get('model_type') == 'fp16':
-                        self.model = self.model.half()
-                        if self.verbose:
-                            print(f"info string Loaded FP16 model")
-                else:
-                    self.model.load_state_dict(weights)
-            
-            # Only optimize non-quantized models (quantized models must stay on CPU)
-            if not is_quantized:
-                self.model = optimize_for_device(self.model, self.device)
-            else:
-                # Quantized models run on CPU
-                self.model = self.model.cpu()
-                if self.verbose:
-                    print(f"info string Note: Quantized model will run on CPU")
-                    sys.stdout.flush()
             self.model.eval()
             
             for param in self.model.parameters():

@@ -337,8 +337,27 @@ def callNeuralNetwork( board, neuralNetwork ):
         value (float) the value of this position
         move_probabilities (numpy.array (num_moves) float) the move probabilities
     """
-
-    position, mask = encodePositionForInference( board )
+    
+    # Check if this is TitanMini model (needs 112 input planes)
+    is_titan_mini = False
+    if hasattr(neuralNetwork, '__class__'):
+        model_name = neuralNetwork.__class__.__name__
+        is_titan_mini = 'TitanMini' in model_name
+    
+    if is_titan_mini:
+        # Use enhanced encoder for TitanMini (112 planes)
+        try:
+            import encoder_enhanced
+            position = encoder_enhanced.encode_enhanced_position(board)
+        except ImportError:
+            print("Warning: encoder_enhanced not found, falling back to standard encoder")
+            position, _ = encodePositionForInference( board )
+    else:
+        # Use standard encoder for other models (16 planes)
+        position, _ = encodePositionForInference( board )
+    
+    # Get mask (same for all models)
+    _, mask = encodePositionForInference( board )
 
     position = torch.from_numpy( position )[ None, ... ]
         
@@ -356,7 +375,16 @@ def callNeuralNetwork( board, neuralNetwork ):
     
     # Flatten mask to match expected shape
     mask_flat = mask.view(mask.shape[0], -1)
-    value, policy = neuralNetwork( position, policyMask=mask_flat )
+    
+    # Ensure model is in eval mode and disable gradients
+    was_training = neuralNetwork.training
+    neuralNetwork.eval()
+    with torch.no_grad():
+        value, policy = neuralNetwork( position, policyMask=mask_flat )
+    
+    # Restore training mode if it was set
+    if was_training:
+        neuralNetwork.train()
     
     value = value.cpu().numpy()[ 0, 0 ]
 
@@ -381,14 +409,35 @@ def callNeuralNetworkBatched( boards, neuralNetwork ):
     """
 
     num_inputs = len( boards )
-
-    inputs = torch.zeros( (num_inputs, 16, 8, 8), dtype=torch.float32 )
+    
+    # Check if this is TitanMini model (needs 112 input planes)
+    is_titan_mini = False
+    if hasattr(neuralNetwork, '__class__'):
+        model_name = neuralNetwork.__class__.__name__
+        is_titan_mini = 'TitanMini' in model_name
+    
+    if is_titan_mini:
+        # Use enhanced encoder for TitanMini (112 planes)
+        inputs = torch.zeros( (num_inputs, 112, 8, 8), dtype=torch.float32 )
+    else:
+        # Use standard encoder for other models (16 planes)
+        inputs = torch.zeros( (num_inputs, 16, 8, 8), dtype=torch.float32 )
     
     masks = torch.zeros( (num_inputs, 72, 8, 8), dtype=torch.float32 )
 
     for i in range( num_inputs ):
-    
-        position, mask = encodePositionForInference( boards[ i ] )
+        if is_titan_mini:
+            # Use enhanced encoder for TitanMini
+            try:
+                import encoder_enhanced
+                position = encoder_enhanced.encode_enhanced_position(boards[i])
+            except ImportError:
+                print("Warning: encoder_enhanced not found, falling back to standard encoder")
+                position, _ = encodePositionForInference( boards[ i ] )
+        else:
+            position, _ = encodePositionForInference( boards[ i ] )
+        
+        _, mask = encodePositionForInference( boards[ i ] )
 
         inputs[ i ] = torch.from_numpy( position )
 
@@ -406,7 +455,16 @@ def callNeuralNetworkBatched( boards, neuralNetwork ):
 
     # Flatten masks to match expected shape
     masks_flat = masks.view(masks.shape[0], -1)
-    value, policy = neuralNetwork( inputs, policyMask=masks_flat )
+    
+    # Ensure model is in eval mode and disable gradients
+    was_training = neuralNetwork.training
+    neuralNetwork.eval()
+    with torch.no_grad():
+        value, policy = neuralNetwork( inputs, policyMask=masks_flat )
+    
+    # Restore training mode if it was set
+    if was_training:
+        neuralNetwork.train()
  
     move_probabilities = np.zeros( ( num_inputs, 200 ), dtype=np.float32 )
 

@@ -42,30 +42,28 @@ def encode_piece_positions(board, planes, offset=0):
     piece_map = {
         (chess.PAWN, chess.WHITE): offset + 0,
         (chess.PAWN, chess.BLACK): offset + 1,
-        (chess.KNIGHT, chess.WHITE): offset + 2,
-        (chess.KNIGHT, chess.BLACK): offset + 3,
+        (chess.ROOK, chess.WHITE): offset + 2,
+        (chess.ROOK, chess.BLACK): offset + 3,
         (chess.BISHOP, chess.WHITE): offset + 4,
         (chess.BISHOP, chess.BLACK): offset + 5,
-        (chess.ROOK, chess.WHITE): offset + 6,
-        (chess.ROOK, chess.BLACK): offset + 7,
+        (chess.KNIGHT, chess.WHITE): offset + 6,
+        (chess.KNIGHT, chess.BLACK): offset + 7,
         (chess.QUEEN, chess.WHITE): offset + 8,
         (chess.QUEEN, chess.BLACK): offset + 9,
         (chess.KING, chess.WHITE): offset + 10,
         (chess.KING, chess.BLACK): offset + 11,
     }
     
-    for square, piece in board.piece_map().items():
+    # Create a working board - mirror it if it's black's turn
+    working_board = board.mirror() if not board.turn else board
+    
+    for square, piece in working_board.piece_map().items():
         piece_type = piece.piece_type
         color = piece.color
         plane_idx = piece_map[(piece_type, color)]
         rank = chess.square_rank(square)
         file = chess.square_file(square)
         
-        # Mirror position if it's black's turn for consistency
-        if not board.turn:
-            rank = 7 - rank
-            file = 7 - file
-            
         planes[plane_idx, rank, file] = 1.0
     
     return offset + 12
@@ -103,52 +101,39 @@ def encode_enhanced_position(board, history=None):
         historical_positions = history.get_history()
         for i, hist_board in enumerate(historical_positions):
             if hist_board is not None:
-                encode_piece_positions(hist_board, planes, 12 + i * 12)
+                # Need to use the same turn perspective for historical positions
+                hist_board_copy = hist_board.copy()
+                hist_board_copy.turn = board.turn  # Set turn to match current board
+                encode_piece_positions(hist_board_copy, planes, 12 + i * 12)
     
-    # Encode castling rights
-    if board.has_kingside_castling_rights(chess.WHITE):
-        planes[108, :, :] = 1.0
-    if board.has_queenside_castling_rights(chess.WHITE):
-        planes[109, :, :] = 1.0
-    if board.has_kingside_castling_rights(chess.BLACK):
-        planes[110, :, :] = 1.0
-    if board.has_queenside_castling_rights(chess.BLACK):
-        planes[111, :, :] = 1.0
+    # When it's black's turn, we've already mirrored the board in encode_piece_positions
+    # So we need to interpret castling rights from the mirrored perspective
+    if board.turn:
+        # White's turn - normal encoding
+        if board.has_kingside_castling_rights(chess.WHITE):
+            planes[108, :, :] = 1.0
+        if board.has_queenside_castling_rights(chess.WHITE):
+            planes[109, :, :] = 1.0
+        if board.has_kingside_castling_rights(chess.BLACK):
+            planes[110, :, :] = 1.0
+        if board.has_queenside_castling_rights(chess.BLACK):
+            planes[111, :, :] = 1.0
+    else:
+        # Black's turn - swap the castling rights since board is mirrored
+        if board.has_kingside_castling_rights(chess.BLACK):
+            planes[108, :, :] = 1.0  # Black's kingside becomes "white's" in mirrored view
+        if board.has_queenside_castling_rights(chess.BLACK):
+            planes[109, :, :] = 1.0  # Black's queenside becomes "white's" in mirrored view
+        if board.has_kingside_castling_rights(chess.WHITE):
+            planes[110, :, :] = 1.0  # White's kingside becomes "black's" in mirrored view
+        if board.has_queenside_castling_rights(chess.WHITE):
+            planes[111, :, :] = 1.0  # White's queenside becomes "black's" in mirrored view
     
-    # Encode en passant square
-    if board.ep_square is not None:
-        ep_rank = chess.square_rank(board.ep_square)
-        ep_file = chess.square_file(board.ep_square)
-        if not board.turn:
-            ep_rank = 7 - ep_rank
-            ep_file = 7 - ep_file
-        # Mark en passant in appropriate pawn plane
-        pawn_plane = 0 if board.turn else 1
-        planes[pawn_plane, ep_rank, ep_file] = 0.5  # Use 0.5 to distinguish from regular pawns
+    # Note: En passant information could be added as a separate plane
+    # to avoid interfering with piece detection in the pawn planes
     
-    # Add move counters as continuous features
-    # Normalize to [0, 1] range
-    halfmove_clock = min(board.halfmove_clock / 100.0, 1.0)  # Cap at 100 halfmoves
-    fullmove_number = min(board.fullmove_number / 200.0, 1.0)  # Cap at 200 moves
-    
-    # Add to king planes as they're least likely to be full
-    planes[10, :, :] += halfmove_clock * 0.1  # White king plane
-    planes[11, :, :] += fullmove_number * 0.1  # Black king plane
-    
-    # Mirror the entire position if it's black's turn
-    if not board.turn:
-        # Swap white and black pieces
-        for i in range(0, 12, 2):
-            planes[[i, i+1]] = planes[[i+1, i]]
-        # Do the same for historical positions
-        for hist_idx in range(1, 9):
-            base = 12 * hist_idx
-            for i in range(0, 12, 2):
-                if base + i + 1 < 108:  # Safety check
-                    planes[[base + i, base + i + 1]] = planes[[base + i + 1, base + i]]
-        # Swap castling rights
-        planes[[108, 110]] = planes[[110, 108]]
-        planes[[109, 111]] = planes[[111, 109]]
+    # Note: Move counters could be added as separate planes or metadata, 
+    # but we don't add them to piece planes to avoid interfering with piece detection
     
     return planes
 

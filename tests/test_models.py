@@ -7,142 +7,11 @@ import chess
 import chess.pgn
 import MCTS
 import torch
-import AlphaZeroNetwork
-import PieBotNetwork
-import PieNanoNetwork
-import PieNanoNetwork_v2
 import time
-from device_utils import get_optimal_device, optimize_for_device
-from quantization_utils import load_quantized_model
+from model_utils import load_model
 from datetime import datetime
 import io
 from chess_openings import get_opening, get_total_openings
-
-def detect_model_type(weights):
-    """Detect whether this is an AlphaZeroNet, PieBotNet, PieNano, or PieNanoV2 model."""
-    if isinstance(weights, dict):
-        # Check state dict keys to determine model type
-        state_dict = weights.get('model_state_dict', weights)
-        
-        # PieBotNet has specific modules like positional_encoding and transformer_blocks
-        has_positional_encoding = any('positional_encoding' in key for key in state_dict.keys())
-        has_transformer = any('transformer_blocks' in key for key in state_dict.keys())
-        
-        # PieNano models have SE (Squeeze-Excitation) modules and depthwise convolutions
-        has_se = any('se.' in key or 'squeeze' in key or 'excitation' in key for key in state_dict.keys())
-        has_depthwise = any('depthwise' in key for key in state_dict.keys())
-        has_wdl_value = any('value_head.fc2' in key for key in state_dict.keys())
-        
-        # PieNanoV2 has the improved policy head with fc1 and fc2 in policy_head
-        has_improved_policy = any('policy_head.fc1' in key or 'policy_head.fc2' in key for key in state_dict.keys())
-        
-        if has_positional_encoding or has_transformer:
-            return 'PieBotNet'
-        elif has_improved_policy and (has_se or has_depthwise):
-            return 'PieNanoV2'
-        elif (has_se or has_depthwise) and has_wdl_value:
-            return 'PieNano'
-    return 'AlphaZeroNet'
-
-def load_model(model_file, device_hint=None):
-    """
-    Load a model from file with automatic device selection.
-    
-    Args:
-        model_file: Path to model file
-        device_hint: Optional device hint (for multi-GPU setups)
-    
-    Returns:
-        model: Loaded model
-        device: Device the model is on
-    """
-    if device_hint is None:
-        device, device_str = get_optimal_device()
-    else:
-        device = device_hint
-        device_str = str(device)
-    
-    # Always load to CPU first to check model type
-    weights = torch.load(model_file, map_location='cpu', weights_only=False)
-    
-    # Check if it's a static quantized model
-    is_static_quantized = (isinstance(weights, dict) and 
-                         'quant.scale' in weights and 
-                         any(k.startswith('base_model.') for k in weights.keys()))
-    
-    if is_static_quantized or (isinstance(weights, dict) and weights.get('model_type') == 'static_quantized'):
-        # Static quantized models run on CPU
-        cpu_device = torch.device('cpu')
-        try:
-            # Try loading as TorchScript
-            model = torch.jit.load(model_file, map_location=cpu_device)
-            model.eval()
-            print(f"Loaded static quantized model (TorchScript) on CPU for {model_file}")
-            device = cpu_device
-        except Exception as e:
-            print(f"Warning: Could not load as TorchScript: {e}")
-            try:
-                # Try using quantization_utils
-                model = load_quantized_model(model_file, cpu_device, 20, 256)
-                print(f"Loaded static quantized model on CPU for {model_file}")
-                device = cpu_device
-            except Exception as e2:
-                print(f"Warning: Static quantization not supported: {e2}")
-                print("Falling back to regular model...")
-                # Fall back to loading as regular model
-                model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
-                new_state_dict = {}
-                for key, value in weights.items():
-                    if key.startswith('base_model.'):
-                        new_key = key.replace('base_model.', '')
-                        if any(x in new_key for x in ['.scale', '.zero_point', '_packed_params']):
-                            continue
-                        if hasattr(value, 'dequantize'):
-                            new_state_dict[new_key] = value.dequantize()
-                        else:
-                            new_state_dict[new_key] = value
-                model.load_state_dict(new_state_dict, strict=False)
-                model.to(device)
-                model.eval()
-                print(f"Loaded dequantized model on {device_str} for {model_file}")
-    else:
-        # Detect and create the appropriate model type
-        model_type = detect_model_type(weights)
-        
-        if model_type == 'PieBotNet':
-            model = PieBotNetwork.PieBotNet()
-            print(f"Detected PieBotNet model")
-        elif model_type == 'PieNanoV2':
-            model = PieNanoNetwork_v2.PieNanoV2(num_blocks=8, num_filters=128)
-            print(f"Detected PieNanoV2 model")
-        elif model_type == 'PieNano':
-            model = PieNanoNetwork.PieNano(num_blocks=8, num_filters=128)
-            print(f"Detected PieNano model")
-        else:
-            model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
-            print(f"Detected AlphaZeroNet model")
-        
-        # Handle different model formats
-        if isinstance(weights, dict) and 'model_state_dict' in weights:
-            # FP16 model format
-            model.load_state_dict(weights['model_state_dict'])
-            if weights.get('model_type') == 'fp16':
-                model = model.half()
-                print(f"Loaded FP16 model on {device_str} for {model_file}")
-            else:
-                print(f"Loaded model on {device_str} for {model_file}")
-        else:
-            # Regular model format
-            model.load_state_dict(weights)
-            print(f"Loaded model on {device_str} for {model_file}")
-        
-        model = optimize_for_device(model, device)
-        model.eval()
-    
-    for param in model.parameters():
-        param.requires_grad = False
-        
-    return model, device
 
 def play_game(model1, device1, model2, device2, rollouts=100, threads=1, verbose=False, opening_index=None):
     """
@@ -270,8 +139,8 @@ def main():
     print(f"Model 2: {args.model2}")
     
     # Load both models
-    model1, device1 = load_model(args.model1)
-    model2, device2 = load_model(args.model2)
+    model1, device1, _ = load_model(args.model1)
+    model2, device2, _ = load_model(args.model2)
     
     print(f"\nStarting tournament: {args.games} games")
     print(f"Rollouts per move: {args.rollouts}")

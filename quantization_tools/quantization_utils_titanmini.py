@@ -222,6 +222,9 @@ def apply_dynamic_quantization(model: TitanMini) -> nn.Module:
     model = model.cpu()
     model.eval()
     
+    # Set quantization backend to qnnpack (works on all platforms)
+    torch.backends.quantized.engine = 'qnnpack'
+    
     # Apply dynamic quantization to Linear layers (main components in transformers)
     # Note: Conv2d layers are rare in TitanMini, mainly Linear layers
     quantized_model = torch.quantization.quantize_dynamic(

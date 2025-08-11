@@ -273,7 +273,7 @@ class ValueHead(nn.Module):
             nn.GELU(),
             nn.Dropout(0.1),
             nn.Linear(256, 1),
-            nn.Tanh() # Tanh activation to scale the output to [-1, 1]
+            nn.Sigmoid() # Sigmoid activation to scale the output to [0, 1] to match training targets
         )
         
     def forward(self, x):

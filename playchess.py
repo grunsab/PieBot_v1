@@ -7,8 +7,13 @@ import AlphaZeroNetwork
 import PieBotNetwork
 import PieNanoNetwork
 import PieNanoNetwork_v2
+import TitanMiniNetwork
 import time
 from device_utils import get_optimal_device, optimize_for_device, get_gpu_count
+try:
+    from quantization_tools.quantization_utils_titanmini import load_quantized_model
+except ImportError:
+    load_quantized_model = None
 
 def tolist( move_generator ):
     """
@@ -25,11 +30,75 @@ def tolist( move_generator ):
         moves.append( move )
     return moves
 
-def detect_model_type(weights):
-    """Detect whether this is an AlphaZeroNet, PieBotNet, PieNano, or PieNanoV2 model."""
+def load_quantized_titanmini(model_path, device):
+    """
+    Load a quantized TitanMini model from a state dict file.
+    """
+    import torch.nn.quantized.dynamic as nnqd
+    
+    # Load the quantized state dict
+    state_dict = torch.load(model_path, map_location='cpu', weights_only=False)
+    
+    # Create a TitanMini model with the same architecture
+    model = TitanMiniNetwork.TitanMini(
+        num_layers=10,
+        d_model=384,
+        num_heads=6,
+        d_ff=1536,
+        dropout=0.1,
+        policy_weight=1.0,
+        input_planes=112
+    )
+    
+    # Move to CPU (quantized models must run on CPU)
+    model = model.cpu()
+    model.eval()
+    
+    # The saved model has quantized Linear layers
+    # We need to replace the Linear layers with quantized versions and load the state
+    # This is complex, so we'll use a simpler approach: load as regular model
+    # and apply dynamic quantization again
+    
+    # Filter out quantization-specific keys and load regular weights
+    regular_state_dict = {}
+    for k, v in state_dict.items():
+        if not any(x in k for x in ['scale', 'zero_point', '_packed_params']):
+            regular_state_dict[k] = v
+    
+    # Try to load what we can
+    model.load_state_dict(regular_state_dict, strict=False)
+    
+    # Apply dynamic quantization to recreate the quantized model
+    torch.backends.quantized.engine = 'qnnpack'
+    quantized_model = torch.quantization.quantize_dynamic(
+        model,
+        qconfig_spec={torch.nn.Linear},
+        dtype=torch.qint8
+    )
+    
+    return quantized_model
+
+def detect_model_type(weights, model_path=None):
+    """Detect whether this is an AlphaZeroNet, PieBotNet, PieNano, PieNanoV2, or TitanMini model."""
+    # Check if it's a quantized model by filename
+    if model_path and ('quantized' in model_path.lower() or 'quant' in model_path.lower() or '_q' in model_path.lower()):
+        # Try to determine the base model type from filename
+        if 'titan' in model_path.lower() or 'titanmini' in model_path.lower():
+            return 'TitanMini_Quantized'
+        elif 'pienano' in model_path.lower() or 'pie_nano' in model_path.lower():
+            return 'PieNano_Quantized'
+        # Could be a quantized model without clear naming
+        return 'Unknown_Quantized'
+    
     if isinstance(weights, dict):
         # Check state dict keys to determine model type
         state_dict = weights.get('model_state_dict', weights)
+        
+        # TitanMini has specific modules like chess_positional_encoding and relative_position_bias
+        has_chess_pos_encoding = any('chess_positional_encoding' in key for key in state_dict.keys())
+        has_relative_pos_bias = any('relative_position_bias' in key for key in state_dict.keys())
+        has_geglu = any('geglu' in key.lower() for key in state_dict.keys())
+        has_cls_token = any('cls_token' in key for key in state_dict.keys())
         
         # PieBotNet has specific modules like positional_encoding and transformer_blocks
         has_positional_encoding = any('positional_encoding' in key for key in state_dict.keys())
@@ -43,7 +112,9 @@ def detect_model_type(weights):
         # PieNanoV2 has the improved policy head with fc1 and fc2 in policy_head
         has_improved_policy = any('policy_head.fc1' in key or 'policy_head.fc2' in key for key in state_dict.keys())
         
-        if has_positional_encoding or has_transformer:
+        if has_chess_pos_encoding or has_relative_pos_bias or has_geglu or has_cls_token:
+            return 'TitanMini'
+        elif has_positional_encoding or has_transformer:
             return 'PieBotNet'
         elif has_improved_policy and (has_se or has_depthwise):
             return 'PieNanoV2'
@@ -76,12 +147,57 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
         device, device_str = get_optimal_device()
         print(f'Using device: {device_str}')
         
+        # Try loading as TorchScript first (for quantized models)
+        is_quantized = False
+        try:
+            # Attempt to load as TorchScript
+            model = torch.jit.load(model_file, map_location='cpu')
+            is_quantized = True
+            model.eval()
+            print(f"Loaded quantized model (TorchScript) on CPU")
+            device = torch.device('cpu')  # Quantized models run on CPU
+            for param in model.parameters():
+                param.requires_grad = False
+            return [model], [device]
+        except:
+            # Not a TorchScript file, load normally
+            pass
+        
         # Load weights to check model type
         weights = torch.load(model_file, map_location='cpu', weights_only=False)
         
         # Detect and create the appropriate model type
-        model_type = detect_model_type(weights)
-        if model_type == 'PieBotNet':
+        model_type = detect_model_type(weights, model_file)
+        
+        if model_type == 'TitanMini_Quantized':
+            # Handle quantized TitanMini
+            try:
+                model = load_quantized_titanmini(model_file, device)
+                is_quantized = True
+                print(f"Loaded quantized TitanMini model on CPU")
+                device = torch.device('cpu')  # Quantized models run on CPU
+            except Exception as e:
+                print(f"Warning: Failed to load as quantized TitanMini: {e}")
+                # Fallback: create regular TitanMini and load state dict
+                model = TitanMiniNetwork.TitanMini()
+                print(f"Loading TitanMini model (dequantized fallback) on {device_str}")
+        elif model_type == 'TitanMini':
+            # Use default TitanMini configuration
+            model = TitanMiniNetwork.TitanMini()
+            print(f"Loading TitanMini model on {device_str}")
+        elif model_type == 'PieNano_Quantized':
+            # Handle quantized PieNano saved as state dict
+            try:
+                # Try using quantization_utils
+                model = load_quantized_model(model_file)
+                is_quantized = True
+                print(f"Loaded quantized PieNano model on CPU")
+                device = torch.device('cpu')  # Quantized models run on CPU
+            except:
+                # Fallback: create regular PieNano and load state dict
+                model = PieNanoNetwork.PieNano(num_blocks=8, num_filters=128)
+                print(f"Loading PieNano model (dequantized fallback) on {device_str}")
+        elif model_type == 'PieBotNet':
             # Use default PieBotNet configuration
             model = PieBotNetwork.PieBotNet()
             print(f"Loading PieBotNet model on {device_str}")
@@ -97,18 +213,33 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
             model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
             print(f"Loading AlphaZeroNet model on {device_str}")
         
-        # Handle different model formats
-        if isinstance(weights, dict) and 'model_state_dict' in weights:
-            # FP16 model format
-            model.load_state_dict(weights['model_state_dict'])
-            if weights.get('model_type') == 'fp16':
+        # Only load state dict if not quantized
+        if not is_quantized:
+            # Handle different model formats
+            if isinstance(weights, dict) and 'model_state_dict' in weights:
+                state_dict = weights['model_state_dict']
+            else:
+                state_dict = weights
+            
+            # Handle _orig_mod prefix from torch.compile
+            if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
+                new_state_dict = {}
+                for k, v in state_dict.items():
+                    if k.startswith('_orig_mod.'):
+                        new_state_dict[k[10:]] = v  # Remove '_orig_mod.' prefix
+                    else:
+                        new_state_dict[k] = v
+                state_dict = new_state_dict
+            
+            model.load_state_dict(state_dict)
+            
+            # Handle FP16 models
+            if isinstance(weights, dict) and weights.get('model_type') == 'fp16':
                 model = model.half()
                 print(f"Loaded FP16 model on {device_str}")
-        else:
-            # Regular model format
-            model.load_state_dict(weights)
+            
+            model = optimize_for_device(model, device)
         
-        model = optimize_for_device(model, device)
         model.eval()
         
         for param in model.parameters():
@@ -132,8 +263,12 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
         weights = torch.load(model_file, map_location='cpu', weights_only=False)
         
         # Detect and create the appropriate model type
-        model_type = detect_model_type(weights)
-        if model_type == 'PieBotNet':
+        model_type = detect_model_type(weights, model_file)
+        if model_type == 'TitanMini':
+            # Use default TitanMini configuration
+            model = TitanMiniNetwork.TitanMini()
+            print(f"Loading TitanMini model on GPU {gpu_id}")
+        elif model_type == 'PieBotNet':
             # Use default PieBotNet configuration
             model = PieBotNetwork.PieBotNet()
             print(f"Loading PieBotNet model on GPU {gpu_id}")
@@ -151,14 +286,26 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
         
         # Handle different model formats
         if isinstance(weights, dict) and 'model_state_dict' in weights:
-            # FP16 model format
-            model.load_state_dict(weights['model_state_dict'])
-            if weights.get('model_type') == 'fp16':
-                model = model.half()
-                print(f"Loaded FP16 model on GPU {gpu_id}")
+            state_dict = weights['model_state_dict']
         else:
-            # Regular model format
-            model.load_state_dict(weights)
+            state_dict = weights
+        
+        # Handle _orig_mod prefix from torch.compile
+        if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
+            new_state_dict = {}
+            for k, v in state_dict.items():
+                if k.startswith('_orig_mod.'):
+                    new_state_dict[k[10:]] = v  # Remove '_orig_mod.' prefix
+                else:
+                    new_state_dict[k] = v
+            state_dict = new_state_dict
+        
+        model.load_state_dict(state_dict)
+        
+        # Handle FP16 models
+        if isinstance(weights, dict) and weights.get('model_type') == 'fp16':
+            model = model.half()
+            print(f"Loaded FP16 model on GPU {gpu_id}")
         
         model.to(device)
         model.eval()

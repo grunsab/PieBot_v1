@@ -263,7 +263,7 @@ class ValueHead(nn.Module):
             nn.GELU(),
             nn.Dropout(0.1),
             nn.Linear(d_model // 2, 1),
-            nn.Tanh() # Scale output to [-1, 1]
+            nn.Sigmoid() # Scale output to [0, 1] to match training targets
         )
         
     def forward(self, x):
@@ -339,7 +339,16 @@ class TitanMini(nn.Module):
                 nn.init.xavier_uniform_(p)
         nn.init.normal_(self.cls_token, std=0.02)
     
-    def forward(self, x, value_target=None, policy_target=None, policy_mask=None):
+    def forward(self, x, value_target=None, policy_target=None, policy_mask=None, 
+                valueTarget=None, policyTarget=None, policyMask=None):
+        # Handle both camelCase and snake_case parameter names for compatibility
+        if valueTarget is not None:
+            value_target = valueTarget
+        if policyTarget is not None:
+            policy_target = policyTarget
+        if policyMask is not None:
+            policy_mask = policyMask
+            
         batch_size = x.shape[0]
         
         # 1. Project input planes to token embeddings.
