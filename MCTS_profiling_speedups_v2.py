@@ -606,7 +606,7 @@ class Root( Node ):
                     edge.clearVirtualLoss()
 
     def parallelRolloutsProgressive( self, board, neuralNetwork, total_rollouts, 
-                                   initial_batch_size=16, max_batch_size=256 ):
+                                   initial_batch_size=8, max_batch_size=256 ):
         """
         Progressive batching to reduce path collisions while maintaining high throughput.
         

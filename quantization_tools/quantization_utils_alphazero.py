@@ -131,7 +131,7 @@ def prepare_alphazero_for_quantization(model: AlphaZeroNet) -> QuantizableAlphaZ
 
 def create_calibration_dataset_selfplay(model: AlphaZeroNet, 
                                        num_positions: int = 2000,
-                                       rollouts_per_move: int = 100,
+                                       rollouts_per_move: int = 20,
                                        threads: int = 10,
                                        input_planes: int = 16) -> List[torch.Tensor]:
     """
@@ -151,7 +151,7 @@ def create_calibration_dataset_selfplay(model: AlphaZeroNet,
     model.eval()
     
     # Calculate how many games we need
-    moves_per_game = 20  # Collect first 20 moves of each game
+    moves_per_game = 40  # Collect first 40 moves of each game
     num_games = (num_positions + moves_per_game - 1) // moves_per_game
     
     print(f"Generating {num_positions} calibration positions from {num_games} self-play games...")
@@ -198,7 +198,7 @@ def create_calibration_dataset_selfplay(model: AlphaZeroNet,
             board.push(best_move)
         
         # Progress update
-        if (game_idx + 1) % 10 == 0:
+        if (game_idx + 1) % 1 == 0:
             print(f"  Completed {game_idx + 1}/{num_games} games, collected {positions_collected} positions")
     
     print(f"Generated {len(calibration_data)} high-quality calibration positions from self-play")
@@ -394,8 +394,8 @@ def apply_static_quantization(model: AlphaZeroNet,
             # Use high-quality self-play calibration
             calibration_data = create_calibration_dataset_selfplay(
                 model=model,
-                num_positions=1000,
-                rollouts_per_move=100,
+                num_positions=300,
+                rollouts_per_move=20,
                 threads=10,
                 input_planes=16
             )
@@ -482,10 +482,235 @@ def load_quantized_model(model_path: str) -> nn.Module:
     return model
 
 
+def check_accuracy_preservation(original_model: AlphaZeroNet, quantized_model: nn.Module,
+                               calibration_data: Optional[List[torch.Tensor]] = None,
+                               num_positions: int = 200, input_planes: int = 16,
+                               tolerance: float = 0.01) -> dict:
+    """
+    Check how well the quantized model preserves accuracy compared to the original.
+    
+    Args:
+        original_model: Original FP32 AlphaZeroNet model
+        quantized_model: Quantized INT8 model
+        calibration_data: If provided, use these positions for accuracy checking (from calibration)
+        num_positions: Number of test positions to evaluate (if calibration_data not provided)
+        input_planes: Number of input planes (16 for AlphaZero)
+        tolerance: Maximum acceptable difference for considering outputs as matching
+        
+    Returns:
+        Dictionary with detailed accuracy metrics
+    """
+    # Use calibration data if provided, otherwise generate test positions
+    if calibration_data is not None:
+        test_positions = calibration_data[:min(len(calibration_data), num_positions)]
+        actual_num_positions = len(test_positions)
+        print(f"\nChecking accuracy preservation on {actual_num_positions} calibration positions...")
+        test_boards = None  # We'll skip detailed move checks when using calibration data
+    else:
+        print(f"\nChecking accuracy preservation on {num_positions} generated positions...")
+        
+        # Generate diverse test positions with boards for move analysis
+        test_positions = []
+        test_boards = []
+        
+        for i in range(num_positions):
+            board = chess.Board()
+            
+            # Vary game phase for comprehensive testing
+            if i < num_positions // 3:
+                # Opening positions
+                num_moves = np.random.randint(0, 15)
+            elif i < 2 * num_positions // 3:
+                # Middle game positions
+                num_moves = np.random.randint(15, 40)
+            else:
+                # Endgame positions
+                num_moves = np.random.randint(40, 80)
+            
+            for _ in range(num_moves):
+                legal_moves = list(board.legal_moves)
+                if not legal_moves:
+                    break
+                board.push(np.random.choice(legal_moves))
+            
+            test_boards.append(board.copy())
+            input_data = encoder.encodePosition(board)
+            test_positions.append(torch.tensor(input_data, dtype=torch.float32).unsqueeze(0))
+        
+        actual_num_positions = num_positions
+    
+    # Prepare models
+    original_model.eval()
+    original_model.cpu()
+    quantized_model.eval()
+    
+    # Collect metrics
+    value_diffs = []
+    policy_diffs = []
+    policy_kl_divs = []
+    top1_matches = 0
+    top3_matches = 0
+    top5_matches = 0
+    
+    print("Evaluating output differences...")
+    
+    with torch.no_grad():
+        for idx, pos in enumerate(test_positions):
+            # For detailed move analysis, we need the board state
+            if test_boards is not None:
+                board = test_boards[idx]
+                # Create policy mask for legal moves
+                legal_moves = list(board.legal_moves)
+                policy_mask = torch.zeros((1, 72, 8, 8), dtype=torch.float32)
+                for move in legal_moves:
+                    move_idx = encoder.encodeMove(move, board.turn)
+                    if move_idx is not None:
+                        plane, row, col = move_idx
+                        policy_mask[0, plane, row, col] = 1.0
+            else:
+                # Use a permissive mask when we don't have board state
+                policy_mask = torch.ones((1, 72, 8, 8), dtype=torch.float32)
+            
+            # Get outputs from both models
+            orig_value, orig_policy = original_model(pos, policyMask=policy_mask)
+            quant_value, quant_policy = quantized_model(pos, policyMask=policy_mask)
+            
+            # Calculate value difference
+            value_diff = torch.abs(orig_value - quant_value).item()
+            value_diffs.append(value_diff)
+            
+            # Calculate policy differences
+            policy_diff = torch.abs(orig_policy - quant_policy).mean().item()
+            policy_diffs.append(policy_diff)
+            
+            # Calculate KL divergence for policy distributions
+            # Add small epsilon to avoid log(0)
+            epsilon = 1e-10
+            orig_policy_safe = orig_policy + epsilon
+            quant_policy_safe = quant_policy + epsilon
+            kl_div = (orig_policy_safe * torch.log(orig_policy_safe / quant_policy_safe)).sum().item()
+            policy_kl_divs.append(kl_div)
+            
+            # Check top move predictions only if we have board state
+            if test_boards is not None:
+                orig_policy_flat = orig_policy.view(-1)
+                quant_policy_flat = quant_policy.view(-1)
+                
+                # Get top-k indices
+                orig_top5 = torch.topk(orig_policy_flat, min(5, len(legal_moves))).indices
+                quant_top5 = torch.topk(quant_policy_flat, min(5, len(legal_moves))).indices
+                
+                if orig_top5[0] == quant_top5[0]:
+                    top1_matches += 1
+                if orig_top5[0] in quant_top5[:3]:
+                    top3_matches += 1
+                if orig_top5[0] in quant_top5[:5]:
+                    top5_matches += 1
+            
+            # Progress indicator
+            if (idx + 1) % 50 == 0:
+                print(f"  Evaluated {idx + 1}/{actual_num_positions} positions")
+    
+    # Calculate statistics
+    value_diffs = np.array(value_diffs)
+    policy_diffs = np.array(policy_diffs)
+    policy_kl_divs = np.array(policy_kl_divs)
+    
+    accuracy_results = {
+        'value_mean_diff': np.mean(value_diffs),
+        'value_max_diff': np.max(value_diffs),
+        'value_std_diff': np.std(value_diffs),
+        'value_within_tolerance': np.sum(value_diffs < tolerance) / len(value_diffs) * 100,
+        
+        'policy_mean_diff': np.mean(policy_diffs),
+        'policy_max_diff': np.max(policy_diffs),
+        'policy_std_diff': np.std(policy_diffs),
+        'policy_within_tolerance': np.sum(policy_diffs < tolerance) / len(policy_diffs) * 100,
+        
+        'policy_mean_kl_div': np.mean(policy_kl_divs),
+        'policy_max_kl_div': np.max(policy_kl_divs),
+        
+        'num_positions_tested': actual_num_positions,
+        'tolerance': tolerance,
+        'used_calibration_data': calibration_data is not None
+    }
+    
+    # Add move prediction rates only if we have board states
+    if test_boards is not None:
+        accuracy_results['top1_match_rate'] = top1_matches / actual_num_positions * 100
+        accuracy_results['top3_match_rate'] = top3_matches / actual_num_positions * 100
+        accuracy_results['top5_match_rate'] = top5_matches / actual_num_positions * 100
+    
+    # Print detailed results
+    print("\n" + "="*60)
+    print("ACCURACY PRESERVATION ANALYSIS")
+    print("="*60)
+    
+    if calibration_data is not None:
+        print(f"Using {actual_num_positions} positions from calibration dataset")
+    else:
+        print(f"Using {actual_num_positions} randomly generated positions")
+    
+    print("\nValue Head Accuracy:")
+    print(f"  Mean absolute difference: {accuracy_results['value_mean_diff']:.6f}")
+    print(f"  Max absolute difference:  {accuracy_results['value_max_diff']:.6f}")
+    print(f"  Std deviation:            {accuracy_results['value_std_diff']:.6f}")
+    print(f"  Within tolerance ({tolerance}): {accuracy_results['value_within_tolerance']:.1f}%")
+    
+    print("\nPolicy Head Accuracy:")
+    print(f"  Mean absolute difference: {accuracy_results['policy_mean_diff']:.6f}")
+    print(f"  Max absolute difference:  {accuracy_results['policy_max_diff']:.6f}")
+    print(f"  Std deviation:            {accuracy_results['policy_std_diff']:.6f}")
+    print(f"  Within tolerance ({tolerance}): {accuracy_results['policy_within_tolerance']:.1f}%")
+    print(f"  Mean KL divergence:       {accuracy_results['policy_mean_kl_div']:.6f}")
+    
+    if test_boards is not None:
+        print("\nMove Prediction Consistency:")
+        print(f"  Top-1 move match rate: {accuracy_results['top1_match_rate']:.1f}%")
+        print(f"  Top-3 move match rate: {accuracy_results['top3_match_rate']:.1f}%")
+        print(f"  Top-5 move match rate: {accuracy_results['top5_match_rate']:.1f}%")
+    
+    # Overall assessment
+    print("\nOverall Assessment:")
+    if test_boards is not None:
+        # Full assessment with move prediction
+        if (accuracy_results['value_within_tolerance'] > 95 and 
+            accuracy_results['policy_within_tolerance'] > 95 and
+            accuracy_results['top1_match_rate'] > 85):
+            print("  ✓ EXCELLENT: Quantized model maintains high accuracy")
+        elif (accuracy_results['value_within_tolerance'] > 90 and 
+              accuracy_results['policy_within_tolerance'] > 90 and
+              accuracy_results['top1_match_rate'] > 75):
+            print("  ✓ GOOD: Quantized model maintains acceptable accuracy")
+        elif (accuracy_results['value_within_tolerance'] > 80 and 
+              accuracy_results['policy_within_tolerance'] > 80 and
+              accuracy_results['top1_match_rate'] > 65):
+            print("  ⚠ FAIR: Some accuracy loss, but model is still usable")
+        else:
+            print("  ✗ POOR: Significant accuracy loss detected")
+    else:
+        # Assessment based on value/policy differences only
+        if (accuracy_results['value_within_tolerance'] > 95 and 
+            accuracy_results['policy_within_tolerance'] > 95):
+            print("  ✓ EXCELLENT: Quantized model maintains high accuracy")
+        elif (accuracy_results['value_within_tolerance'] > 90 and 
+              accuracy_results['policy_within_tolerance'] > 90):
+            print("  ✓ GOOD: Quantized model maintains acceptable accuracy")
+        elif (accuracy_results['value_within_tolerance'] > 80 and 
+              accuracy_results['policy_within_tolerance'] > 80):
+            print("  ⚠ FAIR: Some accuracy loss, but model is still usable")
+        else:
+            print("  ✗ POOR: Significant accuracy loss detected")
+    
+    print("="*60)
+    
+    return accuracy_results
+
+
 def benchmark_quantized_model(original_model: AlphaZeroNet, quantized_model: nn.Module,
                              num_positions: int = 100, input_planes: int = 16) -> dict:
     """
-    Benchmark the quantized model against the original.
+    Benchmark the quantized model against the original for speed comparison.
     
     Args:
         original_model: Original FP32 AlphaZeroNet model
@@ -498,7 +723,7 @@ def benchmark_quantized_model(original_model: AlphaZeroNet, quantized_model: nn.
     """
     import time
     
-    print(f"\nBenchmarking models on {num_positions} positions...")
+    print(f"\nBenchmarking inference speed on {num_positions} positions...")
     
     # Generate test positions
     test_positions = []
@@ -517,10 +742,20 @@ def benchmark_quantized_model(original_model: AlphaZeroNet, quantized_model: nn.
     # Benchmark original model
     original_model.eval()
     original_model.cpu()
+    quantized_model.eval()
     
     # Create dummy policy mask (all moves legal for benchmarking)
     policy_mask = torch.ones((1, 72, 8, 8), dtype=torch.float32)
     
+    # Warm-up runs
+    print("  Running warm-up iterations...")
+    with torch.no_grad():
+        for _ in range(10):
+            _ = original_model(test_positions[0], policyMask=policy_mask)
+            _ = quantized_model(test_positions[0], policyMask=policy_mask)
+    
+    # Benchmark original model
+    print("  Benchmarking original model...")
     start_time = time.time()
     with torch.no_grad():
         for pos in test_positions:
@@ -528,8 +763,7 @@ def benchmark_quantized_model(original_model: AlphaZeroNet, quantized_model: nn.
     original_time = time.time() - start_time
     
     # Benchmark quantized model
-    quantized_model.eval()
-    
+    print("  Benchmarking quantized model...")
     start_time = time.time()
     with torch.no_grad():
         for pos in test_positions:
@@ -539,30 +773,17 @@ def benchmark_quantized_model(original_model: AlphaZeroNet, quantized_model: nn.
     # Calculate speedup
     speedup = original_time / quantized_time
     
-    # Compare outputs on a sample
-    with torch.no_grad():
-        sample_input = test_positions[0]
-        orig_value, orig_policy = original_model(sample_input, policyMask=policy_mask)
-        quant_value, quant_policy = quantized_model(sample_input, policyMask=policy_mask)
-        
-        policy_diff = torch.abs(orig_policy - quant_policy).mean().item()
-        value_diff = torch.abs(orig_value - quant_value).mean().item()
-    
     results = {
         'original_time': original_time,
         'quantized_time': quantized_time,
         'speedup': speedup,
         'positions_per_second_original': num_positions / original_time,
         'positions_per_second_quantized': num_positions / quantized_time,
-        'policy_diff': policy_diff,
-        'value_diff': value_diff
     }
     
-    print(f"\nBenchmark Results:")
-    print(f"  Original model: {results['positions_per_second_original']:.1f} pos/sec")
+    print(f"\nSpeed Benchmark Results:")
+    print(f"  Original model:  {results['positions_per_second_original']:.1f} pos/sec")
     print(f"  Quantized model: {results['positions_per_second_quantized']:.1f} pos/sec")
-    print(f"  Speedup: {speedup:.2f}x")
-    print(f"  Policy difference: {policy_diff:.6f}")
-    print(f"  Value difference: {value_diff:.6f}")
+    print(f"  Speedup:         {speedup:.2f}x")
     
     return results

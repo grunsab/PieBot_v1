@@ -18,6 +18,7 @@ from quantization_tools.quantization_utils_alphazero import (
     create_calibration_dataset,
     create_calibration_dataset_selfplay,
     benchmark_quantized_model,
+    check_accuracy_preservation,
     load_quantized_model
 )
 
@@ -72,7 +73,7 @@ def main():
                        help='Number of positions for calibration (static only, default: 1000)')
     parser.add_argument('--calibration-method', choices=['selfplay', 'random'], default='selfplay',
                        help='Calibration method: selfplay (high quality) or random (fast)')
-    parser.add_argument('--rollouts', type=int, default=100,
+    parser.add_argument('--rollouts', type=int, default=20,
                        help='MCTS rollouts per move for selfplay calibration (default: 100)')
     parser.add_argument('--mcts-threads', type=int, default=10,
                        help='Number of threads for MCTS during calibration (default: 10)')
@@ -81,6 +82,10 @@ def main():
     parser.add_argument('--output', help='Output path for quantized model (optional)')
     parser.add_argument('--benchmark', action='store_true',
                        help='Run benchmark comparison after quantization')
+    parser.add_argument('--check-accuracy', action='store_true', default=True,
+                       help='Check accuracy preservation after quantization (default: True)')
+    parser.add_argument('--no-check-accuracy', dest='check_accuracy', action='store_false',
+                       help='Skip accuracy preservation check')
     parser.add_argument('--test', action='store_true',
                        help='Test loading the quantized model after saving')
     
@@ -117,6 +122,8 @@ def main():
     print(f"Model size (FP32): ~{total_params * 4 / 1024 / 1024:.1f} MB")
     
     # Apply quantization based on type
+    calibration_data = None  # Track calibration data for accuracy checking
+    
     if args.type == 'dynamic':
         print("\nApplying dynamic INT8 quantization...")
         quantized_model = apply_dynamic_quantization(model)
@@ -191,16 +198,39 @@ def main():
         except Exception as e:
             print(f"✗ Error loading model: {e}")
     
-    # Run benchmark if requested
-    if args.benchmark:
-        print("\nRunning performance benchmark...")
+    # Check accuracy preservation if requested (default: True)
+    accuracy_results = None
+    if args.check_accuracy:
+        print("\nChecking accuracy preservation...")
         # Reload original model for fair comparison
         original_model = AlphaZeroNet(num_blocks=num_blocks, num_filters=num_filters)
         original_model.load_state_dict(state_dict)
         original_model.eval()
         
-        # Run benchmark
-        results = benchmark_quantized_model(
+        # Run accuracy check
+        accuracy_results = check_accuracy_preservation(
+            original_model,
+            quantized_model,
+            calibration_data=calibration_data,  # Use calibration data if available
+            num_positions=200,  # Check on up to 200 positions
+            input_planes=16,
+            tolerance=0.01
+        )
+    else:
+        print("\nSkipping accuracy check (use --check-accuracy to enable)")
+    
+    # Run benchmark if requested
+    if args.benchmark:
+        print("\nRunning performance benchmark...")
+        
+        # Ensure we have the original model for comparison
+        if not args.check_accuracy:
+            original_model = AlphaZeroNet(num_blocks=num_blocks, num_filters=num_filters)
+            original_model.load_state_dict(state_dict)
+            original_model.eval()
+        
+        # Run speed benchmark
+        speed_results = benchmark_quantized_model(
             original_model,
             quantized_model,
             num_positions=100,
@@ -213,8 +243,10 @@ def main():
         print(f"Model: AlphaZeroNet ({num_blocks}×{num_filters})")
         print(f"Quantization: {'Dynamic' if args.type == 'dynamic' else 'Static'} INT8")
         print(f"Size reduction: ~75% (FP32 → INT8)")
-        print(f"Speed improvement: {results['speedup']:.2f}x")
-        print(f"Accuracy impact: Minimal (< 0.01 difference)")
+        print(f"Speed improvement: {speed_results['speedup']:.2f}x")
+        if accuracy_results:
+            print(f"Accuracy preserved: {accuracy_results['value_within_tolerance']:.1f}% value, "
+                  f"{accuracy_results['policy_within_tolerance']:.1f}% policy within tolerance")
         print("="*50)
     
     print("\n✓ Quantization complete!")
