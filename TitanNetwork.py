@@ -282,6 +282,30 @@ class ValueHead(nn.Module):
         return self.value_proj(x.squeeze(1))
 
 
+class WDLValueHead(nn.Module):
+    """
+    Win-Draw-Loss (WDL) value head. Predicts three probabilities: win, draw, and loss.
+    This provides richer evaluation signal than a single scalar value and helps
+    the model better understand complex endgame positions where draws are likely.
+    """
+    def __init__(self, d_model):
+        super().__init__()
+        self.value_proj = nn.Sequential(
+            nn.Linear(d_model, 512),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, 256),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(256, 3),  # Output 3 logits for Win, Draw, Loss
+        )
+        
+    def forward(self, x):
+        # The input x is the feature vector for the [CLS] token: [batch, 1, d_model]
+        # We remove the sequence dimension before projecting.
+        return self.value_proj(x.squeeze(1))
+
+
 # ==============================================================================
 # 4. Main Model: Titan
 # This class assembles all the components into the final network.
@@ -310,12 +334,14 @@ class Titan(nn.Module):
         policy_weight=1.0,
         input_planes=112, # e.g., 14 piece types * 8 history + other features
         use_gradient_checkpointing=False,
+        use_wdl=True,  # Use Win-Draw-Loss value head
     ):
         super().__init__()
 
         self.policy_weight = policy_weight
         self.d_model = d_model
         self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.use_wdl = use_wdl
 
         # A 1x1 conv is an efficient way to project the input planes to the model's dimension.
         self.input_projection = nn.Conv2d(input_planes, d_model, kernel_size=1)
@@ -336,7 +362,10 @@ class Titan(nn.Module):
         self.output_norm = nn.LayerNorm(d_model)
 
         # The output heads.
-        self.value_head = ValueHead(d_model)
+        if use_wdl:
+            self.value_head = WDLValueHead(d_model)
+        else:
+            self.value_head = ValueHead(d_model)
         self.policy_head = PolicyHead(d_model)  # 64*72 = 4608 classes
         
         # Loss functions.
@@ -389,7 +418,38 @@ class Titan(nn.Module):
 
         # --- Loss path when targets are provided ---
         if value_target is not None and policy_target is not None:
-            value_loss = self.mse_loss(value, value_target)
+            if self.use_wdl:
+                # Handle WDL value loss
+                if value_target.dim() == 2 and value_target.shape[1] == 3:
+                    # Already in WDL format
+                    wdl_targets = value_target
+                else:
+                    # Convert scalar values to WDL (win/draw/loss)
+                    # value_target is in [0, 1] range (0=loss, 0.5=draw, 1=win)
+                    wdl_targets = torch.zeros(batch_size, 3, device=value_target.device)
+                    
+                    # Simple conversion: map [0, 1] to WDL probabilities
+                    # Use a more sophisticated mapping that encourages draws in balanced positions
+                    value_flat = value_target.view(-1)
+                    
+                    # Win probability: increases as value approaches 1
+                    win_prob = torch.clamp(2 * value_flat - 1, 0, 1)  # Maps [0.5, 1] -> [0, 1]
+                    # Loss probability: increases as value approaches 0  
+                    loss_prob = torch.clamp(1 - 2 * value_flat, 0, 1)  # Maps [0, 0.5] -> [1, 0]
+                    # Draw probability: peaks at value=0.5
+                    draw_prob = 1 - torch.abs(2 * value_flat - 1)  # Maps to a peak at 0.5
+                    
+                    # Normalize to ensure probabilities sum to 1
+                    total = win_prob + draw_prob + loss_prob + 1e-8
+                    wdl_targets[:, 0] = win_prob / total
+                    wdl_targets[:, 1] = draw_prob / total
+                    wdl_targets[:, 2] = loss_prob / total
+                
+                # WDL loss using cross entropy with soft targets
+                log_probs = F.log_softmax(value, dim=1)
+                value_loss = -(wdl_targets * log_probs).sum(dim=1).mean()
+            else:
+                value_loss = self.mse_loss(value, value_target)
 
             # Optionally apply legal move mask to logits
             masked_policy = policy
@@ -424,7 +484,15 @@ class Titan(nn.Module):
                 policy = policy.masked_fill(policy_mask == 0, -1e9)
             
             policy_softmax = F.softmax(policy, dim=1)
-            return value, policy_softmax
+            
+            # Convert WDL to scalar value for inference
+            if self.use_wdl:
+                # Convert WDL logits to scalar value: win_prob - loss_prob
+                wdl_probs = F.softmax(value, dim=1)
+                value_scalar = wdl_probs[:, 0:1] - wdl_probs[:, 2:3]  # Keep dimensions for compatibility
+                return value_scalar, policy_softmax
+            else:
+                return value, policy_softmax
 
 
 def count_parameters(model):
