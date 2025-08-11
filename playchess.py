@@ -202,8 +202,9 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
             model = PieBotNetwork.PieBotNet()
             print(f"Loading PieBotNet model on {device_str}")
         elif model_type == 'PieNanoV2':
-            # Use default PieNanoV2 configuration (8 blocks, 128 filters)
-            model = PieNanoNetwork_v2.PieNanoV2(num_blocks=8, num_filters=128)
+            # Use PieNanoV2 configuration matching the saved weights
+            # The saved weights use policy_hidden_dim=768 instead of default 256
+            model = PieNanoNetwork_v2.PieNanoV2(num_blocks=16, num_filters=256, policy_hidden_dim=768)
             print(f"Loading PieNanoV2 model on {device_str}")
         elif model_type == 'PieNano':
             # Use default PieNano configuration (8 blocks, 128 filters)
@@ -273,8 +274,8 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
             model = PieBotNetwork.PieBotNet()
             print(f"Loading PieBotNet model on GPU {gpu_id}")
         elif model_type == 'PieNanoV2':
-            # Use default PieNanoV2 configuration (8 blocks, 128 filters)
-            model = PieNanoNetwork_v2.PieNanoV2(num_blocks=8, num_filters=128)
+            # Use default PieNanoV2 configuration (16 blocks, 256 filters)
+            model = PieNanoNetwork_v2.PieNanoV2(num_blocks=16, num_filters=256)
             print(f"Loading PieNanoV2 model on GPU {gpu_id}")
         elif model_type == 'PieNano':
             # Use default PieNano configuration (8 blocks, 128 filters)
