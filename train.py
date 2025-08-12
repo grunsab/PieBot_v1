@@ -1,15 +1,21 @@
-
 import os
 import torch
 import torch.optim as optim
 import torch.nn as nn
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader, ConcatDataset, Subset, random_split
+from torch.optim.lr_scheduler import OneCycleLR, CosineAnnealingWarmRestarts, ReduceLROnPlateau
+from torch.cuda.amp import GradScaler, autocast
+from torch.utils.tensorboard import SummaryWriter
 from CCRLDataset import CCRLDataset
 from RLDataset import RLDataset, WeightedRLSampler
 from AlphaZeroNetwork import AlphaZeroNet
 from device_utils import get_optimal_device, optimize_for_device, get_batch_size_for_device, get_num_workers_for_device
 import argparse
 import re
+import time
+import numpy as np
+from datetime import datetime
+import json
 
 #Training params (defaults)
 default_epochs = 40
@@ -19,10 +25,17 @@ default_lr = 0.001
 default_policy_weight = 1.0
 ccrl_dir = os.path.abspath('games_training_data/reformatted/')
 rl_dir = os.path.abspath('games_training_data/selfplay/')
-logmode=True
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train AlphaZero network')
+    
+    # Model architecture
+    parser.add_argument('--num-blocks', type=int, default=default_blocks,
+                        help=f'Number of residual blocks (default: {default_blocks})')
+    parser.add_argument('--num-filters', type=int, default=default_filters,
+                        help=f'Number of filters (default: {default_filters})')
+    
+    # Training params
     parser.add_argument('--resume', type=str,
                         help='Path to checkpoint to resume training from')
     parser.add_argument('--epochs', type=int, default=default_epochs,
@@ -31,16 +44,28 @@ def parse_args():
                         help=f'Learning rate (default: {default_lr})')
     parser.add_argument('--batch-size', type=int, default=None,
                         help='Batch size (default: auto-detect based on device)')
-    parser.add_argument('--num-blocks', type=int, default=default_blocks,
-                        help=f'Number of residual blocks (default: {default_blocks})')
-    parser.add_argument('--num-filters', type=int, default=default_filters,
-                        help=f'Number of filters (default: {default_filters})')
+    parser.add_argument('--gradient-accumulation', type=int, default=1,
+                        help='Gradient accumulation steps (default: 1)')
+    parser.add_argument('--grad-clip', type=float, default=1.0,
+                        help='Gradient clipping value (default: 1.0, 0 to disable)')
+    
+    # Scheduler options
+    parser.add_argument('--scheduler', choices=['onecycle', 'cosine', 'plateau', 'none'], default='onecycle',
+                        help='Learning rate scheduler (default: onecycle)')
+    parser.add_argument('--warmup-epochs', type=int, default=2,
+                        help='Number of warmup epochs for OneCycleLR (default: 2)')
+    
+    # Model params
     parser.add_argument('--output', type=str, default=None,
                         help='Output filename for saved model')
     parser.add_argument('--policy-weight', type=float, default=default_policy_weight,
                         help=f'Weight for policy loss relative to value loss (default: {default_policy_weight})')
+    
+    # Data params
     parser.add_argument('--mode', choices=['supervised', 'rl', 'mixed'], default='supervised',
                         help='Training mode: supervised (CCRL data), rl (self-play), or mixed (both)')
+    parser.add_argument('--ccrl-dir', type=str, default=ccrl_dir,
+                        help='Directory containing CCRL training data')
     parser.add_argument('--rl-dir', type=str, default=rl_dir,
                         help='Directory containing self-play training data (HDF5 files)')
     parser.add_argument('--mixed-ratio', type=float, default=0.5,
@@ -51,34 +76,82 @@ def parse_args():
                         help='Weight recent games more heavily in RL mode (Leela approach)')
     parser.add_argument('--rl-weight-decay', type=float, default=0.05,
                         help='Weight decay factor for older games (default: 0.05)')
+    parser.add_argument('--validation-split', type=float, default=0.1,
+                        help='Validation split ratio (default: 0.1)')
+    
+    # Advanced training
+    parser.add_argument('--mixed-precision', action='store_true',
+                        help='Use mixed precision training (FP16)')
+    parser.add_argument('--early-stopping-patience', type=int, default=10,
+                        help='Early stopping patience in epochs (default: 10, 0 to disable)')
+    parser.add_argument('--ema-decay', type=float, default=0,
+                        help='Exponential moving average decay (default: 0, disabled)')
+    
+    # Logging
+    parser.add_argument('--log-dir', type=str, default='logs/alphazero',
+                        help='Directory for tensorboard logs')
+    parser.add_argument('--checkpoint-dir', type=str, default='checkpoints/alphazero',
+                        help='Directory for saving checkpoints')
+    parser.add_argument('--save-every', type=int, default=5,
+                        help='Save checkpoint every N epochs (default: 5)')
+    parser.add_argument('--log-interval', type=int, default=100,
+                        help='Log training metrics every N batches (default: 100)')
+    parser.add_argument('--verbose', action='store_true',
+                        help='Enable verbose logging')
+    
     return parser.parse_args()
 
-def train():
-    args = parse_args()
-    # Get optimal device and configure for training
-    device, device_str = get_optimal_device()
-    print(f'Using device: {device_str}')
+
+class EMA:
+    """Exponential Moving Average for model parameters."""
     
-    # Optimize batch size and num_workers for the device
-    batch_size = args.batch_size if args.batch_size else get_batch_size_for_device()
-    num_workers = get_num_workers_for_device()
-    print(f'Batch size: {batch_size}, Workers: {num_workers}')
+    def __init__(self, model, decay=0.9999):
+        self.model = model
+        self.decay = decay
+        self.shadow = {}
+        self.backup = {}
+        
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+    
+    def update(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = self.decay * self.shadow[name] + (1 - self.decay) * param.data
+    
+    def apply_shadow(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                self.backup[name] = param.data
+                param.data = self.shadow[name]
+    
+    def restore(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                param.data = self.backup[name]
+        self.backup = {}
+
+
+def create_data_loaders(args, device):
+    """Create training and validation data loaders."""
     
     # Create dataset based on training mode
     if args.mode == 'supervised':
         print(f'Training mode: Supervised learning on CCRL dataset')
-        train_ds = CCRLDataset(ccrl_dir, soft_targets=True)
+        print(f'CCRL directory: {args.ccrl_dir}')
+        dataset = CCRLDataset(args.ccrl_dir, soft_targets=True, temperature=args.label_smoothing_temp)
     elif args.mode == 'rl':
         print(f'Training mode: Reinforcement learning on self-play data')
+        print(f'RL directory: {args.rl_dir}')
         if args.rl_weight_recent:
             print(f'Using weighted sampling with decay factor {args.rl_weight_decay}')
-        train_ds = RLDataset(args.rl_dir, weight_recent=args.rl_weight_recent, 
-                           weight_decay=args.rl_weight_decay)
+        dataset = RLDataset(args.rl_dir, weight_recent=args.rl_weight_recent, 
+                          weight_decay=args.rl_weight_decay)
     else:  # mixed mode
         print(f'Training mode: Mixed (RL ratio: {args.mixed_ratio})')
-        # Use soft targets for CCRL in mixed mode for compatibility
-        print(f'Using soft targets for CCRL data with temperature {args.label_smoothing_temp}')
-        ccrl_ds = CCRLDataset(ccrl_dir, soft_targets=True, temperature=args.label_smoothing_temp)
+        print(f'Using soft targets with temperature {args.label_smoothing_temp}')
+        ccrl_ds = CCRLDataset(args.ccrl_dir, soft_targets=True, temperature=args.label_smoothing_temp)
         rl_ds = RLDataset(args.rl_dir)
         
         # Calculate sizes for balanced sampling
@@ -91,25 +164,240 @@ def train():
         rl_indices = random.sample(range(len(rl_ds)), min(rl_size, len(rl_ds)))
         
         # Create subsets
-        from torch.utils.data import Subset
         ccrl_subset = Subset(ccrl_ds, ccrl_indices)
         rl_subset = Subset(rl_ds, rl_indices)
         
         # Concatenate datasets
-        train_ds = ConcatDataset([ccrl_subset, rl_subset])
+        dataset = ConcatDataset([ccrl_subset, rl_subset])
         print(f'Dataset sizes - CCRL: {len(ccrl_subset)}, RL: {len(rl_subset)}')
     
-    # Create data loader with appropriate sampler
-    if args.mode == 'rl' and args.rl_weight_recent:
+    # Split into train and validation
+    total_size = len(dataset)
+    val_size = int(total_size * args.validation_split)
+    train_size = total_size - val_size
+    
+    # Use random_split for proper train/val separation
+    train_dataset, val_dataset = random_split(
+        dataset, 
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(42)  # Fixed seed for reproducibility
+    )
+    
+    print(f'Dataset split - Train: {len(train_dataset)}, Validation: {len(val_dataset)}')
+    
+    # Get optimal batch size and workers
+    batch_size = args.batch_size if args.batch_size else get_batch_size_for_device()
+    num_workers = get_num_workers_for_device()
+    
+    # Create data loaders
+    if args.mode == 'rl' and args.rl_weight_recent and not isinstance(dataset, ConcatDataset):
         # Use weighted sampler for RL mode with recent game weighting
-        sampler = WeightedRLSampler(train_ds)
-        train_loader = DataLoader(train_ds, batch_size=batch_size, sampler=sampler, 
-                                num_workers=num_workers)
+        train_sampler = WeightedRLSampler(train_dataset)
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=batch_size, 
+            sampler=train_sampler,
+            num_workers=num_workers,
+            pin_memory=(device.type == 'cuda')
+        )
     else:
         # Standard shuffled data loader
-        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, 
-                                num_workers=num_workers)
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=batch_size, 
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=(device.type == 'cuda')
+        )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size * 2,  # Can use larger batch for validation
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=(device.type == 'cuda')
+    )
+    
+    return train_loader, val_loader
 
+
+def train_epoch(model, train_loader, optimizer, scheduler, scaler, args, epoch, writer, device, ema=None):
+    """Train for one epoch."""
+    model.train()
+    
+    total_loss = 0
+    total_value_loss = 0
+    total_policy_loss = 0
+    num_batches = 0
+    
+    start_time = time.time()
+    
+    for batch_idx, data in enumerate(train_loader):
+        # Move data to device
+        position = data['position'].to(device)
+        valueTarget = data['value'].to(device)
+        policyTarget = data['policy'].to(device)
+        
+        # Mixed precision training
+        if args.mixed_precision and device.type == 'cuda':
+            with autocast():
+                loss, valueLoss, policyLoss = model(position, valueTarget=valueTarget,
+                                                    policyTarget=policyTarget)
+                loss = loss / args.gradient_accumulation
+            
+            scaler.scale(loss).backward()
+            
+            if (batch_idx + 1) % args.gradient_accumulation == 0:
+                if args.grad_clip > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+                
+                if scheduler and args.scheduler == 'onecycle':
+                    scheduler.step()
+                
+                if ema:
+                    ema.update()
+        else:
+            loss, valueLoss, policyLoss = model(position, valueTarget=valueTarget,
+                                               policyTarget=policyTarget)
+            loss = loss / args.gradient_accumulation
+            loss.backward()
+            
+            if (batch_idx + 1) % args.gradient_accumulation == 0:
+                if args.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                
+                optimizer.step()
+                optimizer.zero_grad()
+                
+                if scheduler and args.scheduler == 'onecycle':
+                    scheduler.step()
+                
+                if ema:
+                    ema.update()
+        
+        # Track losses
+        total_loss += loss.item() * args.gradient_accumulation
+        total_value_loss += valueLoss.item()
+        total_policy_loss += policyLoss.item()
+        num_batches += 1
+        
+        # Log to tensorboard
+        if batch_idx % args.log_interval == 0:
+            global_step = epoch * len(train_loader) + batch_idx
+            if writer:
+                writer.add_scalar('Train/Loss', loss.item() * args.gradient_accumulation, global_step)
+                writer.add_scalar('Train/ValueLoss', valueLoss.item(), global_step)
+                writer.add_scalar('Train/PolicyLoss', policyLoss.item(), global_step)
+                writer.add_scalar('Train/LearningRate', optimizer.param_groups[0]['lr'], global_step)
+            
+            if args.verbose:
+                elapsed = time.time() - start_time
+                samples_per_sec = (batch_idx + 1) * train_loader.batch_size / elapsed
+                print(f'Epoch {epoch+1} [{batch_idx}/{len(train_loader)}] '
+                      f'Loss: {loss.item() * args.gradient_accumulation:.4f} '
+                      f'Value: {valueLoss.item():.4f} '
+                      f'Policy: {policyLoss.item():.4f} '
+                      f'Samples/s: {samples_per_sec:.1f}')
+    
+    avg_loss = total_loss / num_batches
+    avg_value_loss = total_value_loss / num_batches
+    avg_policy_loss = total_policy_loss / num_batches
+    
+    return avg_loss, avg_value_loss, avg_policy_loss
+
+
+def validate(model, val_loader, args, epoch, writer, device):
+    """Validate the model."""
+    model.eval()
+    
+    total_loss = 0
+    total_value_loss = 0
+    total_policy_loss = 0
+    num_batches = 0
+    
+    with torch.no_grad():
+        for data in val_loader:
+            # Move data to device
+            position = data['position'].to(device)
+            valueTarget = data['value'].to(device)
+            policyTarget = data['policy'].to(device)
+            
+            # Forward pass - need to temporarily switch to train mode to get losses
+            model.train()
+            loss, valueLoss, policyLoss = model(position, valueTarget=valueTarget,
+                                               policyTarget=policyTarget)
+            model.eval()
+            
+            total_loss += loss.item()
+            total_value_loss += valueLoss.item()
+            total_policy_loss += policyLoss.item()
+            num_batches += 1
+    
+    avg_loss = total_loss / num_batches
+    avg_value_loss = total_value_loss / num_batches
+    avg_policy_loss = total_policy_loss / num_batches
+    
+    if writer:
+        writer.add_scalar('Val/Loss', avg_loss, epoch)
+        writer.add_scalar('Val/ValueLoss', avg_value_loss, epoch)
+        writer.add_scalar('Val/PolicyLoss', avg_policy_loss, epoch)
+    
+    return avg_loss, avg_value_loss, avg_policy_loss
+
+
+def save_checkpoint(model, optimizer, scheduler, epoch, args, best_val_loss, checkpoint_path, ema=None):
+    """Save model checkpoint."""
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+        'best_val_loss': best_val_loss,
+        'args': vars(args),
+        'model_config': {
+            'num_blocks': args.num_blocks,
+            'num_filters': args.num_filters,
+            'policy_weight': args.policy_weight
+        }
+    }
+    
+    if ema:
+        checkpoint['ema_state_dict'] = ema.shadow
+    
+    torch.save(checkpoint, checkpoint_path)
+    print(f'Checkpoint saved to {checkpoint_path}')
+
+
+def train():
+    args = parse_args()
+    
+    # Get optimal device and configure for training
+    device, device_str = get_optimal_device()
+    print(f'Using device: {device_str}')
+    
+    # Setup directories and logging
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    os.makedirs(args.log_dir, exist_ok=True)
+    
+    # Initialize tensorboard writer
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_subdir = os.path.join(args.log_dir, f'run_{timestamp}')
+    writer = SummaryWriter(log_subdir)
+    print(f'Tensorboard logs: {log_subdir}')
+    
+    # Create data loaders
+    train_loader, val_loader = create_data_loaders(args, device)
+    
+    # Adjust batch size if specified
+    batch_size = args.batch_size if args.batch_size else get_batch_size_for_device()
+    print(f'Batch size: {batch_size}, Gradient accumulation: {args.gradient_accumulation}')
+    print(f'Effective batch size: {batch_size * args.gradient_accumulation}')
+    
     # Determine model architecture
     num_blocks = args.num_blocks
     num_filters = args.num_filters
@@ -126,72 +414,176 @@ def train():
     
     # Create and optimize model for the device
     alphaZeroNet = AlphaZeroNet(num_blocks, num_filters, policy_weight=args.policy_weight)
+    alphaZeroNet = optimize_for_device(alphaZeroNet, device)
+    
+    # Count parameters
+    total_params = sum(p.numel() for p in alphaZeroNet.parameters())
+    trainable_params = sum(p.numel() for p in alphaZeroNet.parameters() if p.requires_grad)
+    print(f'Model initialized: {num_blocks}x{num_filters}')
+    print(f'Total parameters: {total_params:,}')
+    print(f'Trainable parameters: {trainable_params:,}')
+    
+    # Initialize optimizer
+    optimizer = optim.Adam(alphaZeroNet.parameters(), lr=args.lr)
+    
+    # Initialize scheduler
+    scheduler = None
+    if args.scheduler == 'onecycle':
+        total_steps = len(train_loader) * args.epochs
+        warmup_steps = len(train_loader) * args.warmup_epochs
+        scheduler = OneCycleLR(
+            optimizer, 
+            max_lr=args.lr * 10,
+            total_steps=total_steps,
+            pct_start=warmup_steps/total_steps,
+            anneal_strategy='cos',
+            div_factor=10,
+            final_div_factor=100
+        )
+        print(f'Using OneCycleLR scheduler with {args.warmup_epochs} warmup epochs')
+    elif args.scheduler == 'cosine':
+        scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
+        print('Using CosineAnnealingWarmRestarts scheduler')
+    elif args.scheduler == 'plateau':
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+        print('Using ReduceLROnPlateau scheduler')
+    
+    # Initialize mixed precision scaler
+    scaler = GradScaler() if args.mixed_precision and device.type == 'cuda' else None
+    if scaler:
+        print('Mixed precision training enabled')
+    
+    # Initialize EMA
+    ema = EMA(alphaZeroNet, decay=args.ema_decay) if args.ema_decay > 0 else None
+    if ema:
+        print(f'Exponential moving average enabled with decay {args.ema_decay}')
     
     # Load checkpoint if resuming
     start_epoch = 0
+    best_val_loss = float('inf')
+    early_stopping_counter = 0
+    
     if args.resume:
         if os.path.exists(args.resume):
             print(f'Loading checkpoint from {args.resume}')
             checkpoint = torch.load(args.resume, map_location=device)
-            # Handle loading old checkpoints that don't have policy_weight in state_dict
-            alphaZeroNet.load_state_dict(checkpoint, strict=False)
-            print(f'Checkpoint loaded successfully (policy_weight={args.policy_weight})')
+            
+            # Load model state
+            alphaZeroNet.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            
+            # Load optimizer state
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            
+            # Load scheduler state if available
+            if scheduler and checkpoint.get('scheduler_state_dict'):
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            
+            # Load training state
+            start_epoch = checkpoint.get('epoch', 0) + 1
+            best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+            
+            # Load EMA state if available
+            if ema and checkpoint.get('ema_state_dict'):
+                ema.shadow = checkpoint['ema_state_dict']
+            
+            print(f'Resumed from epoch {start_epoch}, best val loss: {best_val_loss:.4f}')
         else:
             raise FileNotFoundError(f'Checkpoint file not found: {args.resume}')
-
-    alphaZeroNet = optimize_for_device(alphaZeroNet, device)
     
-    optimizer = optim.Adam(alphaZeroNet.parameters(), lr=args.lr)
-    mseLoss = nn.MSELoss()
-
-    print( 'Starting training' )
-
+    # Training loop
+    print(f'\nStarting training for {args.epochs} epochs...')
+    print('=' * 60)
+    
     for epoch in range(start_epoch, args.epochs):
+        epoch_start_time = time.time()
         
-        alphaZeroNet.train()
-        for iter_num, data in enumerate( train_loader ):
-
-            optimizer.zero_grad()
-
-            # Move data to device
-            position = data[ 'position' ].to(device)
-            valueTarget = data[ 'value' ].to(device)
-            policyTarget = data[ 'policy' ].to(device)
-
-            # You can manually examine some the training data here
-
-            loss, valueLoss, policyLoss = alphaZeroNet( position, valueTarget=valueTarget,
-                                 policyTarget=policyTarget )
-
-            loss.backward()
-
-            optimizer.step()
-
-            message = 'Epoch {:03} | Step {:05} / {:05} | Total loss {:0.5f} | Value loss {:0.5f} | Policy loss {:0.5f}'.format(
-                     epoch, iter_num, len( train_loader ), float( loss ), float( valueLoss ), float( policyLoss ) )
-            
-            if iter_num != 0 and not logmode:
-                print( ('\b' * len(message) ), end='' )
-            print( message, end='', flush=True )
-            if logmode:
-                print('')
+        # Train
+        train_loss, train_value_loss, train_policy_loss = train_epoch(
+            alphaZeroNet, train_loader, optimizer, scheduler, scaler, 
+            args, epoch, writer, device, ema
+        )
         
-        print( '' )
+        # Validate
+        val_loss, val_value_loss, val_policy_loss = validate(
+            alphaZeroNet, val_loader, args, epoch, writer, device
+        )
         
-        # Determine output filename
-        if args.output:
-            networkFileName = args.output
-        elif args.resume:
-            # When resuming, add '_continued' to avoid overwriting original
-            base_name = f'AlphaZeroNet_{num_blocks}x{num_filters}'
-            networkFileName = f'{base_name}_continued.pt'
+        # Step schedulers that need validation loss
+        if args.scheduler == 'plateau' and scheduler:
+            scheduler.step(val_loss)
+        elif args.scheduler == 'cosine' and scheduler:
+            scheduler.step()
+        
+        # Print epoch summary
+        epoch_time = time.time() - epoch_start_time
+        print(f'\nEpoch {epoch+1}/{args.epochs} - Time: {epoch_time:.1f}s')
+        print(f'Train - Loss: {train_loss:.4f}, Value: {train_value_loss:.4f}, Policy: {train_policy_loss:.4f}')
+        print(f'Val   - Loss: {val_loss:.4f}, Value: {val_value_loss:.4f}, Policy: {val_policy_loss:.4f}')
+        print(f'LR: {optimizer.param_groups[0]["lr"]:.6f}')
+        
+        # Save checkpoint periodically
+        if (epoch + 1) % args.save_every == 0:
+            checkpoint_path = os.path.join(args.checkpoint_dir, f'checkpoint_epoch_{epoch+1}.pt')
+            save_checkpoint(alphaZeroNet, optimizer, scheduler, epoch, args, 
+                          best_val_loss, checkpoint_path, ema)
+        
+        # Save best model
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_path = os.path.join(args.checkpoint_dir, 'best_model.pt')
+            save_checkpoint(alphaZeroNet, optimizer, scheduler, epoch, args, 
+                          best_val_loss, best_path, ema)
+            print(f'New best validation loss: {best_val_loss:.4f}')
+            early_stopping_counter = 0
         else:
-            networkFileName = f'AlphaZeroNet_{num_blocks}x{num_filters}.pt'
-
+            early_stopping_counter += 1
+        
+        # Early stopping
+        if args.early_stopping_patience > 0 and early_stopping_counter >= args.early_stopping_patience:
+            print(f'\nEarly stopping triggered after {epoch+1} epochs')
+            print(f'Best validation loss: {best_val_loss:.4f}')
+            break
+        
+        # Save current model
+        networkFileName = f'AlphaZeroNet_{num_blocks}x{num_filters}_latest.pt'
         torch.save(alphaZeroNet.state_dict(), networkFileName)
+        
+        print('-' * 60)
+    
+    # Apply EMA if enabled
+    if ema:
+        print('\nApplying EMA weights to final model...')
+        ema.apply_shadow()
+    
+    # Save final model
+    if args.output:
+        networkFileName = args.output
+    else:
+        networkFileName = f'AlphaZeroNet_{num_blocks}x{num_filters}.pt'
+    
+    torch.save(alphaZeroNet.state_dict(), networkFileName)
+    print(f'\nTraining complete! Final model saved to {networkFileName}')
+    print(f'Best validation loss: {best_val_loss:.4f}')
+    
+    # Save training summary
+    summary = {
+        'model': f'{num_blocks}x{num_filters}',
+        'epochs_trained': epoch + 1,
+        'best_val_loss': best_val_loss,
+        'final_train_loss': train_loss,
+        'final_val_loss': val_loss,
+        'training_time': time.time() - epoch_start_time * (epoch + 1 - start_epoch),
+        'args': vars(args)
+    }
+    
+    summary_path = os.path.join(args.checkpoint_dir, 'training_summary.json')
+    with open(summary_path, 'w') as f:
+        json.dump(summary, f, indent=2)
+    print(f'Training summary saved to {summary_path}')
+    
+    # Close tensorboard writer
+    writer.close()
 
-        print(f'Saved model to {networkFileName}')
 
 if __name__ == '__main__':
-
     train()
