@@ -8,6 +8,7 @@ Filters games where both players have ratings >= 750 (beginner level).
 import requests
 import os
 import sys
+import io
 import gzip
 import shutil
 from datetime import datetime
@@ -146,65 +147,48 @@ def filter_games_by_rating_and_time_control(input_file, output_dir, min_rating=7
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
     
-    # Open compressed input file
+    print(f"Filtering games with both players rated >= {min_rating}...")
+    print(f"Saving individual games to: {output_dir}")
+    
+    # Open compressed input file with text mode streaming
     with open(input_file, 'rb') as fh:
         dctx = zstd.ZstdDecompressor()
         with dctx.stream_reader(fh) as reader:
-            text_stream = reader.read(16384)  # Read in chunks
-            buffer = ""
+            # Use text wrapper for proper line handling
+            text_reader = io.TextIOWrapper(reader, encoding='utf-8', errors='ignore')
+            
             current_game = ""
             in_game = False
             
-            print(f"Filtering games with both players rated >= {min_rating}...")
-            print(f"Saving individual games to: {output_dir}")
-            
-            while True:
-                if not text_stream:
-                    # Try to read more data
-                    chunk = reader.read(16384)
-                    if not chunk:
-                        break
-                    text_stream = chunk
+            for line in text_reader:
+                line = line.rstrip('\n\r')
                 
-                # Process text stream
-                try:
-                    decoded = text_stream.decode('utf-8', errors='ignore')
-                    buffer += decoded
-                    text_stream = b""
-                except:
-                    text_stream = text_stream[1:]  # Skip problematic byte
-                    continue
-                
-                lines = buffer.split('\n')
-                buffer = lines[-1]  # Keep incomplete line
-                
-                for line in lines[:-1]:
-                    if line.startswith('[Event'):
-                        # Start of new game
-                        if current_game and in_game:
-                            # Process previous game
-                            rating_check = extract_and_verify_rating(current_game)
-                            time_control_check = extract_and_verify_time_controls(current_game)
-                            if rating_check and time_control_check:
-                                # Save each game to its own file with lichess prefix
-                                game_filename = f"lichess_{games_kept:06d}.pgn"
-                                game_filepath = os.path.join(output_dir, game_filename)
-                                with open(game_filepath, 'w', encoding='utf-8') as game_file:
-                                    game_file.write(current_game + '\n\n')
-                                games_kept += 1
-                            games_processed += 1
-                            
-                            if games_processed % 10000 == 0:
-                                print(f"Processed: {games_processed:,} games, Kept: {games_kept:,} games ({games_kept/games_processed*100:.1f}%)")
+                if line.startswith('[Event'):
+                    # Start of new game
+                    if current_game and in_game:
+                        # Process previous game
+                        rating_check = extract_and_verify_rating(current_game)
+                        time_control_check = extract_and_verify_time_controls(current_game)
+                        if rating_check and time_control_check:
+                            # Save each game to its own file with lichess prefix
+                            game_filename = f"lichess_{games_kept:06d}.pgn"
+                            game_filepath = os.path.join(output_dir, game_filename)
+                            with open(game_filepath, 'w', encoding='utf-8') as game_file:
+                                game_file.write(current_game + '\n\n')
+                            games_kept += 1
+                        games_processed += 1
                         
-                        current_game = line + '\n'
-                        in_game = True
-                    elif in_game:
-                        current_game += line + '\n'
-            
-                # Only keep up to a maximum number of games
-                if games_kept > MAX_GAMES_TO_COLLECT:
-                    break
+                        if games_processed % 10000 == 0:
+                            print(f"Processed: {games_processed:,} games, Kept: {games_kept:,} games ({games_kept/games_processed*100:.1f}%)")
+                        
+                        # Check if we've collected enough games
+                        if games_kept >= MAX_GAMES_TO_COLLECT:
+                            break
+                    
+                    current_game = line + '\n'
+                    in_game = True
+                elif in_game:
+                    current_game += line + '\n'
             
             # Process last game
             if current_game and in_game:
@@ -266,7 +250,7 @@ def main():
 
         for db_path in databases_to_download:
             filename = os.path.basename(db_path)
-            filepath = os.path.join(args.output_dir, filename)
+            filepath = os.path.join(args.output_dir_downloads, filename)
             url = LICHESS_DB_URL + db_path
             url_paths_and_fnames.append((url, filepath))
 
@@ -284,20 +268,25 @@ def main():
     MIN_RATING = args.min_rating or 750
 
     # Process all .pgn.zst files in the output directory
-
+    print(f"\nLooking for .pgn.zst files in: {args.output_dir_downloads}")
+    
+    zst_files = [f for f in os.listdir(args.output_dir_downloads) if f.endswith('.pgn.zst')]
+    print(f"Found {len(zst_files)} compressed files to process")
+    
     fName_count = 0
-    for filename in sorted(os.listdir(args.output_dir_downloads)):
-        if filename.endswith('.pgn.zst'):
-            input_path_for_extraction = os.path.join(args.output_dir_downloads, filename)
-            input_path_for_parsing = input_path_for_extraction
-            # Use output_dir directly as the directory for individual game files
-            output_directory = args.output_dir
-            print(f"\nProcessing {filename}...")
-            kept, processed = filter_games_by_rating_and_time_control(input_path_for_parsing, output_directory)
-            
-            total_kept += kept
-            total_processed += processed
-            fName_count += 1
+    for filename in sorted(zst_files):
+        input_path_for_extraction = os.path.join(args.output_dir_downloads, filename)
+        input_path_for_parsing = input_path_for_extraction
+        # Use output_dir directly as the directory for individual game files
+        output_directory = args.output_dir
+        print(f"\nProcessing {filename}...")
+        print(f"  Input: {input_path_for_parsing}")
+        print(f"  Output directory: {output_directory}")
+        kept, processed = filter_games_by_rating_and_time_control(input_path_for_parsing, output_directory, min_rating=MIN_RATING)
+        
+        total_kept += kept
+        total_processed += processed
+        fName_count += 1
     
     print("\n" + "="*50)
     print("FINAL SUMMARY")
