@@ -62,6 +62,125 @@ def categorize_game(avg_rating):
     
     return None
 
+
+def count_single_game_category(args):
+    """Count category for a single game file (for parallel processing)."""
+    pgn_file, input_dir = args
+    input_path = os.path.join(input_dir, pgn_file)
+    avg_rating, _, _ = extract_ratings(input_path)
+    
+    if avg_rating is None:
+        return 'no_rating'
+    else:
+        category = categorize_game(avg_rating)
+        if category:
+            return category
+        else:
+            return 'out_of_range'
+
+
+def quick_count_by_category(input_dir, num_workers=None):
+    """Quickly count how many games should be in each category without copying files."""
+    pgn_files = [f for f in os.listdir(input_dir) if f.endswith('.pgn')]
+    
+    if not pgn_files:
+        return None
+    
+    print(f"Quick counting {len(pgn_files):,} PGN files by ELO category...")
+    
+    # Determine number of workers
+    if num_workers is None:
+        num_workers = min(mp.cpu_count() - 1, 8)  # Cap at 8 for counting
+    num_workers = max(1, num_workers)
+    
+    print(f"Using {num_workers} workers for parallel counting...")
+    
+    category_counts = {cat: 0 for cat in ELO_RANGES.keys()}
+    category_counts['no_rating'] = 0
+    category_counts['out_of_range'] = 0
+    
+    # Prepare arguments for parallel processing
+    process_args = [(pgn_file, input_dir) for pgn_file in pgn_files]
+    
+    # Process files in parallel
+    with mp.Pool(processes=num_workers) as pool:
+        with tqdm(total=len(pgn_files), desc="Counting games") as pbar:
+            for category in pool.imap_unordered(count_single_game_category, process_args, chunksize=100):
+                category_counts[category] += 1
+                pbar.update(1)
+    
+    return category_counts
+
+
+def count_existing_organized_games(output_base_dir):
+    """Count games already organized in each category directory."""
+    existing_counts = {cat: 0 for cat in ELO_RANGES.keys()}
+    
+    for category in ELO_RANGES.keys():
+        category_dir = os.path.join(output_base_dir, category)
+        if os.path.exists(category_dir):
+            pgn_files = [f for f in os.listdir(category_dir) if f.endswith('.pgn')]
+            existing_counts[category] = len(pgn_files)
+    
+    return existing_counts
+
+
+def check_if_already_organized(input_dir, output_base_dir, num_workers=None):
+    """Check if games have already been organized by comparing expected vs actual counts."""
+    print("\nChecking if games are already organized...")
+    
+    # Quick count what should be in each category (with parallel processing)
+    expected_counts = quick_count_by_category(input_dir, num_workers)
+    
+    if expected_counts is None:
+        return False, None, None
+    
+    # Count what's actually in each category
+    existing_counts = count_existing_organized_games(output_base_dir)
+    
+    # Check if summary file exists
+    summary_path = os.path.join(output_base_dir, 'organization_summary.txt')
+    summary_exists = os.path.exists(summary_path)
+    
+    # Compare counts
+    all_match = True
+    for category in ELO_RANGES.keys():
+        expected = expected_counts[category]
+        existing = existing_counts[category]
+        if expected != existing:
+            all_match = False
+            break
+    
+    # Display comparison
+    print("\n" + "="*60)
+    print("Category".ljust(15) + "Expected".rjust(12) + "Existing".rjust(12) + "Status".rjust(15))
+    print("="*60)
+    
+    for category in ELO_RANGES.keys():
+        expected = expected_counts[category]
+        existing = existing_counts[category]
+        status = "✓ Match" if expected == existing else f"✗ Diff: {existing - expected:+d}"
+        min_elo, max_elo = ELO_RANGES[category]
+        cat_label = f"{category} ({min_elo}-{max_elo})"
+        print(f"{cat_label[:15].ljust(15)}{expected:12,}{existing:12,}  {status}")
+    
+    print("="*60)
+    
+    total_expected = sum(expected_counts[cat] for cat in ELO_RANGES.keys())
+    total_existing = sum(existing_counts[cat] for cat in ELO_RANGES.keys())
+    
+    print(f"Total".ljust(15) + f"{total_expected:12,}" + f"{total_existing:12,}")
+    
+    if all_match and summary_exists:
+        print("\n✓ Games are already fully organized. No processing needed.")
+        return True, expected_counts, existing_counts
+    elif total_existing > 0:
+        print(f"\n⚠ Partial organization detected: {total_existing:,}/{total_expected:,} games organized")
+        return False, expected_counts, existing_counts
+    else:
+        print("\n✗ Games need to be organized.")
+        return False, expected_counts, existing_counts
+
 def process_single_game(args):
     """Process a single game file for parallel processing."""
     pgn_file, input_dir, output_base_dir = args
@@ -87,8 +206,16 @@ def process_single_game(args):
     
     return (pgn_file, None, 'out_of_range')
 
-def organize_games(input_dir, output_base_dir, num_workers=None):
+def organize_games(input_dir, output_base_dir, num_workers=None, force=False):
     """Organize games from input directory into ELO-based categories."""
+    
+    # Check if already organized
+    if not force:
+        already_organized, expected_counts, existing_counts = check_if_already_organized(input_dir, output_base_dir, num_workers)
+        
+        if already_organized:
+            print("\nSkipping organization - games are already organized.")
+            return existing_counts
     
     # Create output directories
     for category in ELO_RANGES.keys():
@@ -101,7 +228,7 @@ def organize_games(input_dir, output_base_dir, num_workers=None):
         print(f"No PGN files found in {input_dir}")
         return
     
-    print(f"Found {len(pgn_files)} PGN files to process")
+    print(f"\nFound {len(pgn_files)} PGN files to process")
     print(f"Organizing into categories: {list(ELO_RANGES.keys())}")
     print(f"ELO ranges:")
     for category, (min_elo, max_elo) in ELO_RANGES.items():
@@ -196,6 +323,11 @@ def main():
         action='store_true',
         help='Use custom ELO ranges (will prompt for input)'
     )
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Force re-organization even if games are already organized'
+    )
     
     args = parser.parse_args()
     
@@ -223,7 +355,7 @@ def main():
         return
     
     # Organize the games
-    organize_games(args.input_dir, args.output_dir, args.workers)
+    organize_games(args.input_dir, args.output_dir, args.workers, args.force)
 
 if __name__ == "__main__":
     main()
