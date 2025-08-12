@@ -4,18 +4,20 @@ import torch.optim as optim
 import torch.nn as nn
 from torch.utils.data import DataLoader, ConcatDataset
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, OneCycleLR, CosineAnnealingLR, MultiStepLR
+from torch.cuda.amp import GradScaler, autocast
 from CCRLDataset import CCRLDataset
 from RLDataset import RLDataset
 from PieNanoNetwork_v2 import PieNanoV2
+from PieNanoCurriculumDataset import PieNanoCurriculumDataset, PieNanoMixedCurriculumDataset
 from device_utils import get_optimal_device, optimize_for_device, get_batch_size_for_device, get_num_workers_for_device
 import argparse
 import time
 from tqdm import tqdm
 
-# Training params optimized for PieNano
+# Training params optimized for PieNano V2
 default_epochs = 100
-default_blocks = 8
-default_filters = 128
+default_blocks = 20
+default_filters = 256
 default_lr = 0.001
 default_policy_weight = 1.0
 ccrl_dir = os.path.abspath('games_training_data/reformatted/')
@@ -42,8 +44,9 @@ def parse_args():
                         help='Output filename for saved model')
     parser.add_argument('--policy-weight', type=float, default=default_policy_weight,
                         help=f'Weight for policy loss relative to value loss (default: {default_policy_weight})')
-    parser.add_argument('--mode', choices=['supervised', 'rl', 'mixed'], default='supervised',
-                        help='Training mode: supervised (CCRL data), rl (self-play), or mixed (both)')
+    parser.add_argument('--mode', choices=['supervised', 'rl', 'mixed', 'curriculum', 'mixed-curriculum'], 
+                        default='supervised',
+                        help='Training mode: supervised (CCRL), rl (self-play), mixed, curriculum, or mixed-curriculum')
     parser.add_argument('--rl-dir', type=str, default=rl_dir,
                         help='Directory containing self-play training data (HDF5 files)')
     parser.add_argument('--mixed-ratio', type=float, default=0.5,
@@ -70,8 +73,18 @@ def parse_args():
                         help='Save checkpoint every N epochs (default: 20)')
     parser.add_argument('--validate-every', type=int, default=1,
                         help='Validate every N epochs (default: 1)')
-    parser.add_argument('--policy-hidden-dim', type=int, default=256,
-                        help='Hidden dimension for policy head (default: 256)')
+    parser.add_argument('--policy-hidden-dim', type=int, default=768,
+                        help='Hidden dimension for policy head (default: 768)')
+    parser.add_argument('--mixed-precision', action='store_true',
+                        help='Use mixed precision training (FP16) for faster training')
+    
+    # Curriculum training arguments
+    parser.add_argument('--curriculum-dir', type=str, default='games_training_data/curriculum',
+                        help='Directory containing curriculum training data')
+    parser.add_argument('--curriculum-config', type=str, default=None,
+                        help='Path to curriculum configuration JSON file')
+    parser.add_argument('--curriculum-state', type=str, default=None,
+                        help='Path to save/load curriculum training state')
     
     return parser.parse_args()
 
@@ -194,8 +207,8 @@ def create_scheduler(optimizer, args, steps_per_epoch):
     else:
         return {'main': None, 'warmup': None, 'warmup_steps': 0}
 
-def train_epoch(model, dataloader, optimizer, scheduler, args, device, epoch, step_count):
-    """Train for one epoch with gradient accumulation."""
+def train_epoch(model, dataloader, optimizer, scheduler, args, device, epoch, step_count, scaler=None):
+    """Train for one epoch with gradient accumulation and optional mixed precision."""
     model.train()
     
     total_loss = 0
@@ -211,22 +224,41 @@ def train_epoch(model, dataloader, optimizer, scheduler, args, device, epoch, st
         value_targets = batch['value'].to(device)
         policy_targets = batch['policy'].to(device)
         
-        # Forward pass
-        loss, value_loss, policy_loss = model(
-            positions, value_targets, policy_targets
-        )
-        loss = loss / args.gradient_accumulation
+        # Forward pass with optional mixed precision
+        if scaler is not None:
+            with autocast():
+                loss, value_loss, policy_loss = model(
+                    positions, value_targets, policy_targets
+                )
+                loss = loss / args.gradient_accumulation
+        else:
+            loss, value_loss, policy_loss = model(
+                positions, value_targets, policy_targets
+            )
+            loss = loss / args.gradient_accumulation
         
         # Backward pass with gradient accumulation
-        loss.backward()
+        if scaler is not None:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
         
         # Update weights after gradient accumulation
         if (batch_idx + 1) % args.gradient_accumulation == 0:
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
+            if scaler is not None:
+                # Unscale gradients before clipping
+                scaler.unscale_(optimizer)
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
+                # Optimizer step with scaler
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
+                # Optimizer step
+                optimizer.step()
             
-            # Optimizer step
-            optimizer.step()
             optimizer.zero_grad()
             
             # Learning rate scheduling
@@ -280,12 +312,188 @@ def validate(model, dataloader, device):
     
     return total_loss / num_batches, total_value_loss / num_batches, total_policy_loss / num_batches
 
+def train_curriculum(args, device):
+    """Special training loop for curriculum learning."""
+    print("Starting PieNano V2 Curriculum Training")
+    print("="*60)
+    
+    # Create curriculum dataset
+    curriculum_dataset = PieNanoCurriculumDataset(
+        args.curriculum_config, 
+        enhanced_encoder=args.use_enhanced_encoder
+    )
+    
+    # Load saved state if resuming
+    if args.curriculum_state and os.path.exists(args.curriculum_state):
+        curriculum_dataset.load_state(args.curriculum_state)
+    
+    # Create model
+    model = create_model(args)
+    model = optimize_for_device(model, device)
+    
+    # Print model info
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Model: PieNano V2 {args.num_blocks}x{args.num_filters}")
+    print(f"Total parameters: {total_params:,}")
+    print(f"Model size: ~{total_params * 4 / 1024 / 1024:.1f} MB (FP32)")
+    
+    # Load checkpoint if resuming model weights
+    if args.resume:
+        print(f"Loading model weights from {args.resume}")
+        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint)
+    
+    # Initialize base optimizer (will be adjusted per stage)
+    base_optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    
+    # Initialize mixed precision scaler if enabled
+    scaler = GradScaler() if args.mixed_precision and device.type == 'cuda' else None
+    if scaler:
+        print("Mixed precision training enabled (FP16)")
+    
+    # Load initial stage
+    curriculum_dataset.load_initial_stage()
+    
+    # Track best model
+    best_val_loss = float('inf')
+    best_model_path = None
+    
+    # Curriculum training loop
+    while True:
+        stage = curriculum_dataset.get_current_stage()
+        if stage is None:
+            break
+        
+        # Adjust learning rate for this stage
+        for param_group in base_optimizer.param_groups:
+            param_group['lr'] = args.lr * stage.lr_multiplier
+        
+        # Adjust model's policy weight for this stage
+        model.policy_weight = stage.value_weight
+        
+        print(f"\nTraining on stage: {stage.name}")
+        print(f"Learning rate: {args.lr * stage.lr_multiplier:.6f}")
+        print(f"Value weight: {stage.value_weight}")
+        
+        # Create data loaders for current stage
+        train_size = int(0.95 * len(curriculum_dataset))
+        val_size = len(curriculum_dataset) - train_size
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            curriculum_dataset, [train_size, val_size]
+        )
+        
+        # MPS-specific settings
+        is_mps = device.type == 'mps'
+        if is_mps:
+            num_workers = min(6, get_num_workers_for_device())
+            persistent_workers = False
+            pin_memory = False
+        else:
+            num_workers = get_num_workers_for_device()
+            persistent_workers = (num_workers > 0)
+            pin_memory = (device.type == 'cuda')
+        
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers
+        )
+        
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size * 2,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers
+        )
+        
+        # Create scheduler for this stage
+        scheduler = create_scheduler(base_optimizer, args, len(train_loader) // args.gradient_accumulation)
+        step_count = [0]
+        
+        # Train for the specified number of epochs in this stage
+        stage_start_epoch = curriculum_dataset.stage_epochs_trained
+        for stage_epoch in range(stage_start_epoch, stage.epochs):
+            global_epoch = curriculum_dataset.total_epochs_trained + 1
+            
+            print(f"\n{'='*50}")
+            print(f"Stage: {stage.name} - Epoch {stage_epoch+1}/{stage.epochs}")
+            print(f"Global Epoch: {global_epoch}")
+            print(f"{'='*50}")
+            
+            # Train for one epoch
+            train_loss, train_value_loss, train_policy_loss = train_epoch(
+                model, train_loader, base_optimizer, scheduler, args, device, 
+                global_epoch-1, step_count, scaler
+            )
+            
+            # Validate
+            if (stage_epoch + 1) % args.validate_every == 0:
+                val_loss, val_value_loss, val_policy_loss = validate(model, val_loader, device)
+                print(f"\nValidation - Loss: {val_loss:.4f}, Value: {val_value_loss:.4f}, Policy: {val_policy_loss:.4f}")
+                
+                # Save best model
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_model_path = f'weights/PieNanoV2_{args.num_blocks}x{args.num_filters}_curriculum_best.pt'
+                    torch.save({
+                        'model_state_dict': model.state_dict(),
+                        'epoch': global_epoch,
+                        'val_loss': val_loss,
+                        'stage': stage.name,
+                        'args': vars(args)
+                    }, best_model_path)
+                    print(f"New best model saved to {best_model_path}")
+            
+            # Save checkpoint periodically
+            if (global_epoch) % args.save_every == 0:
+                checkpoint_path = f'weights/PieNanoV2_{args.num_blocks}x{args.num_filters}_curriculum_epoch{global_epoch}.pt'
+                torch.save({
+                    'model_state_dict': model.state_dict(),
+                    'epoch': global_epoch,
+                    'stage': stage.name,
+                    'stage_epoch': stage_epoch,
+                    'args': vars(args)
+                }, checkpoint_path)
+                print(f"Checkpoint saved to {checkpoint_path}")
+            
+            # Save curriculum state
+            if args.curriculum_state:
+                curriculum_dataset.save_state(args.curriculum_state)
+            
+            # Increment epoch counters
+            curriculum_dataset.increment_epoch()
+        
+        # Check if we should advance to next stage
+        if curriculum_dataset.should_advance():
+            if not curriculum_dataset.advance_stage():
+                break
+    
+    # Save final model
+    output_path = args.output or f'weights/PieNanoV2_{args.num_blocks}x{args.num_filters}_curriculum.pt'
+    torch.save(model.state_dict(), output_path)
+    print(f"\n{'='*60}")
+    print(f"Curriculum training complete!")
+    print(f"Final model saved to {output_path}")
+    if best_model_path:
+        print(f"Best model (val_loss={best_val_loss:.4f}) saved to {best_model_path}")
+    print(f"{'='*60}")
+
 def main():
     args = parse_args()
     
     # Get device
     device, device_str = get_optimal_device()
     print(f"Using device: {device_str}")
+    
+    # Handle curriculum training separately
+    if args.mode == 'curriculum':
+        train_curriculum(args, device)
+        return
     
     # MPS-specific settings
     is_mps = device.type == 'mps'
@@ -353,6 +561,11 @@ def main():
         dataset = CCRLDataset(ccrl_dir, enhanced_encoder=args.use_enhanced_encoder)
     elif args.mode == 'rl':
         dataset = RLDataset(args.rl_dir)
+    elif args.mode == 'mixed-curriculum':
+        dataset = PieNanoMixedCurriculumDataset(
+            args.curriculum_config,
+            enhanced_encoder=args.use_enhanced_encoder
+        )
     else:  # mixed
         ccrl_dataset = CCRLDataset(ccrl_dir, enhanced_encoder=args.use_enhanced_encoder)
         rl_dataset = RLDataset(args.rl_dir)
@@ -418,6 +631,11 @@ def main():
     optimizer = create_optimizer(model, args)
     scheduler = create_scheduler(optimizer, args, len(train_loader) // args.gradient_accumulation)
     
+    # Initialize mixed precision scaler if enabled
+    scaler = GradScaler() if args.mixed_precision and device.type == 'cuda' else None
+    if scaler:
+        print("Mixed precision training enabled (FP16)")
+    
     # Training loop
     best_val_loss = float('inf')
     
@@ -431,7 +649,7 @@ def main():
         
         # Train
         train_loss, train_value_loss, train_policy_loss = train_epoch(
-            model, train_loader, optimizer, scheduler, args, device, epoch, step_count
+            model, train_loader, optimizer, scheduler, args, device, epoch, step_count, scaler
         )
         
         print(f"\nTrain - Loss: {train_loss:.4f}, Value: {train_value_loss:.4f}, Policy: {train_policy_loss:.4f}")

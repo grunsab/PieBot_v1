@@ -18,8 +18,10 @@ from AlphaZeroNetwork import AlphaZeroNet
 import PieBotNetwork
 import PieNanoNetwork
 import PieNanoNetwork_v2
+import TitanMiniNetwork
 from encoder import encodePositionForInference, callNeuralNetworkBatched, decodePolicyOutput
 from device_utils import get_optimal_device, optimize_for_device, get_batch_size_for_device
+from model_utils import detect_model_type, create_pienano_from_weights, create_titanmini_from_weights, clean_state_dict
 import sys
 
 def generate_diverse_positions(num_positions=10000):
@@ -172,33 +174,8 @@ def benchmark_neural_network(model_path, num_positions=10000, batch_size=None, s
     print(f"Loading model from {model_path}...")
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
 
-    # Detect model type
-    def detect_model_type(weights):
-        """Detect whether this is an AlphaZeroNet, PieBotNet, PieNano, or PieNanoV2 model."""
-        if isinstance(weights, dict):
-            state_dict = weights.get('model_state_dict', weights)
-            
-            # PieBotNet has specific modules
-            has_positional_encoding = any('positional_encoding' in key for key in state_dict.keys())
-            has_transformer = any('transformer_blocks' in key for key in state_dict.keys())
-            
-            # PieNano models have SE modules and depthwise convolutions
-            has_se = any('se.' in key or 'squeeze' in key or 'excitation' in key for key in state_dict.keys())
-            has_depthwise = any('depthwise' in key for key in state_dict.keys())
-            has_wdl_value = any('value_head.fc2' in key for key in state_dict.keys())
-            
-            # PieNanoV2 has improved policy head
-            has_improved_policy = any('policy_head.fc1' in key or 'policy_head.fc2' in key for key in state_dict.keys())
-            
-            if has_positional_encoding or has_transformer:
-                return 'PieBotNet'
-            elif has_improved_policy and (has_se or has_depthwise):
-                return 'PieNanoV2'
-            elif (has_se or has_depthwise) and has_wdl_value:
-                return 'PieNano'
-        return 'AlphaZeroNet'
-    
-    model_type = detect_model_type(checkpoint)
+    # Detect model type using model_utils
+    model_type = detect_model_type(checkpoint, model_path)
     
     # Create appropriate model
     if model_type == 'PieBotNet':
@@ -206,16 +183,31 @@ def benchmark_neural_network(model_path, num_positions=10000, batch_size=None, s
         print(f"Detected PieBotNet model")
         num_blocks = "N/A"
         num_filters = "N/A"
-    elif model_type == 'PieNanoV2':
-        model = PieNanoNetwork_v2.PieNanoV2(num_blocks=8, num_filters=128)
-        print(f"Detected PieNanoV2 model")
-        num_blocks = 8
-        num_filters = 128
-    elif model_type == 'PieNano':
-        model = PieNanoNetwork.PieNano(num_blocks=8, num_filters=128)
-        print(f"Detected PieNano model")
-        num_blocks = 8
-        num_filters = 128
+    elif model_type == 'TitanMini':
+        model = create_titanmini_from_weights(checkpoint)
+        print(f"Detected TitanMini model")
+        # Extract architecture info for display
+        num_blocks = model.num_layers if hasattr(model, 'num_layers') else "N/A"
+        num_filters = model.d_model if hasattr(model, 'd_model') else "N/A"
+    elif model_type == 'PieNanoV2' or model_type == 'PieNano':
+        # Use model_utils to create the model with correct architecture
+        model = create_pienano_from_weights(checkpoint)
+        print(f"Detected {model_type} model")
+        # Extract architecture info from the created model
+        if hasattr(model, 'residual_tower'):
+            num_blocks = len(model.residual_tower)
+        else:
+            num_blocks = "N/A"
+        
+        if hasattr(model, 'conv_block') and len(model.conv_block) > 0:
+            # Get num_filters from the first conv layer
+            conv_layer = model.conv_block[0]
+            if hasattr(conv_layer, 'out_channels'):
+                num_filters = conv_layer.out_channels
+            else:
+                num_filters = "N/A"
+        else:
+            num_filters = "N/A"
     else:
         # Extract model configuration for AlphaZeroNet
         if 'model_config' in checkpoint:
@@ -227,16 +219,22 @@ def benchmark_neural_network(model_path, num_positions=10000, batch_size=None, s
             num_filters = 256
         model = AlphaZeroNet(num_blocks, num_filters)
         print(f"Detected AlphaZeroNet model")
-    # Create and load model
+    # Load model state dict
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        # FP16 model format
-        model.load_state_dict(checkpoint['model_state_dict'])
-        if checkpoint.get('model_type') == 'fp16':
-            model = model.half()
-            print(f"Loaded FP16 model on {device_str}")
+        state_dict = checkpoint['model_state_dict']
     else:
-        # Regular model format
-        model.load_state_dict(checkpoint)
+        state_dict = checkpoint
+    
+    # Clean state dict (remove _orig_mod prefix etc.)
+    state_dict = clean_state_dict(state_dict)
+    
+    # Load the cleaned state dict
+    model.load_state_dict(state_dict)
+    
+    # Handle FP16 models
+    if isinstance(checkpoint, dict) and checkpoint.get('model_type') == 'fp16':
+        model = model.half()
+        print(f"Loaded FP16 model on {device_str}")
 
     model = optimize_for_device(model, device)
     model.eval()

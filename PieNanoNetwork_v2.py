@@ -44,17 +44,17 @@ class ImprovedPolicyHead(nn.Module):
 class PieNanoV2(nn.Module):
     """
     PieNano V2: Balanced architecture for VPS deployment.
-    ~2-3M parameters with better policy head.
+    ~8M parameters with powerful policy head for strong chess performance.
     """
     def __init__(self, 
-                 num_blocks=8, 
-                 num_filters=128, 
+                 num_blocks=20, 
+                 num_filters=256, 
                  num_input_planes=16,
                  num_moves=4608,
                  use_se=True,
                  dropout_rate=0.0,
                  policy_weight=1.0,
-                 policy_hidden_dim=256):
+                 policy_hidden_dim=768):
         super().__init__()
         
         self.policy_weight = policy_weight
@@ -163,8 +163,8 @@ if __name__ == "__main__":
     model_v1 = PieNano(num_blocks=8, num_filters=128)
     params_v1 = sum(p.numel() for p in model_v1.parameters())
     
-    # PieNano V2 (balanced)
-    model_v2 = PieNanoV2(num_blocks=8, num_filters=128, policy_hidden_dim=256)
+    # PieNano V2 (balanced) - using new defaults
+    model_v2 = PieNanoV2()  # Uses defaults: 20x256, policy_hidden_dim=768
     params_v2 = sum(p.numel() for p in model_v2.parameters())
     
     print(f"PieNano V1 (Ultra-light):")

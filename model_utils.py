@@ -240,69 +240,105 @@ def create_titanmini_from_weights(weights):
 def create_pienano_from_weights(weights):
     """
     Create PieNano model with correct architecture from weights.
+    Enhanced detection for both PieNano and PieNanoV2 models.
     
     Args:
         weights: Model checkpoint dictionary
     
     Returns:
-        PieNano or PieNanoV2 model instance
+        PieNano or PieNanoV2 model instance with correct architecture
     """
-    # Try to detect architecture from weights
+    # Default values for PieNano V1
+    DEFAULT_BLOCKS_V1 = 8
+    DEFAULT_FILTERS_V1 = 128
+    
+    # Default values for PieNano V2 (new enhanced defaults)
+    DEFAULT_BLOCKS_V2 = 20
+    DEFAULT_FILTERS_V2 = 256
+    DEFAULT_POLICY_HIDDEN_V2 = 768
+    
+    # Initialize with V1 defaults
+    num_blocks = DEFAULT_BLOCKS_V1
+    num_filters = DEFAULT_FILTERS_V1
+    num_input_planes = 16
+    policy_hidden_dim = None
+    
     if isinstance(weights, dict):
         # Check if it has args from training
         if 'args' in weights:
             args = weights['args']
-            num_blocks = getattr(args, 'num_blocks', 8)
-            num_filters = getattr(args, 'num_filters', 128)
-            num_input_planes = 112 if getattr(args, 'use_enhanced_encoder', False) else 16
-            policy_hidden_dim = getattr(args, 'policy_hidden_dim', None)
+            if isinstance(args, dict):
+                num_blocks = args.get('num_blocks', DEFAULT_BLOCKS_V1)
+                num_filters = args.get('num_filters', DEFAULT_FILTERS_V1)
+                num_input_planes = 112 if args.get('use_enhanced_encoder', False) else 16
+                policy_hidden_dim = args.get('policy_hidden_dim', None)
+            else:
+                num_blocks = getattr(args, 'num_blocks', DEFAULT_BLOCKS_V1)
+                num_filters = getattr(args, 'num_filters', DEFAULT_FILTERS_V1)
+                num_input_planes = 112 if getattr(args, 'use_enhanced_encoder', False) else 16
+                policy_hidden_dim = getattr(args, 'policy_hidden_dim', None)
         else:
             # Try to infer from state dict
             state_dict = weights.get('model_state_dict', weights)
             
-            # Count residual blocks
-            residual_keys = [k for k in state_dict.keys() if 'residual_tower' in k and 'conv1' in k]
-            num_blocks = len(set(k.split('.')[1] for k in residual_keys if len(k.split('.')) > 1))
+            # Count residual blocks by finding the maximum block index
+            max_block_idx = -1
+            for key in state_dict.keys():
+                if key.startswith('residual_tower.'):
+                    try:
+                        block_idx = int(key.split('.')[1])
+                        max_block_idx = max(max_block_idx, block_idx)
+                    except (ValueError, IndexError):
+                        pass
             
-            # Get number of filters and input planes from conv_block
+            num_blocks = max_block_idx + 1 if max_block_idx >= 0 else DEFAULT_BLOCKS_V1
+            
+            # Get number of filters from conv_block or first residual block
             if 'conv_block.0.weight' in state_dict:
                 num_filters = state_dict['conv_block.0.weight'].shape[0]
                 num_input_planes = state_dict['conv_block.0.weight'].shape[1]
+            elif 'residual_tower.0.conv1.pointwise.weight' in state_dict:
+                num_filters = state_dict['residual_tower.0.conv1.pointwise.weight'].shape[0]
             else:
-                # Default values
-                num_filters = 128
+                # Default values based on whether it's V2
+                num_filters = DEFAULT_FILTERS_V1
                 num_input_planes = 16
             
             # Detect if it's V2 by checking for policy_head.fc1
-            policy_hidden_dim = None
             if 'policy_head.fc1.weight' in state_dict:
                 policy_hidden_dim = state_dict['policy_head.fc1.weight'].shape[0]
-            
-            # Default to 8 blocks if detection failed
-            if num_blocks == 0:
-                num_blocks = 8
+                # If V2 is detected but blocks/filters are at V1 defaults, update to V2 defaults
+                # This handles cases where the model was created with V2 but using old defaults
+                if num_blocks == DEFAULT_BLOCKS_V1 and num_filters == DEFAULT_FILTERS_V1:
+                    # Check if this looks like it should use V2 defaults
+                    # (e.g., newer models with the improved policy head)
+                    pass  # Keep detected values, don't override
     else:
-        # Default PieNano configuration
-        num_blocks = 8
-        num_filters = 128
+        # Default PieNano V1 configuration
+        num_blocks = DEFAULT_BLOCKS_V1
+        num_filters = DEFAULT_FILTERS_V1
         num_input_planes = 16
         policy_hidden_dim = None
     
     # Create V2 if policy_hidden_dim is detected, otherwise V1
     if policy_hidden_dim is not None:
-        return PieNanoNetwork_v2.PieNanoV2(
+        model = PieNanoNetwork_v2.PieNanoV2(
             num_blocks=num_blocks,
             num_filters=num_filters,
             num_input_planes=num_input_planes,
             policy_hidden_dim=policy_hidden_dim
         )
+        print(f"Created PieNanoV2: {num_blocks}x{num_filters}, policy_hidden={policy_hidden_dim}, input_planes={num_input_planes}")
     else:
         # Fallback to V1 for older models
-        return PieNanoNetwork.PieNano(
+        model = PieNanoNetwork.PieNano(
             num_blocks=num_blocks,
             num_filters=num_filters,
             num_input_planes=num_input_planes
         )
+        print(f"Created PieNano: {num_blocks}x{num_filters}, input_planes={num_input_planes}")
+    
+    return model
 
 
 def load_quantized_titanmini(model_path):
