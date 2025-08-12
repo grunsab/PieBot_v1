@@ -135,7 +135,7 @@ def process_game_chunk(args):
     return local_kept
 
 
-def filter_games_by_rating_and_time_control_parallel(input_file, output_directory, min_rating=3450, offset=0, num_processes=None):
+def filter_games_by_rating_and_time_control_parallel(input_file, output_directory, min_rating=3000, offset=0, num_processes=None):
     """Filter games where both players have rating >= min_rating using parallel processing."""
     
     if num_processes is None:
@@ -230,10 +230,10 @@ def filter_games_by_rating_and_time_control(input_file, output_directory, min_ra
                 print(f"Kept {games_kept} games out of {games_processed} games")
             
             if games_processed % 1000 == 0 and games_processed > 0:
-                print(f"Processed {games_processed} games out of approximately 2.1MM games")
+                print(f"Processed {games_processed} games out of approximately 3.8MM games")
             
-            # There are approximately 2.14MM games here
-            if games_processed >= 2140000:
+            # There are approximately 3.83MM games here
+            if games_processed >= 3830000:
                 break
 
     
