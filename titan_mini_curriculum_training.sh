@@ -35,14 +35,14 @@ echo "Creating 4 stages: beginner (750-1500), intermediate (1500-2400), expert (
 # Organize Lichess games
 python organize_games_by_elo.py \
     --input-dir games_training_data/reformatted_lichess \
-    --output-dir games_training_data/curriculum \
+    --output-dir games_training_data/curriculum
 
 # Organize computer games if they exist
 if [ -d "games_training_data/reformatted" ]; then
     echo "Organizing computer engine games..."
     python organize_games_by_elo.py \
         --input-dir games_training_data/reformatted \
-        --output-dir games_training_data/curriculum \
+        --output-dir games_training_data/curriculum
 fi
 
 # Step 4: Start Titan Mini curriculum training
