@@ -90,7 +90,7 @@ def quick_count_by_category(input_dir, num_workers=None):
     
     # Determine number of workers
     if num_workers is None:
-        num_workers = min(mp.cpu_count() - 1, 8)  # Cap at 8 for counting
+        num_workers = min(mp.cpu_count() - 1, 32)  # Cap at 32 for counting
     num_workers = max(1, num_workers)
     
     print(f"Using {num_workers} workers for parallel counting...")
