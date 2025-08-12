@@ -88,9 +88,21 @@ class CCRLDataset( Dataset ):
         randIdx = int( np.random.random() * ( len( moves ) - 1 ) )
 
         board = game.board()
+        
+        # Build position history if using enhanced encoder
+        history = None
+        if self.enhanced_encoder and encoder_enhanced:
+            history = encoder_enhanced.PositionHistory(history_length=8)
+            # Don't add initial position - we'll add positions as we make moves
 
         for idx, move in enumerate( moves ):
+            # Add position to history BEFORE making the move
+            # This way we build up the history of positions leading to our target
+            if history and idx > 0:  # Skip the very first (initial) position
+                history.add_position(board)
+            
             board.push( move )
+            
             if( randIdx == idx ):
                 next_move = moves[ idx + 1 ]
                 break
@@ -104,7 +116,7 @@ class CCRLDataset( Dataset ):
         if self.enhanced_encoder:
             # Use enhanced encoder - need to encode components separately
             # Encode position with enhanced features (112 planes)
-            position = encoder_enhanced.encode_enhanced_position(board)
+            position = encoder_enhanced.encode_enhanced_position(board, history)
             
             # Encode the move to get policy index
             # Mirror the move if it's black's turn (to match encoder behavior)

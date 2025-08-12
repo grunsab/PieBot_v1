@@ -1,8 +1,8 @@
 
 import argparse
 import chess
-#import MCTS_profiling_speedups_v2 as MCTS
-import searchless_policy as MCTS
+import MCTS_profiling_speedups_v2 as MCTS
+# import searchless_policy as MCTS
 import torch
 import AlphaZeroNetwork
 import PieBotNetwork
@@ -15,6 +15,14 @@ try:
     from quantization_tools.quantization_utils_titanmini import load_quantized_model
 except ImportError:
     load_quantized_model = None
+
+# Import enhanced encoder for position history tracking
+try:
+    from encoder_enhanced import PositionHistory
+    HISTORY_AVAILABLE = True
+except ImportError:
+    HISTORY_AVAILABLE = False
+    print("Warning: encoder_enhanced not available, history tracking disabled")
 
 def tolist( move_generator ):
     """
@@ -369,6 +377,15 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
         board = chess.Board( fen )
     else:
         board = chess.Board()
+    
+    # Create position history for enhanced encoding (if available and using TitanMini)
+    position_history = None
+    if HISTORY_AVAILABLE and isinstance(alphaZeroNet, TitanMiniNetwork.TitanMini):
+        position_history = PositionHistory(history_length=8)
+        # Add the initial position to history
+        position_history.add_position(board)
+        if verbose:
+            print("DEBUG: Position history tracking enabled for TitanMini")
 
     #play chess moves
     while True:
@@ -377,6 +394,12 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
             #If the game is over, output the winner and wait for user input to continue
             print( 'Game over. Winner: {}'.format( board.result(claim_draw=True) ) )
             board.reset_board()
+            
+            # Reset position history for new game
+            if position_history:
+                position_history.history = []
+                position_history.add_position(board)
+            
             c = input( 'Enter any key to continue ' )
 
         #Print the current state of the board
@@ -402,6 +425,10 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
                         break
             
             board.push( move_list[ idx ] )
+            
+            # Update position history after human move
+            if position_history:
+                position_history.add_position(board)
 
         else:
             #In all other cases the AI selects the next move
@@ -416,7 +443,7 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
 
             with torch.no_grad():
                 total_simulations = num_threads * num_rollouts
-                root = MCTS.Root(board, alphaZeroNet)
+                root = MCTS.Root(board, alphaZeroNet, position_history)
                 root.parallelRolloutsTotal(board.copy(), alphaZeroNet, total_simulations, num_threads)
                 if verbose:
                     print(f"DEBUG: Starting {num_rollouts} rollouts with {num_threads} threads")
@@ -442,6 +469,10 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
             print(f"NPS is {NPS}")
         
             board.push( best_move )
+            
+            # Update position history after AI move
+            if position_history:
+                position_history.add_position(board)
 
         if mode == 'p':
             #In profile mode, exit after the first move

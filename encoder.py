@@ -324,7 +324,7 @@ def decodePolicyOutput( board, policy ):
 
     return move_probabilities[ :num_moves ]
 
-def callNeuralNetwork( board, neuralNetwork ):
+def callNeuralNetwork( board, neuralNetwork, history=None ):
     """
     Call the neural network on the given position,
     get the outputs.
@@ -332,6 +332,7 @@ def callNeuralNetwork( board, neuralNetwork ):
     Args:
         board (chess.Board) the chess board
         neuralNetwork (torch.nn.Module) the neural network
+        history (PositionHistory or None) optional position history for enhanced encoding
 
     Returns:
         value (float) the value of this position
@@ -348,7 +349,7 @@ def callNeuralNetwork( board, neuralNetwork ):
         # Use enhanced encoder for TitanMini (112 planes)
         try:
             import encoder_enhanced
-            position = encoder_enhanced.encode_enhanced_position(board)
+            position = encoder_enhanced.encode_enhanced_position(board, history)
         except ImportError:
             print("Warning: encoder_enhanced not found, falling back to standard encoder")
             position, _ = encodePositionForInference( board )
@@ -398,13 +399,14 @@ def callNeuralNetwork( board, neuralNetwork ):
     return value, move_probabilities
 
 
-def callNeuralNetworkBatched( boards, neuralNetwork ):
+def callNeuralNetworkBatched( boards, neuralNetwork, histories=None ):
     """
     Run neural network on each board given. Return outputs.
 
     Args:
         boards (list of chess.Board) the input positions
         neuralNetwork (torch.nn.Module) the neural network
+        histories (list of PositionHistory or None) optional position histories for enhanced encoding
 
     Returns:
         value (numpy.array (num_inputs) float) the value output for each input position
@@ -433,7 +435,8 @@ def callNeuralNetworkBatched( boards, neuralNetwork ):
             # Use enhanced encoder for TitanMini
             try:
                 import encoder_enhanced
-                position = encoder_enhanced.encode_enhanced_position(boards[i])
+                history = histories[i] if histories else None
+                position = encoder_enhanced.encode_enhanced_position(boards[i], history)
             except ImportError:
                 print("Warning: encoder_enhanced not found, falling back to standard encoder")
                 position, _ = encodePositionForInference( boards[ i ] )

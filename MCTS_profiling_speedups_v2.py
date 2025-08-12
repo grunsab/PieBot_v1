@@ -9,6 +9,14 @@ import torch
 import hashlib
 import multiprocessing as mp
 
+# Import enhanced encoder for position history tracking
+try:
+    from encoder_enhanced import PositionHistory
+    HISTORY_AVAILABLE = True
+except ImportError:
+    HISTORY_AVAILABLE = False
+    print("Warning: encoder_enhanced not available, history tracking disabled")
+
 # Global caches for optimization
 position_cache = {}  # Cache for position encodings
 legal_moves_cache = {}  # Cache for legal move generation
@@ -391,17 +399,21 @@ class Edge:
    
 class Root( Node ):
 
-    def __init__( self, board, neuralNetwork ):
+    def __init__( self, board, neuralNetwork, position_history=None ):
         """
         Create the root of the search tree.
 
         Args:
             board (chess.Board) the chess position
             neuralNetwork (torch.nn.Module) the neural network
+            position_history (PositionHistory or None) optional position history for enhanced encoding
 
         """
+        # Store position history for enhanced encoding
+        self.position_history = position_history
+        
         # Use optimized neural network call that keeps data on device
-        value, move_probabilities = callNeuralNetworkOptimized( board, neuralNetwork )
+        value, move_probabilities = callNeuralNetworkOptimized( board, neuralNetwork, self.position_history )
 
         Q = value / 2. + 0.5
 
@@ -489,7 +501,7 @@ class Root( Node ):
         edge = edge_path[ -1 ]
 
         if edge != None:
-            value, move_probabilities = callNeuralNetworkOptimized( board, neuralNetwork )
+            value, move_probabilities = callNeuralNetworkOptimized( board, neuralNetwork, self.position_history )
 
             new_Q = value / 2. + 0.5
 
@@ -543,12 +555,21 @@ class Root( Node ):
         boards = []
         node_paths = []
         edge_paths = []
+        histories = []
         
         # Pre-allocate lists
         for i in range( num_parallel_rollouts ):
             boards.append( board.copy() )
             node_paths.append( [] )
             edge_paths.append( [] )
+            # Create a copy of the position history for each path
+            if self.position_history and HISTORY_AVAILABLE:
+                # Create a new PositionHistory with the same history as root
+                history_copy = PositionHistory(self.position_history.history_length)
+                history_copy.history = self.position_history.history.copy()
+                histories.append(history_copy)
+            else:
+                histories.append(None)
 
         # Submit all selection tasks to thread pool with scaled virtual loss
         futures = []
@@ -561,9 +582,16 @@ class Root( Node ):
         # Wait for all selections to complete
         for future in futures:
             future.result()
+        
+        # Update histories with the positions from each path
+        if HISTORY_AVAILABLE and self.position_history:
+            for i in range(num_parallel_rollouts):
+                if histories[i]:
+                    # Add the current board position to this path's history
+                    histories[i].add_position(boards[i])
 
         # Batch neural network evaluation - optimized version
-        values, move_probabilities = callNeuralNetworkBatchedOptimized( boards, neuralNetwork )
+        values, move_probabilities = callNeuralNetworkBatchedOptimized( boards, neuralNetwork, histories )
 
         # Process results and update tree
         for i in range( num_parallel_rollouts ):
@@ -705,24 +733,26 @@ class Root( Node ):
 
 # Optimized neural network calls that minimize CPU/GPU transfers
 
-def callNeuralNetworkOptimized( board, neuralNetwork ):
+def callNeuralNetworkOptimized( board, neuralNetwork, history=None ):
     """
     Optimized version that delegates to encoder.callNeuralNetwork
     which handles model detection and encoding correctly.
+    Now supports position history for enhanced encoding.
     """
     # Use the fixed encoder.callNeuralNetwork which properly detects
     # TitanMini and uses the correct encoder (standard vs enhanced)
-    return encoder.callNeuralNetwork( board, neuralNetwork )
+    return encoder.callNeuralNetwork( board, neuralNetwork, history )
 
 
-def callNeuralNetworkBatchedOptimized( boards, neuralNetwork ):
+def callNeuralNetworkBatchedOptimized( boards, neuralNetwork, histories=None ):
     """
     Optimized batch version that delegates to encoder.callNeuralNetworkBatched
     which handles model detection and encoding correctly.
+    Now supports position histories for enhanced encoding.
     """
     # Use the fixed encoder.callNeuralNetworkBatched which properly detects
     # TitanMini and uses the correct encoder (standard vs enhanced)
-    return encoder.callNeuralNetworkBatched( boards, neuralNetwork )
+    return encoder.callNeuralNetworkBatched( boards, neuralNetwork, histories )
 
 # Clear caches periodically to prevent memory issues
 def clear_caches():
