@@ -124,32 +124,40 @@ def extract_and_verify_rating(pgn_headers, min_rating):
 
 def process_game_chunk(args):
     """
-    Process a chunk of lines for parallel filtering using string-based extraction.
+    Process a chunk of the file for parallel filtering.
     
     Args:
-        args: Tuple of (input_file, output_dir, start_line, end_line, min_rating, offset, kept_counter, processed_counter, lock)
+        args: Tuple of (input_file, output_dir, start_pos, end_pos, min_rating, chunk_id, total_chunks)
     """
-    input_file, output_dir, start_line, end_line, min_rating, offset, kept_counter, processed_counter, lock = args
+    input_file, output_dir, start_pos, end_pos, min_rating, chunk_id, total_chunks = args
     
-    local_kept = 0
+    local_kept = []
     local_processed = 0
     
     with open(input_file, 'r', encoding='utf-8', errors='ignore') as fh:
+        # Seek to start position
+        fh.seek(start_pos)
+        
+        # If not at beginning, find the next game start
+        if start_pos > 0:
+            # Read until we find a game start
+            while True:
+                line = fh.readline()
+                if not line:
+                    return [], 0
+                if line.startswith('[Event'):
+                    # Back up to include this line
+                    fh.seek(fh.tell() - len(line.encode('utf-8')))
+                    break
+        
         current_game = ""
         in_game = False
-        current_line_num = 0
         
-        for line in fh:
-            current_line_num += 1
-            
-            # Skip lines before our chunk
-            if current_line_num < start_line:
-                continue
-            
-            # Stop after our chunk
-            if current_line_num > end_line:
+        while fh.tell() < end_pos:
+            line = fh.readline()
+            if not line:
                 break
-            
+                
             line = line.rstrip('\n\r')
             
             if line.startswith('[Event'):
@@ -158,23 +166,10 @@ def process_game_chunk(args):
                     # Process previous game
                     local_processed += 1
                     if extract_and_verify_rating(current_game, min_rating):
-                        # Calculate unique filename based on total kept games
-                        with lock:
-                            file_idx = kept_counter.value
-                            kept_counter.value += 1
-                        
-                        output_file = os.path.join(output_dir, f'{offset + file_idx}.pgn')
-                        with open(output_file, 'w', encoding='utf-8') as game_fh:
-                            game_fh.write(current_game + '\n\n')
-                        local_kept += 1
+                        local_kept.append(current_game)
                     
-                    # Update shared counters periodically
-                    if local_processed % 1000 == 0:
-                        with lock:
-                            processed_counter.value += 1000
-                            if processed_counter.value % 20000 == 0:
-                                print(f"Processed {processed_counter.value:,} games across all processes")
-                        local_processed = 0
+                    if local_processed % 5000 == 0:
+                        print(f"[Chunk {chunk_id}/{total_chunks}] Processed {local_processed:,} games, kept {len(local_kept):,}")
                 
                 current_game = line + '\n'
                 in_game = True
@@ -185,36 +180,21 @@ def process_game_chunk(args):
         if current_game and in_game:
             local_processed += 1
             if extract_and_verify_rating(current_game, min_rating):
-                with lock:
-                    file_idx = kept_counter.value
-                    kept_counter.value += 1
-                
-                output_file = os.path.join(output_dir, f'{offset + file_idx}.pgn')
-                with open(output_file, 'w', encoding='utf-8') as game_fh:
-                    game_fh.write(current_game + '\n\n')
-                local_kept += 1
+                local_kept.append(current_game)
     
-    # Final update
-    with lock:
-        processed_counter.value += local_processed
-    
-    return local_kept
+    return local_kept, local_processed
 
 
-def count_total_lines(input_file):
-    """Count total lines in a file for chunking."""
-    count = 0
-    with open(input_file, 'r', encoding='utf-8', errors='ignore') as f:
-        for _ in f:
-            count += 1
-    return count
+def get_file_size(input_file):
+    """Get file size for chunking."""
+    return os.path.getsize(input_file)
 
 
 def filter_games_by_rating_and_time_control_parallel(input_file, output_directory, min_rating=2500, offset=0, num_processes=None):
     """Filter games where both players have rating >= min_rating using parallel processing."""
     
     if num_processes is None:
-        num_processes = min(cpu_count(), 100)
+        num_processes = min(cpu_count(), 8)
     
     print(f"Filtering games with both players rated >= {min_rating} using {num_processes} processes...")
     
@@ -222,27 +202,20 @@ def filter_games_by_rating_and_time_control_parallel(input_file, output_director
     if num_processes == 1:
         return filter_games_by_rating_and_time_control(input_file, output_directory, min_rating, offset)
     
-    # Setup shared counters
-    manager = Manager()
-    kept_counter = manager.Value('i', 0)
-    processed_counter = manager.Value('i', 0)
-    lock = manager.Lock()
-    
-    # Count total lines instead of games for better chunking
-    print("Counting lines in file...")
-    total_lines = count_total_lines(input_file)
-    lines_per_process = total_lines // num_processes
+    # Get file size for chunking
+    print("Preparing chunks...")
+    file_size = get_file_size(input_file)
+    chunk_size = file_size // num_processes
     chunks = []
     
     for i in range(num_processes):
-        start_line = i * lines_per_process + 1
+        start_pos = i * chunk_size
         if i == num_processes - 1:
-            end_line = total_lines
+            end_pos = file_size
         else:
-            end_line = (i + 1) * lines_per_process
+            end_pos = (i + 1) * chunk_size
         
-        chunks.append((input_file, output_directory, start_line, end_line, min_rating, offset, 
-                      kept_counter, processed_counter, lock))
+        chunks.append((input_file, output_directory, start_pos, end_pos, min_rating, i+1, num_processes))
     
     # Process chunks in parallel
     start_time = time.time()
@@ -250,9 +223,22 @@ def filter_games_by_rating_and_time_control_parallel(input_file, output_director
     with Pool(num_processes) as pool:
         results = pool.map(process_game_chunk, chunks)
     
-    # Calculate totals
-    total_kept = sum(results)
-    total_processed = processed_counter.value
+    # Collect results
+    all_games = []
+    total_processed = 0
+    
+    for games_list, processed_count in results:
+        all_games.extend(games_list)
+        total_processed += processed_count
+    
+    # Write games sequentially to maintain order
+    print(f"\nWriting {len(all_games):,} filtered games to disk...")
+    for idx, game_content in enumerate(all_games):
+        output_file = os.path.join(output_directory, f'{offset + idx}.pgn')
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(game_content + '\n\n')
+    
+    total_kept = len(all_games)
     elapsed_time = time.time() - start_time
     
     print(f"\nFiltering complete!")
@@ -334,7 +320,7 @@ def main():
     parser.add_argument('--output-dir', default='games_training_data/reformatted', help='Output directory (default: games_training_data/reformatted)')
     parser.add_argument('--skip-download', action='store_true', help='Skip download and only filter existing files')
     parser.add_argument('--output-dir-downloads', default='games_training_data/CCRL_computerchess_org/', help='Output directory to store LiChess Databases (default: games_training_data)')
-    parser.add_argument('--processes', type=int, default=8, help='Number of processes to use for parallel filtering (default: number of CPU cores, max 100)')
+    parser.add_argument('--processes', type=int, default=4, help='Number of processes to use for parallel filtering (default: 4)')
 
     args = parser.parse_args()
     
