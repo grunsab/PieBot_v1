@@ -5,6 +5,10 @@ import torch
 from torch.utils.data import Dataset, Sampler
 import chess
 import encoder
+try:
+    import encoder_enhanced
+except ImportError:
+    encoder_enhanced = None
 import time
 
 
@@ -14,22 +18,28 @@ class RLDataset(Dataset):
     Unlike CCRLDataset, this loads pre-computed training positions with MCTS visit counts.
     """
     
-    def __init__(self, data_dir, file_pattern='**/selfplay_*.h5', weight_recent=False, weight_decay=0.1):
+    def __init__(self, data_dir, file_pattern='**/selfplay_*.h5', weight_recent=False, weight_decay=0.1, enhanced_encoder=False):
         """
         Args:
             data_dir (str): Directory containing self-play data files
             file_pattern (str): Pattern for self-play data files (supports recursive search)
             weight_recent (bool): If True, weight recent games more heavily
             weight_decay (float): Decay factor for weighting older games (lambda in exp(-lambda * age))
+            enhanced_encoder (bool): If True, use enhanced 112-plane encoder
         """
         self.data_dir = data_dir
         self.data_files = []
         self.file_sizes = []
         self.file_iterations = []
         self.file_weights = []
+        self.file_encoding_types = []  # Track encoding type per file
         self.cumulative_sizes = [0]
         self.weight_recent = weight_recent
         self.weight_decay = weight_decay
+        self.enhanced_encoder = enhanced_encoder
+        
+        if enhanced_encoder and encoder_enhanced is None:
+            raise ImportError("encoder_enhanced module not found but enhanced_encoder=True")
         
         # Find all matching data files (including in subdirectories)
         import glob
@@ -57,6 +67,21 @@ class RLDataset(Dataset):
                 self.data_files.append(file_path)
                 self.file_sizes.append(size)
                 self.file_iterations.append(iteration)
+                
+                # Check encoding type from file metadata or shape
+                if 'encoding_type' in f.attrs:
+                    encoding_type = f.attrs['encoding_type']
+                else:
+                    # Infer from shape: 16 planes = standard, 112 = enhanced
+                    num_planes = f['positions'].shape[1] if len(f['positions'].shape) > 1 else 16
+                    encoding_type = 'enhanced' if num_planes == 112 else 'standard'
+                self.file_encoding_types.append(encoding_type)
+                
+                # Warn if file encoding doesn't match requested
+                if self.enhanced_encoder and encoding_type != 'enhanced':
+                    print(f"Warning: File {file_path} has standard encoding but enhanced encoder requested")
+                elif not self.enhanced_encoder and encoding_type == 'enhanced':
+                    print(f"Warning: File {file_path} has enhanced encoding but standard encoder requested")
                 
                 # Calculate weight based on iteration age
                 if self.weight_recent and max_iteration > 0:
@@ -94,7 +119,7 @@ class RLDataset(Dataset):
         
         Returns:
             dict with keys:
-                - position: torch.Tensor (16, 8, 8) encoded board position
+                - position: torch.Tensor (16 or 112, 8, 8) encoded board position
                 - policy: torch.Tensor (4608,) MCTS visit count distribution
                 - value: torch.Tensor (1,) game outcome from this position
                 - mask: torch.Tensor (72, 8, 8) legal move mask
@@ -111,10 +136,23 @@ class RLDataset(Dataset):
         
         # Load data from the file
         with h5py.File(self.data_files[file_idx], 'r') as f:
-            position = f['positions'][local_idx]  # (16, 8, 8)
+            position = f['positions'][local_idx]  # (16 or 112, 8, 8)
             policy = f['policies'][local_idx]     # (4608,) - MCTS visit counts
             value = f['values'][local_idx]        # scalar - game outcome
             mask = f['masks'][local_idx]          # (72, 8, 8) - legal moves
+            
+            # Handle encoding type conversion if needed
+            file_encoding = self.file_encoding_types[file_idx]
+            if self.enhanced_encoder and file_encoding == 'standard':
+                # Convert 16-plane to 112-plane (pad with zeros for missing history)
+                enhanced_position = np.zeros((112, 8, 8), dtype=np.float32)
+                enhanced_position[:16] = position  # Current position in first 16 planes
+                # Castling rights are in planes 108-111 (copy from 12-15)
+                enhanced_position[108:112] = position[12:16]
+                position = enhanced_position
+            elif not self.enhanced_encoder and file_encoding == 'enhanced':
+                # Extract just the current position from enhanced encoding
+                position = position[:16]  # Use only first 16 planes
         
         # Normalize policy to probabilities
         policy = policy.astype(np.float32)
@@ -136,19 +174,30 @@ class SelfPlayDataCollector:
     Saves positions, MCTS visit counts, and game outcomes.
     """
     
-    def __init__(self, output_file, iteration=0):
+    def __init__(self, output_file, iteration=0, enhanced_encoder=False):
         """
         Args:
             output_file (str): Path to output HDF5 file
             iteration (int): Training iteration number for metadata
+            enhanced_encoder (bool): Use enhanced 112-plane encoder
         """
         self.output_file = output_file
         self.iteration = iteration
+        self.enhanced_encoder = enhanced_encoder
         self.positions = []
         self.policies = []
         self.values = []
         self.masks = []
         self.game_positions = []  # Temporary storage for current game
+        
+        if enhanced_encoder and encoder_enhanced is None:
+            raise ImportError("encoder_enhanced module not found but enhanced_encoder=True")
+        
+        # Initialize history for enhanced encoding
+        if self.enhanced_encoder:
+            self.history = encoder_enhanced.PositionHistory(history_length=8)
+        else:
+            self.history = None
     
     def add_position(self, board, mcts_visits, legal_moves):
         """
@@ -160,7 +209,14 @@ class SelfPlayDataCollector:
             legal_moves (np.array): Legal move mask (72, 8, 8)
         """
         # Encode the position
-        position_encoded = encoder.encodePosition(board)
+        if self.enhanced_encoder:
+            # Use enhanced encoding with history
+            position_encoded = encoder_enhanced.encode_enhanced_position(board, self.history)
+            # Add position to history for next encoding
+            self.history.add_position(board)
+        else:
+            # Use standard encoding
+            position_encoded = encoder.encodePosition(board)
         
         # Store for this game (value will be filled in when game ends)
         self.game_positions.append({
@@ -198,8 +254,10 @@ class SelfPlayDataCollector:
             self.values.append(value)
             self.masks.append(pos_data['mask'])
         
-        # Clear game positions
+        # Clear game positions and reset history for next game
         self.game_positions = []
+        if self.history:
+            self.history = encoder_enhanced.PositionHistory(history_length=8)
     
     def save(self):
         """
@@ -227,6 +285,8 @@ class SelfPlayDataCollector:
             f.attrs['num_games'] = len(self.values) // (len(self.game_positions) or 1)
             f.attrs['iteration'] = self.iteration
             f.attrs['timestamp'] = time.time()
+            f.attrs['encoding_type'] = 'enhanced' if self.enhanced_encoder else 'standard'
+            f.attrs['num_planes'] = 112 if self.enhanced_encoder else 16
         
         print(f"Saved {len(positions)} positions to {self.output_file} (iteration {self.iteration})")
 

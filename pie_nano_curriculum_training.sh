@@ -9,8 +9,8 @@ echo ""
 
 # Configuration
 MONTHS_TO_DOWNLOAD=1  # Download 1 month (30GB compressed, ~90M games)
-MIN_RATING=800  # Minimum rating for quality games
-MAX_GAMES=10000000  # Collect up to 10M games (reasonable for curriculum)
+MIN_RATING=600  # Minimum rating for quality games
+MAX_GAMES=70000000  # Collect up to 70M games (reasonable for curriculum)
 
 # Step 1: Download Lichess games (human players)
 echo "Step 1: Downloading Lichess games (human players)..."

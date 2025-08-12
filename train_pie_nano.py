@@ -560,7 +560,7 @@ def main():
     if args.mode == 'supervised':
         dataset = CCRLDataset(ccrl_dir, enhanced_encoder=args.use_enhanced_encoder)
     elif args.mode == 'rl':
-        dataset = RLDataset(args.rl_dir)
+        dataset = RLDataset(args.rl_dir, enhanced_encoder=args.use_enhanced_encoder)
     elif args.mode == 'mixed-curriculum':
         dataset = PieNanoMixedCurriculumDataset(
             args.curriculum_config,
@@ -568,7 +568,7 @@ def main():
         )
     else:  # mixed
         ccrl_dataset = CCRLDataset(ccrl_dir, enhanced_encoder=args.use_enhanced_encoder)
-        rl_dataset = RLDataset(args.rl_dir)
+        rl_dataset = RLDataset(args.rl_dir, enhanced_encoder=args.use_enhanced_encoder)
         
         # Calculate sizes for mixing
         total_size = len(ccrl_dataset) + len(rl_dataset)

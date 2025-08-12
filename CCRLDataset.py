@@ -93,15 +93,16 @@ class CCRLDataset( Dataset ):
         history = None
         if self.enhanced_encoder and encoder_enhanced:
             history = encoder_enhanced.PositionHistory(history_length=8)
-            # Don't add initial position - we'll add positions as we make moves
+            # Add initial position to history
+            history.add_position(board)
 
         for idx, move in enumerate( moves ):
-            # Add position to history BEFORE making the move
-            # This way we build up the history of positions leading to our target
-            if history and idx > 0:  # Skip the very first (initial) position
-                history.add_position(board)
-            
             board.push( move )
+            
+            # Add position to history AFTER making the move
+            # This builds up the sequence of positions leading to our target
+            if history:
+                history.add_position(board)
             
             if( randIdx == idx ):
                 next_move = moves[ idx + 1 ]
