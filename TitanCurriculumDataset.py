@@ -132,7 +132,7 @@ class TitanCurriculumDataset(Dataset):
             name='expert',
             data_dir=os.path.join(base_dir, 'expert'),
             elo_range=(2400, 3000),
-            epochs=100,  # Extended training for expert play
+            epochs=150,  # Extended training for expert play
             value_weight=1.2,
             soft_targets=True,
             temperature=0.12,
@@ -146,7 +146,7 @@ class TitanCurriculumDataset(Dataset):
             name='computer',
             data_dir=os.path.join(base_dir, 'computer'),
             elo_range=(3000, 4000),
-            epochs=300,  # Extensive training for peak performance
+            epochs=150,  # Extensive training for peak performance
             value_weight=0.8,  # Focus on policy for sophisticated play
             soft_targets=True,
             temperature=0.08,
