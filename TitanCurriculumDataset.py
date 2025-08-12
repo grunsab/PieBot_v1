@@ -229,6 +229,19 @@ class TitanCurriculumDataset(Dataset):
             return current_stage.value_weight
         return 1.0
     
+    def get_current_stage_size(self) -> int:
+        """Get the number of games in the current stage."""
+        current_stage = self.get_current_stage()
+        if current_stage and current_stage.data_dir:
+            # Count PGN files in the stage directory
+            if os.path.exists(current_stage.data_dir):
+                pgn_files = [f for f in os.listdir(current_stage.data_dir) if f.endswith('.pgn')]
+                return len(pgn_files)
+        # If we have a loaded dataset, return its size
+        if self.current_dataset:
+            return len(self.current_dataset)
+        return 100000  # Default estimate
+    
     def get_stage_info(self) -> Dict:
         """Get information about current training progress."""
         current_stage = self.get_current_stage()
@@ -243,7 +256,8 @@ class TitanCurriculumDataset(Dataset):
                 'elo_range': current_stage.elo_range,
                 'value_weight': current_stage.value_weight,
                 'lr_multiplier': current_stage.lr_multiplier,
-                'temperature': current_stage.temperature
+                'temperature': current_stage.temperature,
+                'stage_size': self.get_current_stage_size()
             }
         return {}
     

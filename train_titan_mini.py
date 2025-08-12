@@ -683,8 +683,23 @@ def train():
     # optimizer and scheduler
     # Use stronger weight decay to prevent parameter drift
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-4)
-    total_steps = len(train_loader) * args.epochs
-    warmup_steps = len(train_loader) * args.warmup_epochs
+    
+    # For curriculum datasets, estimate steps per epoch
+    if args.mode == 'curriculum':
+        # Get actual game count for current stage from the curriculum dataset
+        current_stage_games = train_loader.get_current_stage_size()
+        batch_size = args.batch_size if hasattr(args, 'batch_size') else 256
+        steps_per_epoch = current_stage_games // batch_size
+        
+        if is_main:
+            stage_info = train_loader.get_stage_info()
+            stage_name = stage_info.get('current_stage', 'unknown')
+            print(f"Curriculum mode: {steps_per_epoch:,} steps per epoch ({current_stage_games:,} games in '{stage_name}' stage, batch size {batch_size})")
+    else:
+        steps_per_epoch = len(train_loader)
+    
+    total_steps = steps_per_epoch * args.epochs
+    warmup_steps = steps_per_epoch * args.warmup_epochs
     try:
         pct = warmup_steps / total_steps if total_steps > 0 else 0.1
         if not (0.0 < pct < 1.0):
@@ -693,7 +708,7 @@ def train():
                                anneal_strategy='cos', div_factor=10, final_div_factor=100)
     except Exception:
         from torch.optim.lr_scheduler import StepLR
-        scheduler = StepLR(optimizer, step_size=max(1, len(train_loader)//2), gamma=0.1)
+        scheduler = StepLR(optimizer, step_size=max(1, steps_per_epoch//2), gamma=0.1)
 
     # Use new torch.amp.GradScaler API when available (silence deprecation)
     if args.mixed_precision and torch.cuda.is_available():
@@ -731,7 +746,8 @@ def train():
     for epoch in range(start_epoch, args.epochs):
         if is_main:
             print(f"\n--- Epoch {epoch + 1}/{args.epochs} ---")
-        if isinstance(train_loader.sampler, DistributedSampler):
+        # Check if train_loader has a sampler (i.e., it's a DataLoader, not a curriculum dataset)
+        if hasattr(train_loader, 'sampler') and isinstance(train_loader.sampler, DistributedSampler):
             train_loader.sampler.set_epoch(epoch)
 
         train_loss, train_value_loss, train_policy_loss = train_epoch(
