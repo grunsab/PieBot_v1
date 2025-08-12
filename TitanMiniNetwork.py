@@ -469,7 +469,7 @@ class TitanMini(nn.Module):
                     wdl_targets = value_target
                 else:
                     # Convert scalar values to WDL (win/draw/loss)
-                    # value_target is in [0, 1] range (0=loss, 0.5=draw, 1=win)
+                    # value_target is in [-1, 1] range (-1=loss, 0=draw, 1=win)
                     wdl_targets = torch.zeros(batch_size, 3, device=value_target.device)
                     
                     # IMPROVED WDL CONVERSION: Better mapping from scalar to WDL probabilities
@@ -479,10 +479,10 @@ class TitanMini(nn.Module):
                     # Use a temperature parameter to control sharpness
                     temperature = 0.5  # Lower = sharper peaks, Higher = more uniform
                     
-                    # Define target values for each outcome
-                    win_value = 1.0
-                    draw_value = 0.5
-                    loss_value = 0.0
+                    # Define target values for each outcome (now in [-1, 1] range)
+                    win_value = 1.0   # Win = 1
+                    draw_value = 0.0  # Draw = 0
+                    loss_value = -1.0 # Loss = -1
                     
                     # Compute distances from value to each outcome
                     dist_to_win = torch.abs(value_flat - win_value)
@@ -539,7 +539,7 @@ class TitanMini(nn.Module):
                 value_scalar = wdl_probs[:, 0:1] - wdl_probs[:, 2:3]  # Keep dimensions for compatibility
                 return value_scalar, policy_softmax
             else:
-                # Non-WDL mode: value already has Sigmoid applied
+                # Non-WDL mode: value already has Tanh applied (outputs in [-1, 1])
                 return value, policy_softmax
 
 

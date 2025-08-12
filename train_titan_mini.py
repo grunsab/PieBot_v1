@@ -596,6 +596,8 @@ def train():
         dropout=args.dropout,
         policy_weight=args.policy_weight,
         input_planes=args.input_planes,
+        use_wdl=True,  # Use Win-Draw-Loss value head for richer signal
+        legacy_value_head=False,  # Use the modern 3-layer architecture
     )
     model = model.to(device)
     if is_main:
