@@ -444,9 +444,25 @@ def main():
     os.makedirs(args.output_dir_downloads, exist_ok=True)
     os.makedirs(args.output_dir, exist_ok=True)
     
+    # Check if we already have enough processed games
+    existing_games = count_existing_games_in_directory(args.output_dir, 'lichess_')
+    print(f"\nFound {existing_games:,} existing games in output directory: {args.output_dir}")
+    
+    if existing_games >= args.max_games:
+        print(f"✓ Already have {existing_games:,} games (max: {args.max_games:,}). Skipping download and processing.")
+        print(f"\nTo re-download and reprocess, either:")
+        print(f"  1. Delete the existing games in {args.output_dir}")
+        print(f"  2. Increase --max-games beyond {args.max_games:,}")
+        return
+    
     if not args.skip_download:
+        # Check if we need to download based on existing processed games
+        if existing_games > 0:
+            print(f"\nNote: Already have {existing_games:,} processed games.")
+            print(f"Will check if download is needed to reach {args.max_games:,} games...")
+        
         # Get available databases
-        print("Fetching available Lichess databases...")
+        print("\nFetching available Lichess databases...")
         databases = get_available_databases()
         
         if not databases:
