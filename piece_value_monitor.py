@@ -106,8 +106,8 @@ class PieceValueMonitor:
         with torch.no_grad():
             for board_with, board_without, piece_type in test_positions:
                 # Encode positions
-                pos_with = encoder.encode(board_with)
-                pos_without = encoder.encode(board_without)
+                pos_with = encoder.encodePosition(board_with)
+                pos_without = encoder.encodePosition(board_without)
                 
                 # Convert to tensors
                 pos_with_tensor = torch.tensor(pos_with, dtype=torch.float32).unsqueeze(0).to(self.device)
