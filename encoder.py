@@ -24,8 +24,12 @@ def parseResult( result ):
         return 0
     elif result == "0-1":
         return -1
+    elif result == "*":
+        # Game ongoing or result unknown - should be skipped
+        return None
     else:
-        raise Exception( "Unexpected result string {}. Exiting".format( result ) )
+        # Unknown result - should be skipped
+        return None
 
 def encodePosition( board ):
     """

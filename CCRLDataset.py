@@ -112,6 +112,10 @@ class CCRLDataset( Dataset ):
             return self.__getitem__((idx + 1) % len(self))
             
         winner = encoder.parseResult( game.headers[ 'Result' ] )
+        
+        if winner is None:
+            # Skip games with unknown/ongoing results (e.g., "*")
+            return self.__getitem__((idx + 1) % len(self))
 
         if self.enhanced_encoder:
             # Use enhanced encoder - need to encode components separately
