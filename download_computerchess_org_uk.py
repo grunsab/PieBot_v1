@@ -15,7 +15,6 @@ import re
 import argparse
 from tqdm import tqdm
 import time
-from extract_zst import extract_zst
 import chess.pgn 
 import sys
 import argparse
@@ -30,7 +29,7 @@ try:
 except ImportError:
     TQDM_AVAILABLE = False
 
-MIN_RATING = 3450
+MIN_RATING = 3000
 
 import uuid
 import py7zr
@@ -113,7 +112,7 @@ def process_game_chunk(args):
                         file_idx = kept_counter.value
                         kept_counter.value += 1
                     
-                    output_file = os.path.join(output_dir, f'{3000000 + offset + file_idx}.pgn')
+                    output_file = os.path.join(output_dir, f'{0 + offset + file_idx}.pgn')
                     with open(output_file, 'w') as game_fh:
                         print(game, file=game_fh, end='\n\n')
                     local_kept += 1
@@ -155,7 +154,7 @@ def filter_games_by_rating_and_time_control_parallel(input_file, output_director
     lock = manager.Lock()
     
     # Divide work among processes
-    total_games = 2140000  # Approximate number of games
+    total_games = 3838520  # Approximate number of games
     games_per_process = total_games // num_processes
     chunks = []
     
@@ -218,7 +217,7 @@ def filter_games_by_rating_and_time_control(input_file, output_directory, min_ra
             games_processed += 1
             try:
                 if int(game.headers['WhiteElo']) >= min_rating and int(game.headers['BlackElo']) >= min_rating:
-                    output_file = os.path.join(output_directory, f'{3000000 + i}.pgn')
+                    output_file = os.path.join(output_directory, f'{ + i}.pgn')
                     with open(output_file, 'w') as game_fh:
                         print(game, file=game_fh, end='\n\n')
                     games_kept += 1
@@ -249,7 +248,7 @@ def filter_games_by_rating_and_time_control(input_file, output_directory, min_ra
 def main():
     parser = argparse.ArgumentParser(description="Download and filter grandmaster-level games from ComputerChess.org.uk")
     parser.add_argument('--offset', type=int, default=0, help='Skip the processing of the first N games')
-    parser.add_argument('--min-rating', type=int, default=3450, help='Minimum rating for both players (default: 3450)')
+    parser.add_argument('--min-rating', type=int, default=3000, help='Minimum rating for both players (default: 3000)')
     parser.add_argument('--output-dir', default='games_training_data/reformatted', help='Output directory (default: games_training_data/reformatted)')
     parser.add_argument('--skip-download', action='store_true', help='Skip download and only filter existing files')
     parser.add_argument('--output-dir-downloads', default='games_training_data/CCRL_computerchess_org/', help='Output directory to store LiChess Databases (default: games_training_data)')
@@ -269,6 +268,8 @@ def main():
         url_paths_and_fnames = (url_path, fileName)
         download_file(url_paths_and_fnames)
 
+
+
         archive_path = os.path.join(fileName)
         output_directory = os.path.join(args.output_dir_downloads)
 
@@ -280,31 +281,43 @@ def main():
             print(f"Archive '{archive_path}' successfully extracted to '{output_directory}'")
 
 
-    
-    
+        url_path = "https://computerchess.org.uk/ccrl/404/CCRL-404.[1692642].pgn.7z"
+        fileName = "CCRL-404.[1692642].pgn.7z"
+        url_paths_and_fnames = (url_path, fileName)
+        download_file(url_paths_and_fnames)
+
+        archive_path = os.path.join(fileName)
+        output_directory = os.path.join(args.output_dir_downloads)
+
+        with py7zr.SevenZipFile(archive_path, mode='r') as z:
+        # For password-protected archives, uncomment the line below and provide the password
+        # with py7zr.SevenZipFile(archive_path, mode='r', password=password) as z:
+            z.extractall(path=output_directory)
+            print(f"Archive '{archive_path}' successfully extracted to '{output_directory}'")
+
     
     total_kept = 0
     total_processed = 0
     
-    MIN_RATING = args.min_rating or 3450
+    MIN_RATING = args.min_rating or 3000
 
     # Create output directory for filtered games
     os.makedirs(args.output_dir, exist_ok=True)
     
     # Process all .pgn files in the output directory
+    
 
-    fName_count = 0
+
     for filename in sorted(os.listdir(args.output_dir_downloads)):
         if filename.endswith('.pgn'):
             input_path_for_extraction = os.path.join(args.output_dir_downloads, filename)
             input_path_for_parsing = input_path_for_extraction
             output_directory = os.path.join(args.output_dir)
             print(f"\nProcessing {filename}...")
-            kept, processed = filter_games_by_rating_and_time_control_parallel(input_path_for_parsing, output_directory, args.min_rating, args.offset, args.processes)
+            kept, processed = filter_games_by_rating_and_time_control_parallel(input_path_for_parsing, output_directory, args.min_rating, total_kept, args.processes)
             
             total_kept += kept
             total_processed += processed
-            fName_count += 1
     
     print("\n" + "="*50)
     print("FINAL SUMMARY")
