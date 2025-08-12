@@ -104,7 +104,7 @@ class TitanCurriculumDataset(Dataset):
             name='beginner',
             data_dir=os.path.join(base_dir, 'beginner'),
             elo_range=(750, 1500),
-            epochs=30,  # More epochs for transformer to learn basics
+            epochs=80,  # More epochs for transformer to learn basics
             value_weight=2.5,  # Strong emphasis on value learning
             soft_targets=True,
             temperature=0.20,  # Higher temperature for smoother learning
@@ -118,7 +118,7 @@ class TitanCurriculumDataset(Dataset):
             name='intermediate',
             data_dir=os.path.join(base_dir, 'intermediate'),
             elo_range=(1500, 2400),
-            epochs=30,  # More epochs for complex patterns
+            epochs=80,  # More epochs for complex patterns
             value_weight=1.8,
             soft_targets=True,
             temperature=0.15,

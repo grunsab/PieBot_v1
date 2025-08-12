@@ -104,7 +104,7 @@ class PieNanoCurriculumDataset(Dataset):
             name='beginner',
             data_dir=os.path.join(base_dir, 'beginner'),
             elo_range=(750, 1500),
-            epochs=15,  # Moderate epochs for foundation
+            epochs=80,  # Moderate epochs for foundation
             value_weight=2.0,  # Strong emphasis on value learning
             soft_targets=True,
             temperature=0.15,  # Moderate temperature for smooth learning
@@ -118,7 +118,7 @@ class PieNanoCurriculumDataset(Dataset):
             name='intermediate',
             data_dir=os.path.join(base_dir, 'intermediate'),
             elo_range=(1500, 2400),
-            epochs=25,  # More epochs for complex patterns
+            epochs=80,  # More epochs for complex patterns
             value_weight=1.5,
             soft_targets=True,
             temperature=0.12,
@@ -132,7 +132,7 @@ class PieNanoCurriculumDataset(Dataset):
             name='expert',
             data_dir=os.path.join(base_dir, 'expert'),
             elo_range=(2400, 3000),
-            epochs=35,  # Extended training for expert play
+            epochs=120,  # Extended training for expert play
             value_weight=1.0,
             soft_targets=True,
             temperature=0.10,
@@ -146,7 +146,7 @@ class PieNanoCurriculumDataset(Dataset):
             name='computer',
             data_dir=os.path.join(base_dir, 'computer'),
             elo_range=(3000, 4000),
-            epochs=45,  # Extensive training for peak performance
+            epochs=120,  # Extensive training for peak performance
             value_weight=0.7,  # Focus more on policy for sophisticated play
             soft_targets=True,
             temperature=0.08,  # Lower temperature for sharper decisions
