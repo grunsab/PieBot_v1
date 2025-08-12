@@ -31,7 +31,7 @@ except ImportError:
     TQDM_AVAILABLE = False
 
 MIN_RATING = 750
-MAX_GAMES_TO_COLLECT = 90000000  # 10M games maximum
+MAX_GAMES_TO_COLLECT = 90000000  # 90M games maximum
 
 
 import uuid
@@ -239,7 +239,7 @@ def filter_games_by_rating_and_time_control_parallel(input_file, output_dir, min
     """
     
     if num_processes is None:
-        num_processes = min(cpu_count(), 4)  # Conservative default for memory safety
+        num_processes = min(cpu_count(), 50)  # Conservative default for memory safety
     
     print(f"Filtering games with both players rated >= {min_rating}...")
     print(f"Using memory-efficient parallel processing with {num_processes} workers")
