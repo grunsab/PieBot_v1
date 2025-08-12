@@ -442,7 +442,7 @@ def train_curriculum(args, device):
     # Initialize scheduler
     scheduler = None
     if args.scheduler == 'plateau':
-        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
         print('Using ReduceLROnPlateau scheduler')
     
     # Initialize mixed precision scaler
@@ -722,7 +722,7 @@ def train():
         scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
         print('Using CosineAnnealingWarmRestarts scheduler')
     elif args.scheduler == 'plateau':
-        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
         print('Using ReduceLROnPlateau scheduler')
     
     # Initialize mixed precision scaler
