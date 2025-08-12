@@ -8,6 +8,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, OneCycleLR
 from CCRLDataset import CCRLDataset
 from RLDataset import RLDataset, WeightedRLSampler
+from TitanCurriculumDataset import TitanCurriculumDataset, TitanMixedCurriculumDataset
 from TitanMiniNetwork import TitanMini, count_parameters
 from device_utils import get_optimal_device, optimize_for_device, get_batch_size_for_device, get_num_workers_for_device
 import argparse
@@ -80,8 +81,8 @@ def parse_args():
                         help='Number of synthetic samples to generate for dry-run (default: 64)')
     
     # Data params
-    parser.add_argument('--mode', choices=['supervised', 'rl', 'mixed'], default='supervised',
-                        help='Training mode: supervised (CCRL data), rl (self-play), or mixed (both)')
+    parser.add_argument('--mode', choices=['supervised', 'rl', 'mixed', 'curriculum', 'mixed-curriculum'], default='supervised',
+                        help='Training mode: supervised, rl, mixed, curriculum (progressive), mixed-curriculum')
     parser.add_argument('--ccrl-dir', type=str, default=ccrl_dir,
                         help='Directory containing CCRL training data')
     parser.add_argument('--rl-dir', type=str, default=rl_dir,
@@ -92,6 +93,18 @@ def parse_args():
                         help='Temperature for label smoothing (default: 0.15)')
     parser.add_argument('--validation-split', type=float, default=0.1,
                         help='Validation split ratio (default: 0.1)')
+    
+    # Curriculum learning params
+    parser.add_argument('--curriculum-dir', type=str, default='games_training_data/curriculum',
+                        help='Directory containing curriculum-organized games')
+    parser.add_argument('--curriculum-config', type=str, default=None,
+                        help='Path to curriculum configuration JSON file')
+    parser.add_argument('--curriculum-state', type=str, default=None,
+                        help='Path to saved curriculum state for resuming')
+    parser.add_argument('--dynamic-value-weight', action='store_true',
+                        help='Use dynamic value loss weighting based on curriculum stage')
+    parser.add_argument('--monitor-piece-values', action='store_true',
+                        help='Monitor piece value convergence during curriculum training')
     
     # Advanced training
     parser.add_argument('--swa', action='store_true',
@@ -213,7 +226,26 @@ def create_data_loaders(args, *, distributed=False, rank=0, world_size=1, is_mai
         return train_loader, val_loader
 
     # Create dataset based on training mode
-    if args.mode == 'supervised':
+    if args.mode == 'curriculum':
+        if is_main:
+            print(f'Training mode: Titan Mini Curriculum learning (progressive difficulty)')
+            print(f'Curriculum directory: {args.curriculum_dir}')
+        enhanced = args.input_planes > 16
+        dataset = TitanCurriculumDataset(args.curriculum_config, enhanced_encoder=enhanced)
+        
+        # Load saved state if resuming
+        if args.curriculum_state and os.path.exists(args.curriculum_state):
+            dataset.load_state(args.curriculum_state)
+        
+        # Return curriculum dataset directly for special handling
+        return dataset, None
+    elif args.mode == 'mixed-curriculum':
+        if is_main:
+            print(f'Training mode: Titan Mini Mixed curriculum learning')
+            print(f'Curriculum directory: {args.curriculum_dir}')
+        enhanced = args.input_planes > 16
+        dataset = TitanMixedCurriculumDataset(args.curriculum_config, enhanced_encoder=enhanced)
+    elif args.mode == 'supervised':
         print(f'Training mode: Supervised learning on CCRL dataset')
         enhanced = args.input_planes > 16
         dataset = CCRLDataset(args.ccrl_dir, soft_targets=True, temperature=args.label_smoothing_temp, enhanced_encoder=enhanced)

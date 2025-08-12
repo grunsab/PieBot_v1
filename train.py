@@ -8,6 +8,8 @@ from torch.cuda.amp import GradScaler, autocast
 from torch.utils.tensorboard import SummaryWriter
 from CCRLDataset import CCRLDataset
 from RLDataset import RLDataset, WeightedRLSampler
+from CurriculumDataset import CurriculumDataset, MixedCurriculumDataset
+from piece_value_monitor import PieceValueMonitor
 from AlphaZeroNetwork import AlphaZeroNet
 from device_utils import get_optimal_device, optimize_for_device, get_batch_size_for_device, get_num_workers_for_device
 import argparse
@@ -62,8 +64,8 @@ def parse_args():
                         help=f'Weight for policy loss relative to value loss (default: {default_policy_weight})')
     
     # Data params
-    parser.add_argument('--mode', choices=['supervised', 'rl', 'mixed'], default='supervised',
-                        help='Training mode: supervised (CCRL data), rl (self-play), or mixed (both)')
+    parser.add_argument('--mode', choices=['supervised', 'rl', 'mixed', 'curriculum', 'mixed-curriculum'], default='supervised',
+                        help='Training mode: supervised (CCRL), rl (self-play), mixed (both), curriculum (progressive), mixed-curriculum')
     parser.add_argument('--ccrl-dir', type=str, default=ccrl_dir,
                         help='Directory containing CCRL training data')
     parser.add_argument('--rl-dir', type=str, default=rl_dir,
@@ -78,6 +80,16 @@ def parse_args():
                         help='Weight decay factor for older games (default: 0.05)')
     parser.add_argument('--validation-split', type=float, default=0.1,
                         help='Validation split ratio (default: 0.1)')
+    
+    # Curriculum learning params
+    parser.add_argument('--curriculum-dir', type=str, default='games_training_data/curriculum',
+                        help='Directory containing curriculum-organized games')
+    parser.add_argument('--curriculum-config', type=str, default=None,
+                        help='Path to curriculum configuration JSON file')
+    parser.add_argument('--curriculum-state', type=str, default=None,
+                        help='Path to saved curriculum state for resuming')
+    parser.add_argument('--dynamic-value-weight', action='store_true',
+                        help='Use dynamic value loss weighting based on curriculum stage')
     
     # Advanced training
     parser.add_argument('--mixed-precision', action='store_true',
@@ -96,6 +108,8 @@ def parse_args():
                         help='Save checkpoint every N epochs (default: 5)')
     parser.add_argument('--log-interval', type=int, default=100,
                         help='Log training metrics every N batches (default: 100)')
+    parser.add_argument('--monitor-piece-values', action='store_true',
+                        help='Monitor piece value convergence during training')
     parser.add_argument('--verbose', action='store_true',
                         help='Enable verbose logging')
     
@@ -148,6 +162,21 @@ def create_data_loaders(args, device):
             print(f'Using weighted sampling with decay factor {args.rl_weight_decay}')
         dataset = RLDataset(args.rl_dir, weight_recent=args.rl_weight_recent, 
                           weight_decay=args.rl_weight_decay)
+    elif args.mode == 'curriculum':
+        print(f'Training mode: Curriculum learning (progressive difficulty)')
+        print(f'Curriculum directory: {args.curriculum_dir}')
+        dataset = CurriculumDataset(args.curriculum_config)
+        
+        # Load saved state if resuming
+        if args.curriculum_state and os.path.exists(args.curriculum_state):
+            dataset.load_state(args.curriculum_state)
+        
+        # Return curriculum dataset directly for special handling
+        return dataset, None
+    elif args.mode == 'mixed-curriculum':
+        print(f'Training mode: Mixed curriculum learning')
+        print(f'Curriculum directory: {args.curriculum_dir}')
+        dataset = MixedCurriculumDataset(args.curriculum_config)
     else:  # mixed mode
         print(f'Training mode: Mixed (RL ratio: {args.mixed_ratio})')
         print(f'Using soft targets with temperature {args.label_smoothing_temp}')
@@ -373,12 +402,260 @@ def save_checkpoint(model, optimizer, scheduler, epoch, args, best_val_loss, che
     print(f'Checkpoint saved to {checkpoint_path}')
 
 
+def train_curriculum(args, device):
+    """Special training loop for curriculum learning."""
+    # Setup directories and logging
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    os.makedirs(args.log_dir, exist_ok=True)
+    
+    # Initialize tensorboard writer
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_subdir = os.path.join(args.log_dir, f'curriculum_{timestamp}')
+    writer = SummaryWriter(log_subdir)
+    print(f'Tensorboard logs: {log_subdir}')
+    
+    # Create curriculum dataset
+    curriculum_dataset = CurriculumDataset(args.curriculum_config)
+    
+    # Load saved state if resuming
+    if args.curriculum_state and os.path.exists(args.curriculum_state):
+        curriculum_dataset.load_state(args.curriculum_state)
+    
+    # Determine model architecture
+    num_blocks = args.num_blocks
+    num_filters = args.num_filters
+    
+    # Create and optimize model for the device
+    alphaZeroNet = AlphaZeroNet(num_blocks, num_filters, policy_weight=args.policy_weight)
+    alphaZeroNet = optimize_for_device(alphaZeroNet, device)
+    
+    # Count parameters
+    total_params = sum(p.numel() for p in alphaZeroNet.parameters())
+    trainable_params = sum(p.numel() for p in alphaZeroNet.parameters() if p.requires_grad)
+    print(f'Model initialized: {num_blocks}x{num_filters}')
+    print(f'Total parameters: {total_params:,}')
+    print(f'Trainable parameters: {trainable_params:,}')
+    
+    # Initialize optimizer
+    optimizer = optim.Adam(alphaZeroNet.parameters(), lr=args.lr)
+    
+    # Initialize scheduler
+    scheduler = None
+    if args.scheduler == 'plateau':
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+        print('Using ReduceLROnPlateau scheduler')
+    
+    # Initialize mixed precision scaler
+    scaler = GradScaler() if args.mixed_precision and device.type == 'cuda' else None
+    if scaler:
+        print('Mixed precision training enabled')
+    
+    # Initialize EMA
+    ema = EMA(alphaZeroNet, decay=args.ema_decay) if args.ema_decay > 0 else None
+    if ema:
+        print(f'Exponential moving average enabled with decay {args.ema_decay}')
+    
+    # Load checkpoint if resuming
+    if args.resume:
+        if os.path.exists(args.resume):
+            print(f'Loading checkpoint from {args.resume}')
+            checkpoint = torch.load(args.resume, map_location=device)
+            alphaZeroNet.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            if scheduler and checkpoint.get('scheduler_state_dict'):
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            if ema and checkpoint.get('ema_state_dict'):
+                ema.shadow = checkpoint['ema_state_dict']
+            print(f'Resumed from checkpoint')
+    
+    best_val_loss = float('inf')
+    early_stopping_counter = 0
+    global_epoch = 0
+    
+    # Training loop through curriculum stages
+    while curriculum_dataset.current_stage_idx < len(curriculum_dataset.stages):
+        current_stage = curriculum_dataset.get_current_stage()
+        stage_info = curriculum_dataset.get_stage_info()
+        
+        print(f"\n{'='*60}")
+        print(f"Starting Stage: {current_stage.name.upper()}")
+        print(f"ELO Range: {current_stage.elo_range[0]}-{current_stage.elo_range[1]}")
+        print(f"Epochs: {current_stage.epochs}")
+        print(f"Value Weight: {current_stage.value_weight}")
+        print(f"{'='*60}\n")
+        
+        # Update model's policy weight if using dynamic weighting
+        if args.dynamic_value_weight:
+            alphaZeroNet.policy_weight = 1.0 / current_stage.value_weight
+            print(f"Updated model value/policy weight ratio: {current_stage.value_weight}:{alphaZeroNet.policy_weight}")
+        
+        # Create data loaders for current stage
+        dataset = curriculum_dataset.current_dataset
+        if dataset is None:
+            curriculum_dataset._load_current_stage()
+            dataset = curriculum_dataset.current_dataset
+        
+        # Split into train and validation
+        total_size = len(dataset)
+        val_size = int(total_size * args.validation_split)
+        train_size = total_size - val_size
+        
+        train_dataset, val_dataset = random_split(
+            dataset, 
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(42)
+        )
+        
+        batch_size = args.batch_size if args.batch_size else get_batch_size_for_device()
+        num_workers = get_num_workers_for_device()
+        
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=batch_size, 
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=(device.type == 'cuda')
+        )
+        
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size * 2,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=(device.type == 'cuda')
+        )
+        
+        print(f'Stage dataset - Train: {len(train_dataset)}, Validation: {len(val_dataset)}')
+        
+        # Train for the specified number of epochs for this stage
+        for stage_epoch in range(current_stage.epochs):
+            epoch_start_time = time.time()
+            
+            # Train
+            train_loss, train_value_loss, train_policy_loss = train_epoch(
+                alphaZeroNet, train_loader, optimizer, None, scaler, 
+                args, global_epoch, writer, device, ema
+            )
+            
+            # Validate
+            val_loss, val_value_loss, val_policy_loss = validate(
+                alphaZeroNet, val_loader, args, global_epoch, writer, device
+            )
+            
+            # Step scheduler
+            if scheduler:
+                scheduler.step(val_loss)
+            
+            # Log curriculum info
+            if writer:
+                writer.add_scalar('Curriculum/Stage', curriculum_dataset.current_stage_idx, global_epoch)
+                writer.add_scalar('Curriculum/ValueWeight', current_stage.value_weight, global_epoch)
+                writer.add_scalar('Curriculum/ELOMin', current_stage.elo_range[0], global_epoch)
+                writer.add_scalar('Curriculum/ELOMax', current_stage.elo_range[1], global_epoch)
+            
+            # Monitor piece values if requested
+            if args.monitor_piece_values and (global_epoch + 1) % 5 == 0:
+                piece_monitor = PieceValueMonitor(alphaZeroNet, device)
+                piece_monitor.print_piece_value_report()
+                if writer:
+                    piece_monitor.log_to_tensorboard(writer, global_epoch)
+            
+            # Print epoch summary
+            epoch_time = time.time() - epoch_start_time
+            print(f'\n[{current_stage.name}] Epoch {stage_epoch+1}/{current_stage.epochs} (Global: {global_epoch+1}) - Time: {epoch_time:.1f}s')
+            print(f'Train - Loss: {train_loss:.4f}, Value: {train_value_loss:.4f}, Policy: {train_policy_loss:.4f}')
+            print(f'Val   - Loss: {val_loss:.4f}, Value: {val_value_loss:.4f}, Policy: {val_policy_loss:.4f}')
+            print(f'LR: {optimizer.param_groups[0]["lr"]:.6f}')
+            
+            # Save checkpoint periodically
+            if (global_epoch + 1) % args.save_every == 0:
+                checkpoint_path = os.path.join(args.checkpoint_dir, f'curriculum_checkpoint_epoch_{global_epoch+1}.pt')
+                save_checkpoint(alphaZeroNet, optimizer, scheduler, global_epoch, args, 
+                              best_val_loss, checkpoint_path, ema)
+                
+                # Save curriculum state
+                curriculum_state_path = os.path.join(args.checkpoint_dir, f'curriculum_state_{global_epoch+1}.json')
+                curriculum_dataset.save_state(curriculum_state_path)
+            
+            # Save best model
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_path = os.path.join(args.checkpoint_dir, 'curriculum_best_model.pt')
+                save_checkpoint(alphaZeroNet, optimizer, scheduler, global_epoch, args, 
+                              best_val_loss, best_path, ema)
+                print(f'New best validation loss: {best_val_loss:.4f}')
+                early_stopping_counter = 0
+            else:
+                early_stopping_counter += 1
+            
+            # Early stopping (per stage)
+            if args.early_stopping_patience > 0 and early_stopping_counter >= args.early_stopping_patience:
+                print(f'\nEarly stopping triggered for stage {current_stage.name} after {stage_epoch+1} epochs')
+                break
+            
+            curriculum_dataset.on_epoch_end()
+            global_epoch += 1
+            
+            print('-' * 60)
+        
+        # Advance to next stage
+        if not curriculum_dataset.advance_stage():
+            print(f"\n{'='*60}")
+            print("Curriculum training complete!")
+            print(f"{'='*60}")
+            break
+        
+        # Reset early stopping counter for new stage
+        early_stopping_counter = 0
+    
+    # Apply EMA if enabled
+    if ema:
+        print('\nApplying EMA weights to final model...')
+        ema.apply_shadow()
+    
+    # Save final model
+    if args.output:
+        networkFileName = args.output
+    else:
+        networkFileName = f'AlphaZeroNet_{num_blocks}x{num_filters}_curriculum.pt'
+    
+    torch.save(alphaZeroNet.state_dict(), networkFileName)
+    print(f'\nCurriculum training complete! Final model saved to {networkFileName}')
+    print(f'Best validation loss: {best_val_loss:.4f}')
+    
+    # Save training summary
+    summary = {
+        'model': f'{num_blocks}x{num_filters}',
+        'training_mode': 'curriculum',
+        'stages_completed': curriculum_dataset.current_stage_idx,
+        'total_stages': len(curriculum_dataset.stages),
+        'epochs_trained': global_epoch,
+        'best_val_loss': best_val_loss,
+        'final_train_loss': train_loss,
+        'final_val_loss': val_loss,
+        'args': vars(args)
+    }
+    
+    summary_path = os.path.join(args.checkpoint_dir, 'curriculum_training_summary.json')
+    with open(summary_path, 'w') as f:
+        json.dump(summary, f, indent=2)
+    print(f'Training summary saved to {summary_path}')
+    
+    # Close tensorboard writer
+    writer.close()
+
+
 def train():
     args = parse_args()
     
     # Get optimal device and configure for training
     device, device_str = get_optimal_device()
     print(f'Using device: {device_str}')
+    
+    # Handle curriculum training separately
+    if args.mode == 'curriculum':
+        train_curriculum(args, device)
+        return
     
     # Setup directories and logging
     os.makedirs(args.checkpoint_dir, exist_ok=True)
