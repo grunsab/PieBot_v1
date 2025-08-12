@@ -329,7 +329,16 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, args, epoch, 
     
     start_time = time.time()
     
-    for batch_idx, batch in enumerate(train_loader):
+    # Check if train_loader is a dataset (curriculum mode) or a DataLoader
+    if hasattr(train_loader, '__getitem__') and not hasattr(train_loader, 'batch_size'):
+        # It's a dataset, need to create batches manually
+        from torch.utils.data import DataLoader
+        batch_size = args.batch_size if hasattr(args, 'batch_size') else 256
+        data_loader = DataLoader(train_loader, batch_size=batch_size, shuffle=True)
+    else:
+        data_loader = train_loader
+    
+    for batch_idx, batch in enumerate(data_loader):
         # Support both dict-style and tuple batches
         if isinstance(batch, dict):
             position = batch['position']

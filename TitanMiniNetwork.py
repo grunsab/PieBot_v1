@@ -431,6 +431,10 @@ class TitanMini(nn.Module):
             
         batch_size = x.shape[0]
         
+        # Validate input shape
+        if len(x.shape) != 4 or x.shape[2] != 8 or x.shape[3] != 8:
+            raise ValueError(f"Expected input shape [batch, planes, 8, 8], got {x.shape}")
+        
         # 1. Project input planes to token embeddings.
         x = self.input_projection(x)  # [batch, d_model, 8, 8]
         
