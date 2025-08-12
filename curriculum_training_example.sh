@@ -22,7 +22,6 @@ echo "Step 3: Organizing games by ELO rating..."
 python organize_games_by_elo.py \
     --input-dir games_training_data/reformatted_lichess \
     --output-dir games_training_data/curriculum \
-    --workers 12
 
 # Also organize computer games if available
 if [ -d "games_training_data/reformatted" ]; then
@@ -30,7 +29,6 @@ if [ -d "games_training_data/reformatted" ]; then
     python organize_games_by_elo.py \
         --input-dir games_training_data/reformatted \
         --output-dir games_training_data/curriculum \
-        --workers 12
 fi
 
 # Step 4: Start curriculum training
