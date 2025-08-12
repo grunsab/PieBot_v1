@@ -83,10 +83,53 @@ def get_available_databases():
     
     return sorted(matches, reverse=True)  # Most recent first
 
+def validate_file(filepath, expected_size_gb=30, tolerance_gb=5):
+    """
+    Validate that a downloaded file exists and is approximately the expected size.
+    
+    Args:
+        filepath: Path to the file to validate
+        expected_size_gb: Expected file size in GB (default: 30)
+        tolerance_gb: Tolerance for size validation in GB (default: 5)
+    
+    Returns:
+        bool: True if file exists and is within expected size range
+    """
+    if not os.path.exists(filepath):
+        return False
+    
+    file_size_bytes = os.path.getsize(filepath)
+    file_size_gb = file_size_bytes / (1024 * 1024 * 1024)
+    
+    min_size = expected_size_gb - tolerance_gb
+    max_size = expected_size_gb + tolerance_gb
+    
+    if file_size_gb < min_size or file_size_gb > max_size:
+        print(f"  Warning: {os.path.basename(filepath)} size is {file_size_gb:.1f}GB, expected ~{expected_size_gb}GB")
+        return False
+    
+    # Try to open the file with zstandard to verify it's not corrupt
+    try:
+        with open(filepath, 'rb') as f:
+            dctx = zstd.ZstdDecompressor()
+            with dctx.stream_reader(f) as reader:
+                # Read just a small chunk to verify the file is valid
+                reader.read(1024)
+        return True
+    except Exception as e:
+        print(f"  Warning: {os.path.basename(filepath)} appears to be corrupt: {e}")
+        return False
+
 def download_file(url_filename_pairs, chunk_size=8192):
     """Download a file with progress bar."""
     url = url_filename_pairs[0]
     filepath = url_filename_pairs[1]
+    
+    # Check if file already exists and is valid
+    if validate_file(filepath):
+        print(f"  ✓ {os.path.basename(filepath)} already exists and is valid (skipping download)")
+        return
+    
     response = requests.get(url, stream=True)
     total_size = int(response.headers.get('content-length', 0))
     
@@ -246,17 +289,26 @@ def main():
         for db in databases_to_download:
             print(f"  - {db}")
         
-        # Download files
-
+        # Check which files need to be downloaded
         url_paths_and_fnames = []
+        all_files_valid = True
 
         for db_path in databases_to_download:
             filename = os.path.basename(db_path)
             filepath = os.path.join(args.output_dir_downloads, filename)
-            url = LICHESS_DB_URL + db_path
-            url_paths_and_fnames.append((url, filepath))
+            
+            if validate_file(filepath):
+                print(f"  ✓ {filename} already exists and is valid (will skip download)")
+            else:
+                url = LICHESS_DB_URL + db_path
+                url_paths_and_fnames.append((url, filepath))
+                all_files_valid = False
 
-        parallel_download_mp(url_paths_and_fnames)
+        if url_paths_and_fnames:
+            print(f"\nDownloading {len(url_paths_and_fnames)} file(s)...")
+            parallel_download_mp(url_paths_and_fnames)
+        elif all_files_valid:
+            print("\n✓ All requested files already exist and are valid. Proceeding to filtering...")
     
     # Filter downloaded files
     print("\n" + "="*50)
