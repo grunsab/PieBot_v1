@@ -105,7 +105,7 @@ class PieNanoCurriculumDataset(Dataset):
             data_dir=os.path.join(base_dir, 'beginner'),
             elo_range=(750, 1500),
             epochs=80,  # Moderate epochs for foundation
-            value_weight=2.0,  # Strong emphasis on value learning
+            value_weight=3.0,  # Strong emphasis on value learning
             soft_targets=True,
             temperature=0.15,  # Moderate temperature for smooth learning
             lr_multiplier=0.7,  # Slightly lower LR for stability
@@ -119,7 +119,7 @@ class PieNanoCurriculumDataset(Dataset):
             data_dir=os.path.join(base_dir, 'intermediate'),
             elo_range=(1500, 2400),
             epochs=80,  # More epochs for complex patterns
-            value_weight=1.5,
+            value_weight=2.5,
             soft_targets=True,
             temperature=0.12,
             lr_multiplier=1.0,  # Normal learning rate
@@ -133,7 +133,7 @@ class PieNanoCurriculumDataset(Dataset):
             data_dir=os.path.join(base_dir, 'expert'),
             elo_range=(2400, 3000),
             epochs=120,  # Extended training for expert play
-            value_weight=1.0,
+            value_weight=1.8,
             soft_targets=True,
             temperature=0.10,
             lr_multiplier=0.8,  # Slightly reduced LR for fine-tuning
@@ -146,7 +146,7 @@ class PieNanoCurriculumDataset(Dataset):
             name='computer',
             data_dir=os.path.join(base_dir, 'computer'),
             elo_range=(3000, 4000),
-            epochs=120,  # Extensive training for peak performance
+            epochs=250,  # Extensive training for peak performance
             value_weight=0.7,  # Focus more on policy for sophisticated play
             soft_targets=True,
             temperature=0.08,  # Lower temperature for sharper decisions
@@ -303,6 +303,8 @@ class PieNanoMixedCurriculumDataset(Dataset):
         self.enhanced_encoder = enhanced_encoder
         self.datasets = []
         self.weights = []
+        self.stages = {}  # Store stage objects for value_weight access
+        self.stage_names = []  # Track stage names for each dataset
         
         if curriculum_config:
             if isinstance(curriculum_config, str):
@@ -319,26 +321,39 @@ class PieNanoMixedCurriculumDataset(Dataset):
         """Setup default mixed curriculum with weighted sampling."""
         base_dir = 'games_training_data/curriculum'
         
-        # Load all stages with different weights
+        # Create a PieNanoCurriculumDataset to get stage configurations
+        temp_curriculum = PieNanoCurriculumDataset(enhanced_encoder=self.enhanced_encoder)
+        
+        # Load all stages with different weights, using value_weights from stages
         stages_config = [
-            ('beginner', 0.15),     # 15% from beginner games
-            ('intermediate', 0.30), # 30% from intermediate
-            ('expert', 0.35),       # 35% from expert
-            ('computer', 0.20)      # 20% from computer games
+            ('beginner', 0.10),     # 10% from beginner games
+            ('intermediate', 0.10), # 10% from intermediate
+            ('expert', 0.15),       # 15% from expert
+            ('computer', 0.65)      # 65% from computer games
         ]
         
         for stage_name, weight in stages_config:
             data_dir = os.path.join(base_dir, stage_name)
             if os.path.exists(data_dir):
+                # Find the corresponding stage from temp_curriculum
+                stage_obj = next((s for s in temp_curriculum.stages if s.name == stage_name), None)
+                
                 dataset = CCRLDataset(
                     data_dir,
                     soft_targets=True,
-                    temperature=0.1,
+                    temperature=stage_obj.temperature if stage_obj else 0.1,
                     enhanced_encoder=self.enhanced_encoder
                 )
                 self.datasets.append(dataset)
                 self.weights.append(weight)
-                print(f"Loaded {stage_name} dataset with weight {weight:.2%}")
+                self.stage_names.append(stage_name)
+                
+                # Store the stage object for value_weight access
+                if stage_obj:
+                    self.stages[stage_name] = stage_obj
+                    print(f"Loaded {stage_name} dataset with weight {weight:.2%}, value_weight {stage_obj.value_weight}")
+                else:
+                    print(f"Loaded {stage_name} dataset with weight {weight:.2%}")
     
     def _setup_mixed_stages(self, config: Dict):
         """Setup mixed stages from configuration."""
@@ -365,7 +380,20 @@ class PieNanoMixedCurriculumDataset(Dataset):
         # Use weighted random sampling
         dataset_idx = torch.multinomial(torch.tensor(self.weights), 1).item()
         dataset = self.datasets[dataset_idx]
+        stage_name = self.stage_names[dataset_idx] if dataset_idx < len(self.stage_names) else None
         
         # Random sample from selected dataset
         sample_idx = torch.randint(0, len(dataset), (1,)).item()
-        return dataset[sample_idx]
+        data = dataset[sample_idx]
+        
+        # Add value_weight information from the corresponding stage
+        if stage_name and stage_name in self.stages:
+            if isinstance(data, tuple):
+                return data + (self.stages[stage_name].value_weight,)
+        return data
+    
+    def get_value_weight_for_stage(self, stage_name: str) -> float:
+        """Get the value weight for a specific stage."""
+        if stage_name in self.stages:
+            return self.stages[stage_name].value_weight
+        return 1.0

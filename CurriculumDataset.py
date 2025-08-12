@@ -92,7 +92,7 @@ class CurriculumDataset(Dataset):
             data_dir=os.path.join(base_dir, 'beginner'),
             elo_range=(750, 1500),
             epochs=80,
-            value_weight=2.0,  # Higher weight on value loss to learn piece values
+            value_weight=3.0,  # Higher weight on value loss to learn piece values
             soft_targets=True,
             temperature=0.15
         ))
@@ -103,7 +103,7 @@ class CurriculumDataset(Dataset):
             data_dir=os.path.join(base_dir, 'intermediate'),
             elo_range=(1500, 2400),
             epochs=80,
-            value_weight=1.5,
+            value_weight=2.5,
             soft_targets=True,
             temperature=0.12
         ))
@@ -114,7 +114,7 @@ class CurriculumDataset(Dataset):
             data_dir=os.path.join(base_dir, 'expert'),
             elo_range=(2400, 3000),
             epochs=150,
-            value_weight=1.0,
+            value_weight=1.8,
             soft_targets=True,
             temperature=0.1
         ))
@@ -124,8 +124,8 @@ class CurriculumDataset(Dataset):
             name='computer',
             data_dir=os.path.join(base_dir, 'computer'),
             elo_range=(3000, 4000),
-            epochs=150,
-            value_weight=0.8,  # Lower value weight for sophisticated play
+            epochs=300,
+            value_weight=0.7,  # Lower value weight for sophisticated play
             soft_targets=True,
             temperature=0.08
         ))
@@ -278,18 +278,20 @@ class MixedCurriculumDataset(Dataset):
         
         # Default mixing ratio
         self.mixing_ratio = mixing_ratio or {
-            'beginner': 0.15,
-            'intermediate': 0.25,
-            'expert': 0.30,
-            'computer': 0.30
+            'beginner': 0.10,
+            'intermediate': 0.10,
+            'expert': 0.15,
+            'computer': 0.65
         }
         
-        # Load all datasets
+        # Load all datasets and store stages
         self.datasets = {}
+        self.stages = {}  # Store stage objects for value_weight access
         for stage in self.curriculum.stages:
             if stage.name in self.mixing_ratio and self.mixing_ratio[stage.name] > 0:
                 stage.load_dataset()
                 self.datasets[stage.name] = stage.dataset
+                self.stages[stage.name] = stage  # Store the stage object
         
         # Calculate dataset sizes based on ratios
         self._calculate_sampling_indices()
@@ -323,4 +325,15 @@ class MixedCurriculumDataset(Dataset):
     
     def __getitem__(self, idx):
         stage_name, dataset_idx = self.dataset_mapping[idx]
-        return self.datasets[stage_name][dataset_idx]
+        data = self.datasets[stage_name][dataset_idx]
+        # Add value_weight information from the corresponding stage
+        if isinstance(data, tuple):
+            # Assuming data is (input, value_target, policy_target) or similar
+            return data + (self.stages[stage_name].value_weight,)
+        return data
+    
+    def get_value_weight_for_stage(self, stage_name: str) -> float:
+        """Get the value weight for a specific stage."""
+        if stage_name in self.stages:
+            return self.stages[stage_name].value_weight
+        return 1.0

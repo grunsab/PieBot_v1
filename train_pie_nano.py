@@ -15,7 +15,7 @@ import time
 from tqdm import tqdm
 
 # Training params optimized for PieNano V2
-default_epochs = 100
+default_epochs = 200
 default_blocks = 20
 default_filters = 256
 default_lr = 0.001

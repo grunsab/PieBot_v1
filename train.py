@@ -20,7 +20,7 @@ from datetime import datetime
 import json
 
 #Training params (defaults)
-default_epochs = 40
+default_epochs = 200
 default_blocks = 20
 default_filters = 256
 default_lr = 0.001
