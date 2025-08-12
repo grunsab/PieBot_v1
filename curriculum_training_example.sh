@@ -8,7 +8,7 @@ echo "==================================="
 # Configuration
 MONTHS_TO_DOWNLOAD=1  # Download 1 month (30GB compressed, ~90M games)
 MIN_RATING=750  # Minimum rating for quality games
-MAX_GAMES=90000000  # Collect up to 10M games (reasonable for curriculum)
+MAX_GAMES=90000000  # Collect up to 90M games (reasonable for curriculum)
 
 # Step 1: Download Lichess games (human players)
 echo "Step 1: Downloading Lichess games..."
@@ -18,7 +18,7 @@ echo "  Max games: ${MAX_GAMES}"
 echo "  Will delete compressed files after processing to save space"
 echo ""
 
-python download_lichess_games.py \
+python3 download_lichess_games.py \
     --months ${MONTHS_TO_DOWNLOAD} \
     --min-rating ${MIN_RATING} \
     --max-games ${MAX_GAMES} \
@@ -28,7 +28,7 @@ python download_lichess_games.py \
 
 # Step 2: Download computer games (optional, for highest level)
 echo "Step 2: Downloading computer games..."
-python download_computerchess_org_uk.py
+python3 download_computerchess_org_uk.py
 
 # Step 3: Organize games by ELO rating
 echo ""
@@ -37,14 +37,14 @@ echo "  Creating curriculum stages: beginner (750-1500), intermediate (1500-2400
 echo "  expert (2400-3000), computer (3000-4000)"
 echo ""
 
-python organize_games_by_elo.py \
+python3 organize_games_by_elo.py \
     --input-dir games_training_data/reformatted_lichess \
     --output-dir games_training_data/curriculum
 
 # Also organize computer games if available
 if [ -d "games_training_data/reformatted" ]; then
     echo "Organizing computer games..."
-    python organize_games_by_elo.py \
+    python3 organize_games_by_elo.py \
         --input-dir games_training_data/reformatted \
         --output-dir games_training_data/curriculum
 fi
@@ -69,7 +69,7 @@ echo "  Training mode: Progressive difficulty curriculum"
 echo "  Stages: 4 (beginner → intermediate → expert → computer)"
 echo ""
 
-python train.py \
+python3 train.py \
     --mode curriculum \
     --num-blocks 20 \
     --num-filters 256 \
@@ -102,7 +102,7 @@ echo ""
 
 # Optional: Test the trained model
 echo "To test the trained model, run:"
-echo "python playchess.py --model AlphaZeroNet_20x256_curriculum.pt --rollouts 1000 --threads 10 --mode h"
+echo "python3 playchess.py --model AlphaZeroNet_20x256_curriculum.pt --rollouts 1000 --threads 10 --mode h"
 echo ""
 echo "To resume interrupted training, run this script again."
 echo "Training will automatically continue from the saved curriculum state."
