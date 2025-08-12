@@ -146,7 +146,7 @@ class TitanCurriculumDataset(Dataset):
             name='computer',
             data_dir=os.path.join(base_dir, 'computer'),
             elo_range=(3000, 4000),
-            epochs=60,  # Extensive training for peak performance
+            epochs=100,  # Extensive training for peak performance
             value_weight=0.8,  # Focus on policy for sophisticated play
             soft_targets=True,
             temperature=0.08,
