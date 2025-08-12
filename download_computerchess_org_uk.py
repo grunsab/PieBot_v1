@@ -1,52 +1,111 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Download and filter super-grandmaster-level chess games from ComputerChess.org.uk.
-Filters games where both players have ratings >= 2500 (significantly beyond human level).
+Download and extract chess games from ComputerChess.org.uk.
+Optimized for fast extraction without filtering.
 """
 
 import requests
 import os
 import sys
-import gzip
-import shutil
-from datetime import datetime
-import re
+import time
 import argparse
 from tqdm import tqdm
-import time
-# import chess.pgn  # No longer needed - using string-based extraction 
-import sys
-import argparse
-from pathlib import Path
-import multiprocessing as mp
-from multiprocessing import Pool, Manager, cpu_count
-import time
-from functools import partial
-try:
-    from tqdm import tqdm
-    TQDM_AVAILABLE = True
-except ImportError:
-    TQDM_AVAILABLE = False
-
-MIN_RATING = 2500
-
-import uuid
 import py7zr
-from collections import defaultdict
+
+# Fix Windows console encoding issues
+if sys.platform == 'win32':
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
 
-def count_games_in_pgn_fast(input_file):
-    """
-    Count games by scanning for Result tags, which is much faster than parsing.
-    Each game ends with a Result tag.
-    """
-    count = 0
-    with open(input_file, 'r') as f:
-        for line in f:
-            if line.startswith('[Result '):
-                count += 1
-    return count
+def download_file(url_filename_pairs, chunk_size=8192):
+    """Download a file with progress bar."""
+    url = url_filename_pairs[0]
+    filepath = url_filename_pairs[1]
+    response = requests.get(url, stream=True)
+    total_size = int(response.headers.get('content-length', 0))
+    
+    with open(filepath, 'wb') as f:
+        with tqdm(total=total_size, unit='iB', unit_scale=True, desc=os.path.basename(filepath)) as pbar:
+            for data in response.iter_content(chunk_size):
+                pbar.update(len(data))
+                f.write(data)
+
+
+def extract_games_ultra_fast(input_file, output_directory, offset=0):
+    """Extract all games with batch writing for maximum speed."""
+    
+    os.makedirs(output_directory, exist_ok=True)
+    
+    print(f"Extracting games from {os.path.basename(input_file)}...")
+    
+    games_processed = 0
+    start_time = time.time()
+    last_report_time = start_time
+    
+    # Batch parameters
+    batch_size = 10000  # Write 10k games at once
+    games_batch = []
+    game_idx = offset
+    
+    with open(input_file, 'r', encoding='utf-8', errors='ignore') as fh:
+        current_game = []
+        in_game = False
+        
+        for line in fh:
+            if line.startswith('[Event'):
+                # Start of new game
+                if current_game and in_game:
+                    # Add to batch
+                    games_batch.append((''.join(current_game) + '\n', game_idx))
+                    games_processed += 1
+                    game_idx += 1
+                    
+                    # Write batch when full
+                    if len(games_batch) >= batch_size:
+                        for game_content, idx in games_batch:
+                            output_file = os.path.join(output_directory, f'{idx}.pgn')
+                            with open(output_file, 'w', encoding='utf-8') as game_fh:
+                                game_fh.write(game_content)
+                        
+                        # Report progress
+                        current_time = time.time()
+                        elapsed = current_time - start_time
+                        speed = games_processed / elapsed if elapsed > 0 else 0
+                        print(f"  Processed: {games_processed:,} games, Speed: {speed:.0f} games/sec")
+                        
+                        games_batch = []
+                        last_report_time = current_time
+                    
+                    current_game = []
+                
+                current_game.append(line)
+                in_game = True
+            elif in_game:
+                current_game.append(line)
+        
+        # Process last game
+        if current_game and in_game:
+            games_batch.append((''.join(current_game) + '\n', game_idx))
+            games_processed += 1
+        
+        # Write remaining batch
+        if games_batch:
+            for game_content, idx in games_batch:
+                output_file = os.path.join(output_directory, f'{idx}.pgn')
+                with open(output_file, 'w', encoding='utf-8') as game_fh:
+                    game_fh.write(game_content)
+    
+    elapsed_time = time.time() - start_time
+    
+    print(f"  Extraction complete!")
+    print(f"  Total games extracted: {games_processed:,}")
+    print(f"  Processing time: {elapsed_time:.2f} seconds")
+    print(f"  Processing speed: {games_processed/elapsed_time:.0f} games/second")
+    
+    return games_processed
 
 
 def count_existing_games_in_directory(directory):
@@ -70,257 +129,15 @@ def count_existing_games_in_directory(directory):
     
     return count
 
-    
-def count_games_parallel(args):
-    """
-    Count games in a single file for parallel processing.
-    """
-    pgn_file, input_dir = args
-    input_path = os.path.join(input_dir, pgn_file)
-    game_count = count_games_in_pgn_fast(input_path)
-    return (pgn_file, input_path, game_count)
-
-
-# Fix Windows console encoding issues
-if sys.platform == 'win32':
-    import codecs
-    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
-    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
-
-
-def download_file(url_filename_pairs, chunk_size=8192):
-    """Download a file with progress bar."""
-    url = url_filename_pairs[0]
-    filepath = url_filename_pairs[1]
-    response = requests.get(url, stream=True)
-    total_size = int(response.headers.get('content-length', 0))
-    
-    with open(filepath, 'wb') as f:
-        with tqdm(total=total_size, unit='iB', unit_scale=True, desc=os.path.basename(filepath)) as pbar:
-            for data in response.iter_content(chunk_size):
-                pbar.update(len(data))
-                f.write(data)
-
-
-def extract_and_verify_rating(pgn_headers, min_rating):
-    """Extract white and black ratings from PGN headers."""
-    white_rating = None
-    black_rating = None
-    
-    for line in pgn_headers.split('\n'):
-        if line.startswith('[WhiteElo'):
-            match = re.search(r'"(\d+)"', line)
-            if match:
-                white_rating = int(match.group(1))
-        elif line.startswith('[BlackElo'):
-            match = re.search(r'"(\d+)"', line)
-            if match:
-                black_rating = int(match.group(1))
-    
-    if white_rating is None or black_rating is None:
-        return False
-    return white_rating >= min_rating and black_rating >= min_rating
-
-
-def process_game_chunk(args):
-    """
-    Process a chunk of the file for parallel filtering.
-    
-    Args:
-        args: Tuple of (input_file, output_dir, start_pos, end_pos, min_rating, chunk_id, total_chunks)
-    """
-    input_file, output_dir, start_pos, end_pos, min_rating, chunk_id, total_chunks = args
-    
-    local_kept = []
-    local_processed = 0
-    
-    with open(input_file, 'r', encoding='utf-8', errors='ignore') as fh:
-        # Seek to start position
-        fh.seek(start_pos)
-        
-        # If not at beginning, find the next game start
-        if start_pos > 0:
-            # Read until we find a game start
-            while True:
-                line = fh.readline()
-                if not line:
-                    return [], 0
-                if line.startswith('[Event'):
-                    # Back up to include this line
-                    fh.seek(fh.tell() - len(line.encode('utf-8')))
-                    break
-        
-        current_game = ""
-        in_game = False
-        
-        while fh.tell() < end_pos:
-            line = fh.readline()
-            if not line:
-                break
-                
-            line = line.rstrip('\n\r')
-            
-            if line.startswith('[Event'):
-                # Start of new game
-                if current_game and in_game:
-                    # Process previous game
-                    local_processed += 1
-                    if extract_and_verify_rating(current_game, min_rating):
-                        local_kept.append(current_game)
-                    
-                    if local_processed % 5000 == 0:
-                        print(f"[Chunk {chunk_id}/{total_chunks}] Processed {local_processed:,} games, kept {len(local_kept):,}")
-                
-                current_game = line + '\n'
-                in_game = True
-            elif in_game:
-                current_game += line + '\n'
-        
-        # Process last game in chunk
-        if current_game and in_game:
-            local_processed += 1
-            if extract_and_verify_rating(current_game, min_rating):
-                local_kept.append(current_game)
-    
-    return local_kept, local_processed
-
-
-def get_file_size(input_file):
-    """Get file size for chunking."""
-    return os.path.getsize(input_file)
-
-
-def filter_games_by_rating_and_time_control_parallel(input_file, output_directory, min_rating=2500, offset=0, num_processes=None):
-    """Filter games where both players have rating >= min_rating using parallel processing."""
-    
-    if num_processes is None:
-        num_processes = min(cpu_count(), 8)
-    
-    print(f"Filtering games with both players rated >= {min_rating} using {num_processes} processes...")
-    
-    # For small files or single process, use original function
-    if num_processes == 1:
-        return filter_games_by_rating_and_time_control(input_file, output_directory, min_rating, offset)
-    
-    # Get file size for chunking
-    print("Preparing chunks...")
-    file_size = get_file_size(input_file)
-    chunk_size = file_size // num_processes
-    chunks = []
-    
-    for i in range(num_processes):
-        start_pos = i * chunk_size
-        if i == num_processes - 1:
-            end_pos = file_size
-        else:
-            end_pos = (i + 1) * chunk_size
-        
-        chunks.append((input_file, output_directory, start_pos, end_pos, min_rating, i+1, num_processes))
-    
-    # Process chunks in parallel
-    start_time = time.time()
-    
-    with Pool(num_processes) as pool:
-        results = pool.map(process_game_chunk, chunks)
-    
-    # Collect results
-    all_games = []
-    total_processed = 0
-    
-    for games_list, processed_count in results:
-        all_games.extend(games_list)
-        total_processed += processed_count
-    
-    # Write games sequentially to maintain order
-    print(f"\nWriting {len(all_games):,} filtered games to disk...")
-    for idx, game_content in enumerate(all_games):
-        output_file = os.path.join(output_directory, f'{offset + idx}.pgn')
-        with open(output_file, 'w', encoding='utf-8') as f:
-            f.write(game_content + '\n\n')
-    
-    total_kept = len(all_games)
-    elapsed_time = time.time() - start_time
-    
-    print(f"\nFiltering complete!")
-    print(f"Total games processed: {total_processed:,}")
-    print(f"Games kept (both players >= {min_rating}): {total_kept:,}")
-    if total_processed > 0:
-        print(f"Percentage kept: {total_kept/total_processed*100:.1f}%")
-    print(f"Processing time: {elapsed_time:.2f} seconds")
-    print(f"Processing speed: {total_processed/elapsed_time:.2f} games/second")
-    
-    return total_kept, total_processed
-
-
-def filter_games_by_rating_and_time_control(input_file, output_directory, min_rating=2500, offset=0):
-    """Filter games where both players have rating >= min_rating using string-based approach."""
-    
-    games_processed = 0
-    games_kept = 0
-    
-    print(f"Filtering games with both players rated >= {min_rating}...")
-    
-    with open(input_file, 'r', encoding='utf-8', errors='ignore') as fh:
-        current_game = ""
-        in_game = False
-        i = offset
-        
-        for line in fh:
-            line = line.rstrip('\n\r')
-            
-            if line.startswith('[Event'):
-                # Start of new game
-                if current_game and in_game:
-                    # Process previous game
-                    games_processed += 1
-                    if extract_and_verify_rating(current_game, min_rating):
-                        output_file = os.path.join(output_directory, f'{i}.pgn')
-                        with open(output_file, 'w', encoding='utf-8') as game_fh:
-                            game_fh.write(current_game + '\n\n')
-                        games_kept += 1
-                        i += 1
-                    
-                    if games_kept % 1000 == 0 and games_kept > 0:
-                        print(f"Kept {games_kept} games out of {games_processed} games")
-                    
-                    if games_processed % 10000 == 0 and games_processed > 0:
-                        print(f"Processed {games_processed} games out of approximately 3.8MM games")
-                    
-                    # There are approximately 3.83MM games here
-                    if games_processed >= 3830000:
-                        break
-                
-                current_game = line + '\n'
-                in_game = True
-            elif in_game:
-                current_game += line + '\n'
-        
-        # Process last game
-        if current_game and in_game and games_processed < 3830000:
-            games_processed += 1
-            if extract_and_verify_rating(current_game, min_rating):
-                output_file = os.path.join(output_directory, f'{i}.pgn')
-                with open(output_file, 'w', encoding='utf-8') as game_fh:
-                    game_fh.write(current_game + '\n\n')
-                games_kept += 1
-    
-    print(f"\nFiltering complete!")
-    print(f"Total games processed: {games_processed:,}")
-    print(f"Games kept (both players >= {min_rating}): {games_kept:,}")
-    if games_processed > 0:
-        print(f"Percentage kept: {games_kept/games_processed*100:.1f}%")
-    
-    return games_kept, games_processed
-
 
 def main():
-    parser = argparse.ArgumentParser(description="Download and filter grandmaster-level games from ComputerChess.org.uk")
-    parser.add_argument('--offset', type=int, default=0, help='Skip the processing of the first N games')
-    parser.add_argument('--min-rating', type=int, default=2500, help='Minimum rating for both players (default: 2500)')
-    parser.add_argument('--output-dir', default='games_training_data/reformatted', help='Output directory (default: games_training_data/reformatted)')
-    parser.add_argument('--skip-download', action='store_true', help='Skip download and only filter existing files')
-    parser.add_argument('--output-dir-downloads', default='games_training_data/CCRL_computerchess_org/', help='Output directory to store LiChess Databases (default: games_training_data)')
-    parser.add_argument('--processes', type=int, default=4, help='Number of processes to use for parallel filtering (default: 4)')
+    parser = argparse.ArgumentParser(description="Download and extract games from ComputerChess.org.uk")
+    parser.add_argument('--output-dir', default='games_training_data/reformatted', 
+                       help='Output directory (default: games_training_data/reformatted)')
+    parser.add_argument('--skip-download', action='store_true', 
+                       help='Skip download and only process existing files')
+    parser.add_argument('--output-dir-downloads', default='games_training_data/CCRL_computerchess_org/', 
+                       help='Output directory to store downloaded PGN files (default: games_training_data/CCRL_computerchess_org/)')
 
     args = parser.parse_args()
     
@@ -332,19 +149,18 @@ def main():
     existing_games = count_existing_games_in_directory(args.output_dir)
     print(f"\nFound {existing_games:,} existing games in output directory: {args.output_dir}")
     
-    # Estimate expected games: ~3.83M total games, ~65% pass 2500+ filter
+    # Estimate expected games: ~3.83M total games
     estimated_total_games = 3830000
-    expected_filtered_games = int(estimated_total_games * 0.65)
     
-    if existing_games >= expected_filtered_games:
-        print(f"✓ Already have {existing_games:,} games (expected ~{expected_filtered_games:,} after filtering).")
+    if existing_games >= estimated_total_games:
+        print(f"✓ Already have {existing_games:,} games (expected ~{estimated_total_games:,} total).")
         print(f"Skipping download and processing.\n")
         print(f"To re-download and reprocess, either:")
         print(f"  1. Delete the existing games in {args.output_dir}")
         print(f"  2. Use --skip-download to process only existing downloaded files")
         return
-    elif existing_games > expected_filtered_games * 0.9:  # Within 90% of expected
-        print(f"✓ Already have {existing_games:,} games (~{existing_games/expected_filtered_games*100:.1f}% of expected).")
+    elif existing_games > estimated_total_games * 0.9:  # Within 90% of expected
+        print(f"✓ Already have {existing_games:,} games (~{existing_games/estimated_total_games*100:.1f}% of expected).")
         print(f"This appears to be complete. Skipping download and processing.\n")
         return
     
@@ -354,27 +170,23 @@ def main():
             print(f"\nNote: Already have {existing_games:,} processed games.")
             print(f"Continuing to download and process more games...\n")
         
-        # Get available databases
+        # Download CCRL datasets
         print("Downloading CCRL dataset...")
         
+        # Download first dataset
         url_path = "https://computerchess.org.uk/ccrl/4040/CCRL-4040.[2145878].pgn.7z"
         fileName = "CCRL-4040.[2145878].pgn.7z"
         url_paths_and_fnames = (url_path, fileName)
         download_file(url_paths_and_fnames)
 
-
-
         archive_path = os.path.join(fileName)
         output_directory = os.path.join(args.output_dir_downloads)
-
     
         with py7zr.SevenZipFile(archive_path, mode='r') as z:
-        # For password-protected archives, uncomment the line below and provide the password
-        # with py7zr.SevenZipFile(archive_path, mode='r', password=password) as z:
             z.extractall(path=output_directory)
             print(f"Archive '{archive_path}' successfully extracted to '{output_directory}'")
 
-
+        # Download second dataset
         url_path = "https://computerchess.org.uk/ccrl/404/CCRL-404.[1692642].pgn.7z"
         fileName = "CCRL-404.[1692642].pgn.7z"
         url_paths_and_fnames = (url_path, fileName)
@@ -384,59 +196,37 @@ def main():
         output_directory = os.path.join(args.output_dir_downloads)
 
         with py7zr.SevenZipFile(archive_path, mode='r') as z:
-        # For password-protected archives, uncomment the line below and provide the password
-        # with py7zr.SevenZipFile(archive_path, mode='r', password=password) as z:
             z.extractall(path=output_directory)
             print(f"Archive '{archive_path}' successfully extracted to '{output_directory}'")
-
     
-    total_kept = 0
-    total_processed = 0
-    
-    MIN_RATING = args.min_rating or 2500
-
-    # Create output directory for filtered games
-    os.makedirs(args.output_dir, exist_ok=True)
+    # Process extracted files
+    total_extracted = 0
     
     # Check if we already have processed games
     existing_games = count_existing_games_in_directory(args.output_dir)
     print(f"\nFound {existing_games:,} existing games in output directory: {args.output_dir}")
     
-    # Estimate maximum games to process (approximately 3.83MM games total)
-    estimated_total_games = 3830000
-    
-    # Calculate expected games based on typical filter rate (~65% kept for 2500+ rating in CCRL)
-    expected_filtered_games = int(estimated_total_games * 0.65)
-    
-    if existing_games >= expected_filtered_games:
-        print(f"✓ Already have {existing_games:,} games (expected ~{expected_filtered_games:,} after filtering). Skipping processing.")
-        total_kept = existing_games
-        total_processed = estimated_total_games
+    if existing_games >= estimated_total_games:
+        print(f"✓ Already have {existing_games:,} games (expected ~{estimated_total_games:,} total). Skipping processing.")
+        total_extracted = existing_games
     else:
         if existing_games > 0:
             print(f"Resuming from game {existing_games:,}")
-            total_kept = existing_games
+            total_extracted = existing_games
         
-        # Process all .pgn files in the output directory
+        # Process all .pgn files in the downloads directory
         for filename in sorted(os.listdir(args.output_dir_downloads)):
             if filename.endswith('.pgn'):
-                input_path_for_extraction = os.path.join(args.output_dir_downloads, filename)
-                input_path_for_parsing = input_path_for_extraction
-                output_directory = os.path.join(args.output_dir)
+                input_path = os.path.join(args.output_dir_downloads, filename)
                 print(f"\nProcessing {filename}...")
-                kept, processed = filter_games_by_rating_and_time_control_parallel(input_path_for_parsing, output_directory, args.min_rating, total_kept, args.processes)
-                
-                total_kept += kept
-                total_processed += processed
+                extracted = extract_games_ultra_fast(input_path, args.output_dir, total_extracted)
+                total_extracted += extracted
     
     print("\n" + "="*50)
     print("FINAL SUMMARY")
     print("="*50)
-    print(f"Total games processed: {total_processed:,}")
-    print(f"Total games kept: {total_kept:,}")
-    if total_processed > 0:
-        print(f"Overall percentage: {total_kept/total_processed*100:.1f}%")
-    print(f"\nFiltered games saved in: {args.output_dir}/")
+    print(f"Total games extracted: {total_extracted:,}")
+    print(f"Output directory: {args.output_dir}/")
 
 if __name__ == "__main__":
     main()
