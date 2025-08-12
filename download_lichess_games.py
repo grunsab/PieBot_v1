@@ -52,6 +52,24 @@ def count_games_in_pgn_fast(input_file):
                 count += 1
     return count
 
+
+def count_existing_games_in_directory(directory, prefix='lichess_'):
+    """
+    Count the number of already processed games in the output directory.
+    Games are expected to be named with a specific prefix and number pattern.
+    """
+    if not os.path.exists(directory):
+        return 0
+    
+    count = 0
+    pattern = f'{prefix}*.pgn'
+    
+    for filename in os.listdir(directory):
+        if filename.startswith(prefix) and filename.endswith('.pgn'):
+            count += 1
+    
+    return count
+
     
 def count_games_parallel(args):
     """
@@ -268,7 +286,9 @@ def filter_games_by_rating_and_time_control_parallel(input_file, output_dir, min
                                 for i in range(0, len(games_batch), chunk_size):
                                     chunk = games_batch[i:i+chunk_size]
                                     if chunk:
-                                        chunks.append((chunk, output_dir, min_rating, min_seconds, games_kept))
+                                        # Start numbering from existing games
+                                        existing_count = count_existing_games_in_directory(output_dir, 'lichess_')
+                                        chunks.append((chunk, output_dir, min_rating, min_seconds, existing_count + games_kept))
                                 
                                 # Process chunks in parallel
                                 results = pool.map(process_game_batch, chunks)
@@ -307,7 +327,9 @@ def filter_games_by_rating_and_time_control_parallel(input_file, output_dir, min
                     for i in range(0, len(games_batch), chunk_size):
                         chunk = games_batch[i:i+chunk_size]
                         if chunk:
-                            chunks.append((chunk, output_dir, min_rating, min_seconds, games_kept))
+                            # Start numbering from existing games
+                            existing_count = count_existing_games_in_directory(output_dir, 'lichess_')
+                            chunks.append((chunk, output_dir, min_rating, min_seconds, existing_count + games_kept))
                     
                     results = pool.map(process_game_batch, chunks)
                     
@@ -477,34 +499,54 @@ def main():
     print(f"Found {len(zst_files)} compressed files to process")
     
     fName_count = 0
-    for filename in sorted(zst_files):
-        input_path_for_extraction = os.path.join(args.output_dir_downloads, filename)
-        input_path_for_parsing = input_path_for_extraction
-        # Use output_dir directly as the directory for individual game files
-        output_directory = args.output_dir
-        print(f"\nProcessing {filename}...")
-        print(f"  Input: {input_path_for_parsing}")
-        print(f"  Output directory: {output_directory}")
-        # Use parallel processing for filtering
-        kept, processed = filter_games_by_rating_and_time_control_parallel(
-            input_path_for_parsing, output_directory, 
-            min_rating=MIN_RATING, min_seconds=180, max_games=args.max_games - total_kept,
-            num_processes=args.processes
-        )
+    # Check if we already have enough processed games
+    existing_games = count_existing_games_in_directory(args.output_dir, 'lichess_')
+    print(f"\nFound {existing_games:,} existing games in output directory: {args.output_dir}")
+    
+    if existing_games >= args.max_games:
+        print(f"✓ Already have {existing_games:,} games (max: {args.max_games:,}). Skipping processing.")
+        total_kept = existing_games
+        total_processed = existing_games  # Approximate
+    else:
+        if existing_games > 0:
+            print(f"Need {args.max_games - existing_games:,} more games to reach maximum of {args.max_games:,}")
+            total_kept = existing_games
         
-        total_kept += kept
-        total_processed += processed
-        fName_count += 1
-        
-        # Delete compressed file after processing if requested
-        if args.delete_after_processing and kept > 0:
-            print(f"  Deleting compressed file to save space: {filename}")
-            os.remove(input_path_for_extraction)
-        
-        # Stop if we've collected enough games globally
-        if total_kept >= args.max_games:
-            print(f"\nReached maximum games limit ({args.max_games}). Stopping.")
-            break
+        for filename in sorted(zst_files):
+            input_path_for_extraction = os.path.join(args.output_dir_downloads, filename)
+            input_path_for_parsing = input_path_for_extraction
+            # Use output_dir directly as the directory for individual game files
+            output_directory = args.output_dir
+            print(f"\nProcessing {filename}...")
+            print(f"  Input: {input_path_for_parsing}")
+            print(f"  Output directory: {output_directory}")
+            
+            # Calculate how many more games we need
+            remaining_games_needed = args.max_games - total_kept
+            if remaining_games_needed <= 0:
+                print(f"  Already have enough games. Skipping this file.")
+                break
+            
+            # Use parallel processing for filtering
+            kept, processed = filter_games_by_rating_and_time_control_parallel(
+                input_path_for_parsing, output_directory, 
+                min_rating=MIN_RATING, min_seconds=180, max_games=remaining_games_needed,
+                num_processes=args.processes
+            )
+            
+            total_kept += kept
+            total_processed += processed
+            fName_count += 1
+            
+            # Delete compressed file after processing if requested
+            if args.delete_after_processing and kept > 0:
+                print(f"  Deleting compressed file to save space: {filename}")
+                os.remove(input_path_for_extraction)
+            
+            # Stop if we've collected enough games globally
+            if total_kept >= args.max_games:
+                print(f"\nReached maximum games limit ({args.max_games}). Stopping.")
+                break
     
     print("\n" + "="*50)
     print("FINAL SUMMARY")

@@ -48,6 +48,28 @@ def count_games_in_pgn_fast(input_file):
                 count += 1
     return count
 
+
+def count_existing_games_in_directory(directory):
+    """
+    Count the number of already processed games in the output directory.
+    Games are expected to be named with numeric pattern (e.g., 0.pgn, 1.pgn, etc.)
+    """
+    if not os.path.exists(directory):
+        return 0
+    
+    count = 0
+    for filename in os.listdir(directory):
+        if filename.endswith('.pgn'):
+            # Check if filename (without .pgn) is a number
+            try:
+                int(filename[:-4])
+                count += 1
+            except ValueError:
+                # Not a numeric filename, skip
+                pass
+    
+    return count
+
     
 def count_games_parallel(args):
     """
@@ -364,20 +386,36 @@ def main():
     # Create output directory for filtered games
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # Process all .pgn files in the output directory
+    # Check if we already have processed games
+    existing_games = count_existing_games_in_directory(args.output_dir)
+    print(f"\nFound {existing_games:,} existing games in output directory: {args.output_dir}")
     
-
-
-    for filename in sorted(os.listdir(args.output_dir_downloads)):
-        if filename.endswith('.pgn'):
-            input_path_for_extraction = os.path.join(args.output_dir_downloads, filename)
-            input_path_for_parsing = input_path_for_extraction
-            output_directory = os.path.join(args.output_dir)
-            print(f"\nProcessing {filename}...")
-            kept, processed = filter_games_by_rating_and_time_control_parallel(input_path_for_parsing, output_directory, args.min_rating, total_kept, args.processes)
-            
-            total_kept += kept
-            total_processed += processed
+    # Estimate maximum games to process (approximately 3.83MM games total)
+    estimated_total_games = 3830000
+    
+    # Calculate expected games based on typical filter rate (~65% kept for 2500+ rating in CCRL)
+    expected_filtered_games = int(estimated_total_games * 0.65)
+    
+    if existing_games >= expected_filtered_games:
+        print(f"✓ Already have {existing_games:,} games (expected ~{expected_filtered_games:,} after filtering). Skipping processing.")
+        total_kept = existing_games
+        total_processed = estimated_total_games
+    else:
+        if existing_games > 0:
+            print(f"Resuming from game {existing_games:,}")
+            total_kept = existing_games
+        
+        # Process all .pgn files in the output directory
+        for filename in sorted(os.listdir(args.output_dir_downloads)):
+            if filename.endswith('.pgn'):
+                input_path_for_extraction = os.path.join(args.output_dir_downloads, filename)
+                input_path_for_parsing = input_path_for_extraction
+                output_directory = os.path.join(args.output_dir)
+                print(f"\nProcessing {filename}...")
+                kept, processed = filter_games_by_rating_and_time_control_parallel(input_path_for_parsing, output_directory, args.min_rating, total_kept, args.processes)
+                
+                total_kept += kept
+                total_processed += processed
     
     print("\n" + "="*50)
     print("FINAL SUMMARY")
