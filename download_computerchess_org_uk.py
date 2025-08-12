@@ -15,7 +15,7 @@ import re
 import argparse
 from tqdm import tqdm
 import time
-import chess.pgn 
+# import chess.pgn  # No longer needed - using string-based extraction 
 import sys
 import argparse
 from pathlib import Path
@@ -80,59 +80,112 @@ def download_file(url_filename_pairs, chunk_size=8192):
                 f.write(data)
 
 
+def extract_and_verify_rating(pgn_headers, min_rating):
+    """Extract white and black ratings from PGN headers."""
+    white_rating = None
+    black_rating = None
+    
+    for line in pgn_headers.split('\n'):
+        if line.startswith('[WhiteElo'):
+            match = re.search(r'"(\d+)"', line)
+            if match:
+                white_rating = int(match.group(1))
+        elif line.startswith('[BlackElo'):
+            match = re.search(r'"(\d+)"', line)
+            if match:
+                black_rating = int(match.group(1))
+    
+    if white_rating is None or black_rating is None:
+        return False
+    return white_rating >= min_rating and black_rating >= min_rating
+
+
 def process_game_chunk(args):
     """
-    Process a chunk of games for parallel filtering.
+    Process a chunk of lines for parallel filtering using string-based extraction.
     
     Args:
-        args: Tuple of (input_file, output_dir, start_idx, end_idx, min_rating, offset, kept_counter, processed_counter, lock)
+        args: Tuple of (input_file, output_dir, start_line, end_line, min_rating, offset, kept_counter, processed_counter, lock)
     """
-    input_file, output_dir, start_idx, end_idx, min_rating, offset, kept_counter, processed_counter, lock = args
+    input_file, output_dir, start_line, end_line, min_rating, offset, kept_counter, processed_counter, lock = args
     
     local_kept = 0
     local_processed = 0
     
-    with open(input_file, 'r') as fh:
-        # Skip to the starting position
-        for _ in range(start_idx):
-            chess.pgn.skip_game(fh)
+    with open(input_file, 'r', encoding='utf-8', errors='ignore') as fh:
+        current_game = ""
+        in_game = False
+        current_line_num = 0
         
-        # Process games in this chunk
-        for idx in range(start_idx, end_idx):
-            game = chess.pgn.read_game(fh)
-            if not game:
+        for line in fh:
+            current_line_num += 1
+            
+            # Skip lines before our chunk
+            if current_line_num < start_line:
+                continue
+            
+            # Stop after our chunk
+            if current_line_num > end_line:
                 break
             
-            local_processed += 1
+            line = line.rstrip('\n\r')
             
-            try:
-                if int(game.headers['WhiteElo']) >= min_rating and int(game.headers['BlackElo']) >= min_rating:
-                    # Calculate unique filename based on total kept games
-                    with lock:
-                        file_idx = kept_counter.value
-                        kept_counter.value += 1
+            if line.startswith('[Event'):
+                # Start of new game
+                if current_game and in_game:
+                    # Process previous game
+                    local_processed += 1
+                    if extract_and_verify_rating(current_game, min_rating):
+                        # Calculate unique filename based on total kept games
+                        with lock:
+                            file_idx = kept_counter.value
+                            kept_counter.value += 1
+                        
+                        output_file = os.path.join(output_dir, f'{offset + file_idx}.pgn')
+                        with open(output_file, 'w', encoding='utf-8') as game_fh:
+                            game_fh.write(current_game + '\n\n')
+                        local_kept += 1
                     
-                    output_file = os.path.join(output_dir, f'{0 + offset + file_idx}.pgn')
-                    with open(output_file, 'w') as game_fh:
-                        print(game, file=game_fh, end='\n\n')
-                    local_kept += 1
-            except (KeyError, ValueError) as e:
-                # Skip games without valid ratings
-                pass
-            
-            # Update shared counters periodically
-            if local_processed % 1000 == 0:
+                    # Update shared counters periodically
+                    if local_processed % 1000 == 0:
+                        with lock:
+                            processed_counter.value += 1000
+                            if processed_counter.value % 20000 == 0:
+                                print(f"Processed {processed_counter.value:,} games across all processes")
+                        local_processed = 0
+                
+                current_game = line + '\n'
+                in_game = True
+            elif in_game:
+                current_game += line + '\n'
+        
+        # Process last game in chunk
+        if current_game and in_game:
+            local_processed += 1
+            if extract_and_verify_rating(current_game, min_rating):
                 with lock:
-                    processed_counter.value += 1000
-                    if processed_counter.value % 20000 == 0:
-                        print(f"Processed {processed_counter.value:,} games across all processes")
-                local_processed = 0
+                    file_idx = kept_counter.value
+                    kept_counter.value += 1
+                
+                output_file = os.path.join(output_dir, f'{offset + file_idx}.pgn')
+                with open(output_file, 'w', encoding='utf-8') as game_fh:
+                    game_fh.write(current_game + '\n\n')
+                local_kept += 1
     
     # Final update
     with lock:
         processed_counter.value += local_processed
     
     return local_kept
+
+
+def count_total_lines(input_file):
+    """Count total lines in a file for chunking."""
+    count = 0
+    with open(input_file, 'r', encoding='utf-8', errors='ignore') as f:
+        for _ in f:
+            count += 1
+    return count
 
 
 def filter_games_by_rating_and_time_control_parallel(input_file, output_directory, min_rating=2500, offset=0, num_processes=None):
@@ -153,19 +206,20 @@ def filter_games_by_rating_and_time_control_parallel(input_file, output_director
     processed_counter = manager.Value('i', 0)
     lock = manager.Lock()
     
-    # Divide work among processes
-    total_games = count_games_in_pgn_fast(input_file)
-    games_per_process = total_games // num_processes
+    # Count total lines instead of games for better chunking
+    print("Counting lines in file...")
+    total_lines = count_total_lines(input_file)
+    lines_per_process = total_lines // num_processes
     chunks = []
     
     for i in range(num_processes):
-        start_idx = i * games_per_process
+        start_line = i * lines_per_process + 1
         if i == num_processes - 1:
-            end_idx = total_games
+            end_line = total_lines
         else:
-            end_idx = (i + 1) * games_per_process
+            end_line = (i + 1) * lines_per_process
         
-        chunks.append((input_file, output_directory, start_idx, end_idx, min_rating, offset, 
+        chunks.append((input_file, output_directory, start_line, end_line, min_rating, offset, 
                       kept_counter, processed_counter, lock))
     
     # Process chunks in parallel
@@ -191,56 +245,62 @@ def filter_games_by_rating_and_time_control_parallel(input_file, output_director
 
 
 def filter_games_by_rating_and_time_control(input_file, output_directory, min_rating=2500, offset=0):
-    """Filter games where both players have rating >= min_rating."""
+    """Filter games where both players have rating >= min_rating using string-based approach."""
     
     games_processed = 0
     games_kept = 0
-    games_skipped = 0
-
-    with open(input_file, 'r') as fh:
-        if offset > 0:
-            while games_skipped < offset:
-                chess.pgn.skip_game(fh)
-                games_skipped += 1
-
+    
+    print(f"Filtering games with both players rated >= {min_rating}...")
+    
+    with open(input_file, 'r', encoding='utf-8', errors='ignore') as fh:
         current_game = ""
         in_game = False
+        i = offset
         
-        print(f"Filtering games with both players rated >= {min_rating}...")
+        for line in fh:
+            line = line.rstrip('\n\r')
+            
+            if line.startswith('[Event'):
+                # Start of new game
+                if current_game and in_game:
+                    # Process previous game
+                    games_processed += 1
+                    if extract_and_verify_rating(current_game, min_rating):
+                        output_file = os.path.join(output_directory, f'{i}.pgn')
+                        with open(output_file, 'w', encoding='utf-8') as game_fh:
+                            game_fh.write(current_game + '\n\n')
+                        games_kept += 1
+                        i += 1
+                    
+                    if games_kept % 1000 == 0 and games_kept > 0:
+                        print(f"Kept {games_kept} games out of {games_processed} games")
+                    
+                    if games_processed % 10000 == 0 and games_processed > 0:
+                        print(f"Processed {games_processed} games out of approximately 3.8MM games")
+                    
+                    # There are approximately 3.83MM games here
+                    if games_processed >= 3830000:
+                        break
+                
+                current_game = line + '\n'
+                in_game = True
+            elif in_game:
+                current_game += line + '\n'
         
-        i = 0 + offset
-
-        while True:
-            game = chess.pgn.read_game(fh)
-            if not game:
-                continue
+        # Process last game
+        if current_game and in_game and games_processed < 3830000:
             games_processed += 1
-            try:
-                if int(game.headers['WhiteElo']) >= min_rating and int(game.headers['BlackElo']) >= min_rating:
-                    output_file = os.path.join(output_directory, f'{ + i}.pgn')
-                    with open(output_file, 'w') as game_fh:
-                        print(game, file=game_fh, end='\n\n')
-                    games_kept += 1
-                    i += 1
-            except KeyError as k:
-                print(k)
-                continue
-
-            if games_kept % 1000 == 0 and games_kept > 0:
-                print(f"Kept {games_kept} games out of {games_processed} games")
-            
-            if games_processed % 1000 == 0 and games_processed > 0:
-                print(f"Processed {games_processed} games out of approximately 3.8MM games")
-            
-            # There are approximately 3.83MM games here
-            if games_processed >= 3830000:
-                break
-
+            if extract_and_verify_rating(current_game, min_rating):
+                output_file = os.path.join(output_directory, f'{i}.pgn')
+                with open(output_file, 'w', encoding='utf-8') as game_fh:
+                    game_fh.write(current_game + '\n\n')
+                games_kept += 1
     
     print(f"\nFiltering complete!")
     print(f"Total games processed: {games_processed:,}")
     print(f"Games kept (both players >= {min_rating}): {games_kept:,}")
-    print(f"Percentage kept: {games_kept/games_processed*100:.1f}%")
+    if games_processed > 0:
+        print(f"Percentage kept: {games_kept/games_processed*100:.1f}%")
     
     return games_kept, games_processed
 
