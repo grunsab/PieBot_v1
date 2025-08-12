@@ -154,7 +154,7 @@ def filter_games_by_rating_and_time_control_parallel(input_file, output_director
     lock = manager.Lock()
     
     # Divide work among processes
-    total_games = 3838520  # Approximate number of games
+    total_games = count_games_in_pgn_fast(input_file)
     games_per_process = total_games // num_processes
     chunks = []
     
