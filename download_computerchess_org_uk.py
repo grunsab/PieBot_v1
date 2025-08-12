@@ -338,12 +338,38 @@ def main():
 
     args = parser.parse_args()
     
-    # Create output directory downloads 
+    # Create output directories
     os.makedirs(args.output_dir_downloads, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Check if we already have enough processed games
+    existing_games = count_existing_games_in_directory(args.output_dir)
+    print(f"\nFound {existing_games:,} existing games in output directory: {args.output_dir}")
+    
+    # Estimate expected games: ~3.83M total games, ~65% pass 2500+ filter
+    estimated_total_games = 3830000
+    expected_filtered_games = int(estimated_total_games * 0.65)
+    
+    if existing_games >= expected_filtered_games:
+        print(f"✓ Already have {existing_games:,} games (expected ~{expected_filtered_games:,} after filtering).")
+        print(f"Skipping download and processing.\n")
+        print(f"To re-download and reprocess, either:")
+        print(f"  1. Delete the existing games in {args.output_dir}")
+        print(f"  2. Use --skip-download to process only existing downloaded files")
+        return
+    elif existing_games > expected_filtered_games * 0.9:  # Within 90% of expected
+        print(f"✓ Already have {existing_games:,} games (~{existing_games/expected_filtered_games*100:.1f}% of expected).")
+        print(f"This appears to be complete. Skipping download and processing.\n")
+        return
     
     if not args.skip_download:
+        # Check if we need to download based on existing processed games
+        if existing_games > 0:
+            print(f"\nNote: Already have {existing_games:,} processed games.")
+            print(f"Continuing to download and process more games...\n")
+        
         # Get available databases
-        print("Fetching CCRL dataset...")
+        print("Downloading CCRL dataset...")
         
         url_path = "https://computerchess.org.uk/ccrl/4040/CCRL-4040.[2145878].pgn.7z"
         fileName = "CCRL-4040.[2145878].pgn.7z"
