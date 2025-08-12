@@ -36,6 +36,7 @@ MAX_GAMES_TO_COLLECT = 10000000  # 10M games maximum
 
 import uuid
 import zstandard as zstd
+from collections import defaultdict
 
 
 
@@ -147,7 +148,7 @@ def parallel_download_mp(url_filename_pairs):
         pool.map(download_file, url_filename_pairs)
 
 
-def extract_and_verify_rating(pgn_headers):
+def extract_and_verify_rating(pgn_headers, min_rating=MIN_RATING):
     """Extract white and black ratings from PGN headers."""
     white_rating = None
     black_rating = None
@@ -162,10 +163,12 @@ def extract_and_verify_rating(pgn_headers):
             if match:
                 black_rating = int(match.group(1))
     
-    return (white_rating >= MIN_RATING and black_rating >= MIN_RATING)
+    if white_rating is None or black_rating is None:
+        return False
+    return white_rating >= min_rating and black_rating >= min_rating
 
 def extract_and_verify_time_controls(pgn_headers, min_seconds=180):
-    """Extract white and black ratings from PGN headers."""
+    """Extract and verify time control from PGN headers."""
 
     time_control = None
 
@@ -176,9 +179,154 @@ def extract_and_verify_time_controls(pgn_headers, min_seconds=180):
     else:
         return False
 
-    return int(initial_time) >= 180
+    return int(initial_time) >= min_seconds
 
 
+
+
+def process_game_batch(args):
+    """
+    Process a batch of complete games in parallel.
+    
+    Args:
+        args: Tuple of (games_batch, output_dir, min_rating, min_seconds, base_idx)
+    """
+    games_batch, output_dir, min_rating, min_seconds, base_idx = args
+    
+    local_kept = 0
+    local_processed = 0
+    current_idx = base_idx
+    
+    for game_text in games_batch:
+        local_processed += 1
+        rating_check = extract_and_verify_rating(game_text, min_rating)
+        time_control_check = extract_and_verify_time_controls(game_text, min_seconds)
+        
+        if rating_check and time_control_check:
+            game_filename = f"lichess_{current_idx:06d}.pgn"
+            game_filepath = os.path.join(output_dir, game_filename)
+            with open(game_filepath, 'w', encoding='utf-8') as game_file:
+                game_file.write(game_text + '\n\n')
+            local_kept += 1
+            current_idx += 1
+    
+    return local_kept, local_processed
+
+
+def filter_games_by_rating_and_time_control_parallel(input_file, output_dir, min_rating=750, min_seconds=180, 
+                                                    max_games=MAX_GAMES_TO_COLLECT, num_processes=None):
+    """
+    Filter games using single decompression stream with parallel game processing.
+    This approach is memory-efficient and avoids multiple decompression streams.
+    """
+    
+    if num_processes is None:
+        num_processes = min(cpu_count(), 4)  # Conservative default for memory safety
+    
+    print(f"Filtering games with both players rated >= {min_rating}...")
+    print(f"Using memory-efficient parallel processing with {num_processes} workers")
+    print(f"Saving individual games to: {output_dir}")
+    
+    # For single process, use original function
+    if num_processes == 1:
+        return filter_games_by_rating_and_time_control(input_file, output_dir, min_rating, min_seconds, max_games)
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    games_processed = 0
+    games_kept = 0
+    batch_size = 1000  # Process games in batches
+    
+    start_time = time.time()
+    
+    # Single decompression stream
+    with open(input_file, 'rb') as fh:
+        dctx = zstd.ZstdDecompressor()
+        with dctx.stream_reader(fh) as reader:
+            text_reader = io.TextIOWrapper(reader, encoding='utf-8', errors='ignore')
+            
+            current_game = ""
+            in_game = False
+            games_batch = []
+            
+            # Create process pool
+            with Pool(num_processes) as pool:
+                for line in text_reader:
+                    line = line.rstrip('\n\r')
+                    
+                    if line.startswith('[Event'):
+                        # Start of new game
+                        if current_game and in_game:
+                            games_batch.append(current_game)
+                            
+                            # Process batch when full
+                            if len(games_batch) >= batch_size:
+                                # Split batch among workers
+                                chunk_size = len(games_batch) // num_processes + 1
+                                chunks = []
+                                
+                                for i in range(0, len(games_batch), chunk_size):
+                                    chunk = games_batch[i:i+chunk_size]
+                                    if chunk:
+                                        chunks.append((chunk, output_dir, min_rating, min_seconds, games_kept))
+                                
+                                # Process chunks in parallel
+                                results = pool.map(process_game_batch, chunks)
+                                
+                                # Update counters
+                                for kept, processed in results:
+                                    games_kept += kept
+                                    games_processed += processed
+                                
+                                if games_processed % 10000 == 0:
+                                    elapsed = time.time() - start_time
+                                    speed = games_processed / elapsed if elapsed > 0 else 0
+                                    print(f"Processed: {games_processed:,} games, Kept: {games_kept:,} games "
+                                          f"({games_kept/games_processed*100:.1f}%), Speed: {speed:.0f} games/sec")
+                                
+                                games_batch = []
+                                
+                                # Check if we've collected enough games
+                                if games_kept >= max_games:
+                                    break
+                        
+                        current_game = line + '\n'
+                        in_game = True
+                    elif in_game:
+                        current_game += line + '\n'
+                
+                # Process remaining games in batch
+                if current_game and in_game:
+                    games_batch.append(current_game)
+                
+                if games_batch and games_kept < max_games:
+                    # Process final batch
+                    chunk_size = len(games_batch) // num_processes + 1
+                    chunks = []
+                    
+                    for i in range(0, len(games_batch), chunk_size):
+                        chunk = games_batch[i:i+chunk_size]
+                        if chunk:
+                            chunks.append((chunk, output_dir, min_rating, min_seconds, games_kept))
+                    
+                    results = pool.map(process_game_batch, chunks)
+                    
+                    for kept, processed in results:
+                        games_kept += kept
+                        games_processed += processed
+    
+    elapsed_time = time.time() - start_time
+    
+    print(f"\nFiltering complete!")
+    print(f"Total games processed: {games_processed:,}")
+    print(f"Games kept (both players >= {min_rating}, time >= {min_seconds}s): {games_kept:,}")
+    if games_processed > 0:
+        print(f"Percentage kept: {games_kept/games_processed*100:.1f}%")
+    print(f"Processing time: {elapsed_time:.2f} seconds")
+    if elapsed_time > 0:
+        print(f"Processing speed: {games_processed/elapsed_time:.2f} games/second")
+    
+    return games_kept, games_processed
 
 
 def filter_games_by_rating_and_time_control(input_file, output_dir, min_rating=750, min_seconds=180, max_games=MAX_GAMES_TO_COLLECT):
@@ -235,8 +383,8 @@ def filter_games_by_rating_and_time_control(input_file, output_dir, min_rating=7
             
             # Process last game
             if current_game and in_game:
-                rating_check = extract_and_verify_rating(current_game)
-                time_control_check = extract_and_verify_time_controls(current_game)
+                rating_check = extract_and_verify_rating(current_game, min_rating)
+                time_control_check = extract_and_verify_time_controls(current_game, min_seconds)
                 if rating_check and time_control_check:
                     # Save each game to its own file with lichess prefix
                     game_filename = f"lichess_{games_kept:06d}.pgn"
@@ -266,6 +414,7 @@ def main():
     parser.add_argument('--output-dir-downloads', default='games_training_data/LiChessData/', help='Output directory to store LiChess Databases (default: games_training_data)')
     parser.add_argument('--delete-after-processing', action='store_true', help='Delete compressed files after processing to save space')
     parser.add_argument('--max-games', type=int, default=MAX_GAMES_TO_COLLECT, help=f'Maximum games to collect (default: {MAX_GAMES_TO_COLLECT})')
+    parser.add_argument('--processes', type=int, default=None, help='Number of processes to use for parallel filtering (default: min(CPU cores, 4))')
 
     args = parser.parse_args()
     
@@ -336,9 +485,11 @@ def main():
         print(f"\nProcessing {filename}...")
         print(f"  Input: {input_path_for_parsing}")
         print(f"  Output directory: {output_directory}")
-        kept, processed = filter_games_by_rating_and_time_control(
+        # Use parallel processing for filtering
+        kept, processed = filter_games_by_rating_and_time_control_parallel(
             input_path_for_parsing, output_directory, 
-            min_rating=MIN_RATING, max_games=args.max_games
+            min_rating=MIN_RATING, min_seconds=180, max_games=args.max_games - total_kept,
+            num_processes=args.processes
         )
         
         total_kept += kept
