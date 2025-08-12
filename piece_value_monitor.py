@@ -76,7 +76,7 @@ class PieceValueMonitor:
         middle_game_tests = [
             # Remove pieces from middle game
             ("r1bqk2r/pp2nppp/2n1p3/3p4/1b1P4/3BPN2/PPP2PPP/RNBQK2R w KQkq - 0 8",
-             "r1bqk2r/pp2nppp/2n1p3/3p4/1b1P4/3BPN2/PPP2PPP/RNBQK21R w KQkq - 0 8", chess.ROOK),
+             "r1bqk2r/pp2nppp/2n1p3/3p4/1b1P4/3BPN2/PPP2PPP/RNBQK3 w KQkq - 0 8", chess.ROOK),
             ("r1bqk2r/pp2nppp/2n1p3/3p4/1b1P4/3BPN2/PPP2PPP/RNBQK2R w KQkq - 0 8",
              "r1bqk2r/pp2nppp/2n1p3/3p4/1b1P4/3BPN2/PPP2PPP/RNB1K2R w KQkq - 0 8", chess.QUEEN),
             ("r1bqk2r/pp2nppp/2n1p3/3p4/1b1P4/3BPN2/PPP2PPP/RNBQK2R w KQkq - 0 8",
