@@ -205,6 +205,7 @@ def extract_and_verify_time_controls(pgn_headers, min_seconds=180):
 def process_game_batch(args):
     """
     Process a batch of complete games in parallel.
+    Optimized to use pre-allocated indices and batch writes.
     
     Args:
         args: Tuple of (games_batch, output_dir, min_rating, min_seconds, base_idx)
@@ -215,18 +216,27 @@ def process_game_batch(args):
     local_processed = 0
     current_idx = base_idx
     
-    for game_text in games_batch:
+    # Process all games and collect those to keep
+    games_to_write = []
+    
+    for i, game_text in enumerate(games_batch):
         local_processed += 1
         rating_check = extract_and_verify_rating(game_text, min_rating)
         time_control_check = extract_and_verify_time_controls(game_text, min_seconds)
         
         if rating_check and time_control_check:
-            game_filename = f"lichess_{current_idx:06d}.pgn"
+            # Use pre-allocated index based on position in batch
+            # This ensures no conflicts between parallel workers
+            game_idx = base_idx + i
+            game_filename = f"lichess_{game_idx:06d}.pgn"
             game_filepath = os.path.join(output_dir, game_filename)
-            with open(game_filepath, 'w', encoding='utf-8') as game_file:
-                game_file.write(game_text + '\n\n')
+            games_to_write.append((game_filepath, game_text))
             local_kept += 1
-            current_idx += 1
+    
+    # Write all games in this batch
+    for filepath, content in games_to_write:
+        with open(filepath, 'w', encoding='utf-8') as game_file:
+            game_file.write(content + '\n\n')
     
     return local_kept, local_processed
 
@@ -235,14 +245,16 @@ def filter_games_by_rating_and_time_control_parallel(input_file, output_dir, min
                                                     max_games=MAX_GAMES_TO_COLLECT, num_processes=None):
     """
     Filter games using single decompression stream with parallel game processing.
-    This approach is memory-efficient and avoids multiple decompression streams.
+    Optimized version that minimizes file I/O contention and directory scanning.
     """
     
     if num_processes is None:
-        num_processes = min(cpu_count(), 50)  # Conservative default for memory safety
+        # Optimal for I/O-bound tasks is much lower than CPU count
+        # 4-8 processes is typically the sweet spot for file I/O operations
+        num_processes = min(cpu_count(), 8)  # Cap at 8 for I/O operations
     
     print(f"Filtering games with both players rated >= {min_rating}...")
-    print(f"Using memory-efficient parallel processing with {num_processes} workers")
+    print(f"Using optimized parallel processing with {num_processes} workers")
     print(f"Saving individual games to: {output_dir}")
     
     # For single process, use original function
@@ -251,9 +263,13 @@ def filter_games_by_rating_and_time_control_parallel(input_file, output_dir, min
     
     os.makedirs(output_dir, exist_ok=True)
     
+    # Count existing games ONCE at the start to avoid repeated directory scanning
+    existing_games_count = count_existing_games_in_directory(output_dir, 'lichess_')
+    print(f"Found {existing_games_count:,} existing games in output directory")
+    
     games_processed = 0
     games_kept = 0
-    batch_size = 1000  # Process games in batches
+    batch_size = 2000  # Increased batch size to reduce synchronization overhead
     
     start_time = time.time()
     
@@ -283,12 +299,16 @@ def filter_games_by_rating_and_time_control_parallel(input_file, output_dir, min
                                 chunk_size = len(games_batch) // num_processes + 1
                                 chunks = []
                                 
+                                # Pre-calculate indices for each chunk to avoid conflicts
+                                current_base_idx = existing_games_count + games_kept
+                                
                                 for i in range(0, len(games_batch), chunk_size):
                                     chunk = games_batch[i:i+chunk_size]
                                     if chunk:
-                                        # Start numbering from existing games
-                                        existing_count = count_existing_games_in_directory(output_dir, 'lichess_')
-                                        chunks.append((chunk, output_dir, min_rating, min_seconds, existing_count + games_kept))
+                                        # Each chunk gets its own starting index
+                                        chunks.append((chunk, output_dir, min_rating, min_seconds, current_base_idx))
+                                        # Reserve indices for this chunk (even if not all games are kept)
+                                        current_base_idx += len(chunk)
                                 
                                 # Process chunks in parallel
                                 results = pool.map(process_game_batch, chunks)
@@ -324,12 +344,16 @@ def filter_games_by_rating_and_time_control_parallel(input_file, output_dir, min
                     chunk_size = len(games_batch) // num_processes + 1
                     chunks = []
                     
+                    # Pre-calculate indices for final batch
+                    current_base_idx = existing_games_count + games_kept
+                    
                     for i in range(0, len(games_batch), chunk_size):
                         chunk = games_batch[i:i+chunk_size]
                         if chunk:
-                            # Start numbering from existing games
-                            existing_count = count_existing_games_in_directory(output_dir, 'lichess_')
-                            chunks.append((chunk, output_dir, min_rating, min_seconds, existing_count + games_kept))
+                            # Each chunk gets its own starting index
+                            chunks.append((chunk, output_dir, min_rating, min_seconds, current_base_idx))
+                            # Reserve indices for this chunk
+                            current_base_idx += len(chunk)
                     
                     results = pool.map(process_game_batch, chunks)
                     
