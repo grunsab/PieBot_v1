@@ -334,7 +334,7 @@ def main():
     parser.add_argument('--output-dir', default='games_training_data/reformatted', help='Output directory (default: games_training_data/reformatted)')
     parser.add_argument('--skip-download', action='store_true', help='Skip download and only filter existing files')
     parser.add_argument('--output-dir-downloads', default='games_training_data/CCRL_computerchess_org/', help='Output directory to store LiChess Databases (default: games_training_data)')
-    parser.add_argument('--processes', type=int, default=None, help='Number of processes to use for parallel filtering (default: number of CPU cores, max 100)')
+    parser.add_argument('--processes', type=int, default=8, help='Number of processes to use for parallel filtering (default: number of CPU cores, max 100)')
 
     args = parser.parse_args()
     
