@@ -51,7 +51,7 @@ def parse_args():
                         help='Directory containing self-play training data (HDF5 files)')
     parser.add_argument('--mixed-ratio', type=float, default=0.5,
                         help='For mixed mode: ratio of RL data (0.0-1.0, default: 0.5)')
-    parser.add_argument('--use-enhanced-encoder', action='store_true',
+    parser.add_argument('--use-enhanced-encoder', action='store_true', default=True,
                         help='Use enhanced 112-plane encoder instead of 16-plane')
     parser.add_argument('--gradient-accumulation', type=int, default=2,
                         help='Number of gradient accumulation steps (default: 2)')
