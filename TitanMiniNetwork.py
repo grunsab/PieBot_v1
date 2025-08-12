@@ -255,20 +255,70 @@ class PolicyHead(nn.Module):
 class ValueHead(nn.Module):
     """
     Predicts the value of the position using the special [CLS] token.
+    Compatible with both old (2-layer) and new (3-layer) architectures.
+    Now uses Tanh activation (like AlphaZero) for better gradient flow.
     """
-    def __init__(self, d_model):
+    def __init__(self, d_model, legacy_mode=False):
         super().__init__()
-        self.value_proj = nn.Sequential(
-            nn.Linear(d_model, d_model // 2),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(d_model // 2, 1),
-            nn.Sigmoid() # Scale output to [0, 1] to match training targets
-        )
+        self.legacy_mode = legacy_mode
+        self.d_model = d_model
+        
+        if legacy_mode:
+            # Legacy architecture with 2 layers
+            # Now using Tanh for better training stability
+            self.fc1 = nn.Linear(d_model, d_model // 2)
+            self.activation1 = nn.GELU()
+            self.dropout1 = nn.Dropout(0.1)
+            self.fc2 = nn.Linear(d_model // 2, 1)
+            self.output_activation = nn.Tanh()  # Changed from Sigmoid to Tanh
+            
+            # Initialize with Xavier (optimal for Tanh)
+            nn.init.xavier_normal_(self.fc1.weight)
+            nn.init.zeros_(self.fc1.bias)
+            # Smaller initialization for final layer to prevent saturation
+            nn.init.xavier_normal_(self.fc2.weight, gain=0.1)
+            nn.init.zeros_(self.fc2.bias)  # Critical: start with 0 bias
+        else:
+            # New architecture with 3 layers
+            self.fc1 = nn.Linear(d_model, d_model // 2)
+            self.activation1 = nn.GELU()
+            self.dropout1 = nn.Dropout(0.1)
+            self.fc2 = nn.Linear(d_model // 2, 128)
+            self.activation2 = nn.GELU()
+            self.dropout2 = nn.Dropout(0.1)
+            self.fc3 = nn.Linear(128, 1)
+            self.output_activation = nn.Tanh()  # Changed from Sigmoid to Tanh
+            
+            # Initialize with Xavier (optimal for Tanh)
+            nn.init.xavier_normal_(self.fc1.weight)
+            nn.init.zeros_(self.fc1.bias)
+            nn.init.xavier_normal_(self.fc2.weight)
+            nn.init.zeros_(self.fc2.bias)
+            # Smaller initialization for final layer
+            nn.init.xavier_normal_(self.fc3.weight, gain=0.1)
+            nn.init.zeros_(self.fc3.bias)  # Critical: start with 0 bias
         
     def forward(self, x):
         # Input x is the [CLS] token feature: [batch, 1, d_model]
-        return self.value_proj(x.squeeze(1))
+        x = x.squeeze(1)
+        
+        if self.legacy_mode:
+            x = self.fc1(x)
+            x = self.activation1(x)
+            x = self.dropout1(x)
+            x = self.fc2(x)
+            x = self.output_activation(x)
+        else:
+            x = self.fc1(x)
+            x = self.activation1(x)
+            x = self.dropout1(x)
+            x = self.fc2(x)
+            x = self.activation2(x)
+            x = self.dropout2(x)
+            x = self.fc3(x)
+            x = self.output_activation(x)
+        
+        return x
 
 
 class WDLValueHead(nn.Module):
@@ -322,6 +372,7 @@ class TitanMini(nn.Module):
         policy_weight=1.0,
         input_planes=112,
         use_wdl=True,  # Use Win-Draw-Loss value head
+        legacy_value_head=False,  # Use legacy 2-layer value head for old models
     ):
         super().__init__()
 
@@ -351,11 +402,12 @@ class TitanMini(nn.Module):
         if use_wdl:
             self.value_head = WDLValueHead(d_model)
         else:
-            self.value_head = ValueHead(d_model)
+            self.value_head = ValueHead(d_model, legacy_mode=legacy_value_head)
         self.policy_head = PolicyHead(d_model, num_move_actions_per_square=72)
         
         # Loss functions.
         self.mse_loss = nn.MSELoss()
+        self.bce_with_logits_loss = nn.BCEWithLogitsLoss()  # For legacy mode
         self.cross_entropy_loss = nn.CrossEntropyLoss()
         
         self._init_parameters()
@@ -420,27 +472,41 @@ class TitanMini(nn.Module):
                     # value_target is in [0, 1] range (0=loss, 0.5=draw, 1=win)
                     wdl_targets = torch.zeros(batch_size, 3, device=value_target.device)
                     
-                    # Simple conversion: map [0, 1] to WDL probabilities
-                    # Use a more sophisticated mapping that encourages draws in balanced positions
+                    # IMPROVED WDL CONVERSION: Better mapping from scalar to WDL probabilities
+                    # This uses a softer conversion that better represents uncertainty
                     value_flat = value_target.view(-1)
                     
-                    # Win probability: increases as value approaches 1
-                    win_prob = torch.clamp(2 * value_flat - 1, 0, 1)  # Maps [0.5, 1] -> [0, 1]
-                    # Loss probability: increases as value approaches 0  
-                    loss_prob = torch.clamp(1 - 2 * value_flat, 0, 1)  # Maps [0, 0.5] -> [1, 0]
-                    # Draw probability: peaks at value=0.5
-                    draw_prob = 1 - torch.abs(2 * value_flat - 1)  # Maps to a peak at 0.5
+                    # Use a temperature parameter to control sharpness
+                    temperature = 0.5  # Lower = sharper peaks, Higher = more uniform
                     
-                    # Normalize to ensure probabilities sum to 1
-                    total = win_prob + draw_prob + loss_prob + 1e-8
-                    wdl_targets[:, 0] = win_prob / total
-                    wdl_targets[:, 1] = draw_prob / total
-                    wdl_targets[:, 2] = loss_prob / total
+                    # Define target values for each outcome
+                    win_value = 1.0
+                    draw_value = 0.5
+                    loss_value = 0.0
+                    
+                    # Compute distances from value to each outcome
+                    dist_to_win = torch.abs(value_flat - win_value)
+                    dist_to_draw = torch.abs(value_flat - draw_value)
+                    dist_to_loss = torch.abs(value_flat - loss_value)
+                    
+                    # Convert distances to probabilities using softmax-like approach
+                    win_logit = -dist_to_win / temperature
+                    draw_logit = -dist_to_draw / temperature
+                    loss_logit = -dist_to_loss / temperature
+                    
+                    # Stack and apply softmax to get probabilities
+                    logits = torch.stack([win_logit, draw_logit, loss_logit], dim=1)
+                    wdl_probs = F.softmax(logits, dim=1)
+                    
+                    wdl_targets[:, 0] = wdl_probs[:, 0]  # Win probability
+                    wdl_targets[:, 1] = wdl_probs[:, 1]  # Draw probability
+                    wdl_targets[:, 2] = wdl_probs[:, 2]  # Loss probability
                 
                 # WDL loss using cross entropy with soft targets
                 log_probs = F.log_softmax(value, dim=1)
                 value_loss = -(wdl_targets * log_probs).sum(dim=1).mean()
             else:
+                # For non-WDL mode, use MSE loss
                 value_loss = self.mse_loss(value, value_target)
             
             # Handle both soft targets (distribution) and hard targets (single index)
@@ -473,6 +539,7 @@ class TitanMini(nn.Module):
                 value_scalar = wdl_probs[:, 0:1] - wdl_probs[:, 2:3]  # Keep dimensions for compatibility
                 return value_scalar, policy_softmax
             else:
+                # Non-WDL mode: value already has Sigmoid applied
                 return value, policy_softmax
 
 

@@ -115,10 +115,11 @@ class CCRLDataset( Dataset ):
             policy_idx = planeIdx * 64 + rankIdx * 8 + fileIdx
             
             # Encode value (winner from perspective of current player)
+            # Now using [-1, 1] range like AlphaZero (for Tanh activation)
             if board.turn:
-                value = (winner + 1.) / 2.
+                value = float(winner)  # White's perspective: 1=win, 0=draw, -1=loss
             else:
-                value = (-winner + 1.) / 2.
+                value = float(-winner)  # Black's perspective: flip the value
             
             # Encode legal moves mask
             mask = encoder.getLegalMoveMask(board)

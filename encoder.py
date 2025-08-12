@@ -390,6 +390,9 @@ def callNeuralNetwork( board, neuralNetwork ):
 
     policy = policy.cpu().numpy()[ 0 ]
 
+    # Note: TitanMini now uses Tanh activation (like AlphaZero), so it outputs [-1, 1] directly
+    # No conversion needed anymore
+
     move_probabilities = decodePolicyOutput( board, policy )
 
     return value, move_probabilities
@@ -471,6 +474,9 @@ def callNeuralNetworkBatched( boards, neuralNetwork ):
     value = value.cpu().numpy().reshape( (num_inputs) )
 
     policy = policy.cpu().numpy()
+
+    # Note: TitanMini now uses Tanh activation (like AlphaZero), so it outputs [-1, 1] directly
+    # No conversion needed anymore
 
     for i in range( num_inputs ):
 

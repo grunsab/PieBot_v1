@@ -265,21 +265,34 @@ class ValueHead(nn.Module):
     """
     Predicts the value of the position (a single scalar from -1 to 1).
     It uses the special [CLS] token as a summary of the entire board state.
+    Now uses Tanh activation (like AlphaZero) for better gradient flow.
     """
     def __init__(self, d_model):
         super().__init__()
-        self.value_proj = nn.Sequential(
-            nn.Linear(d_model, 256),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(256, 1),
-            nn.Sigmoid() # Sigmoid activation to scale the output to [0, 1] to match training targets
-        )
+        # Sequential layers with proper initialization
+        self.fc1 = nn.Linear(d_model, 256)
+        self.activation1 = nn.GELU()
+        self.dropout1 = nn.Dropout(0.1)
+        self.fc2 = nn.Linear(256, 1)
+        self.output_activation = nn.Tanh()  # Changed from Sigmoid to Tanh
+        
+        # Initialize with Xavier (optimal for Tanh)
+        nn.init.xavier_normal_(self.fc1.weight)
+        nn.init.zeros_(self.fc1.bias)
+        # Smaller initialization for final layer to prevent saturation
+        nn.init.xavier_normal_(self.fc2.weight, gain=0.1)
+        nn.init.zeros_(self.fc2.bias)  # Critical: start with 0 bias
         
     def forward(self, x):
         # The input x is the feature vector for the [CLS] token: [batch, 1, d_model]
         # We remove the sequence dimension before projecting.
-        return self.value_proj(x.squeeze(1))
+        x = x.squeeze(1)
+        x = self.fc1(x)
+        x = self.activation1(x)
+        x = self.dropout1(x)
+        x = self.fc2(x)
+        x = self.output_activation(x)
+        return x
 
 
 class WDLValueHead(nn.Module):

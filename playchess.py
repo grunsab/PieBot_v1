@@ -1,7 +1,8 @@
 
 import argparse
 import chess
-import MCTS_profiling_speedups_v2 as MCTS
+#import MCTS_profiling_speedups_v2 as MCTS
+import searchless_policy as MCTS
 import torch
 import AlphaZeroNetwork
 import PieBotNetwork
@@ -182,9 +183,33 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
                 model = TitanMiniNetwork.TitanMini()
                 print(f"Loading TitanMini model (dequantized fallback) on {device_str}")
         elif model_type == 'TitanMini':
-            # Use default TitanMini configuration
-            model = TitanMiniNetwork.TitanMini()
-            print(f"Loading TitanMini model on {device_str}")
+            # Check if this is a legacy model (with 2-layer value head)
+            state_dict = weights if isinstance(weights, dict) and 'model_state_dict' not in weights else weights.get('model_state_dict', weights)
+            
+            # Check for the old value head structure
+            has_legacy_value_head = False
+            for k in state_dict.keys():
+                if 'value_head.value_proj.3' in k or '_orig_mod.value_head.value_proj.3' in k:
+                    # Check if layer 3 is the final layer (shape [1, x] indicates it's the output layer)
+                    weight_key = k if 'weight' in k else None
+                    if weight_key and state_dict[weight_key].shape[0] == 1:
+                        has_legacy_value_head = True
+                        break
+            
+            # Determine if this model uses WDL based on the weights
+            use_wdl = False
+            for k in state_dict.keys():
+                if 'value_head.value_proj' in k or '_orig_mod.value_head.value_proj' in k:
+                    # Check if the final layer outputs 3 values (WDL)
+                    if 'weight' in k:
+                        output_dim = state_dict[k].shape[0]
+                        if output_dim == 3:
+                            use_wdl = True
+                            break
+            
+            # Create model with appropriate configuration
+            model = TitanMiniNetwork.TitanMini(use_wdl=use_wdl, legacy_value_head=has_legacy_value_head and not use_wdl)
+            print(f"Loading TitanMini model on {device_str} (legacy_value_head={has_legacy_value_head and not use_wdl}, use_wdl={use_wdl})")
         elif model_type == 'PieNano_Quantized':
             # Handle quantized PieNano saved as state dict
             try:

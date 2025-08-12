@@ -29,8 +29,8 @@ default_num_layers = 10
 default_d_model = 384
 default_num_heads = 6
 default_d_ff = 1536
-default_lr = 0.0002
-default_warmup_epochs = 20
+default_lr = 0.0001  # Lower learning rate for more stable training
+default_warmup_epochs = 5  # Shorter warmup with lower initial LR
 default_policy_weight = 1.0
 ccrl_dir = os.path.abspath('games_training_data/reformatted/')
 rl_dir = os.path.abspath('games_training_data/selfplay/')
@@ -164,7 +164,9 @@ class SyntheticTitanDataset(Dataset):
 
     def __getitem__(self, idx):
         position = torch.randn(self.c, 8, 8)
-        value = torch.rand(1).item() * 2 - 1  # [-1, 1]
+        # Now using Tanh activation, so values should be in [-1, 1] range
+        # -1 = loss, 0 = draw, 1 = win (from current player's perspective)
+        value = torch.rand(1).item() * 2 - 1  # [-1, 1] range for Tanh
         policy = torch.randint(0, 72 * 64, (1,), dtype=torch.long).squeeze(0)
         mask = torch.ones(72, 8, 8, dtype=torch.int64)  # allow all moves for simplicity
         return position, torch.tensor(value, dtype=torch.float32), policy, mask
@@ -323,6 +325,11 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, args, epoch, 
             value_target = value_target.view(-1, 1)
         elif value_target.dim() == 2 and value_target.size(1) != 1:
             value_target = value_target[:, :1]
+        
+        # Assert value targets are in expected [-1, 1] range for Tanh activation
+        assert value_target.min() >= -1 and value_target.max() <= 1, \
+            f"Value targets out of range [-1, 1]: min={value_target.min().item():.4f}, max={value_target.max().item():.4f}"
+        
         policy_target = policy_target.to(device)
         if policy_mask is not None:
             policy_mask = policy_mask.to(device)
@@ -340,7 +347,8 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, args, epoch, 
 
                 if (batch_idx + 1) % args.gradient_accumulation == 0:
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                    # Use more aggressive gradient clipping for stability
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad()
@@ -354,7 +362,8 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, args, epoch, 
                 loss.backward()
 
                 if (batch_idx + 1) % args.gradient_accumulation == 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                    # Use more aggressive gradient clipping for stability
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizer.step()
                     optimizer.zero_grad()
 
@@ -369,7 +378,8 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, args, epoch, 
             loss.backward()
             
             if (batch_idx + 1) % args.gradient_accumulation == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                # Use more aggressive gradient clipping for stability
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 optimizer.zero_grad()
                 
@@ -393,6 +403,18 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, args, epoch, 
                 writer.add_scalar('Train/ValueLoss', value_loss.item(), global_step)
                 writer.add_scalar('Train/PolicyLoss', policy_loss.item(), global_step)
                 writer.add_scalar('Train/LearningRate', optimizer.param_groups[0]['lr'], global_step)
+                
+                # Monitor value distribution to detect saturation
+                with torch.no_grad():
+                    model_module = model.module if hasattr(model, 'module') else model
+                    if hasattr(model_module, 'value_head'):
+                        # Get raw value outputs (after Tanh)
+                        model_module.eval()
+                        test_value, _ = model_module(position[:min(4, position.size(0))])
+                        model_module.train()
+                        writer.add_histogram('Train/ValueOutputs', test_value, global_step)
+                        writer.add_scalar('Train/ValueMean', test_value.mean().item(), global_step)
+                        writer.add_scalar('Train/ValueStd', test_value.std().item(), global_step)
             
             elapsed = time.time() - start_time
             print(f'Epoch {epoch} [{batch_idx}/{len(train_loader)}] '
@@ -444,6 +466,11 @@ def validate(model, val_loader, args, epoch, writer, *, device=None, distributed
                 value_target = value_target.view(-1, 1)
             elif value_target.dim() == 2 and value_target.size(1) != 1:
                 value_target = value_target[:, :1]
+            
+            # Assert value targets are in expected [-1, 1] range for validation too
+            assert value_target.min() >= -1 and value_target.max() <= 1, \
+                f"Validation value targets out of range [-1, 1]: min={value_target.min().item():.4f}, max={value_target.max().item():.4f}"
+            
             policy_target = policy_target.to(device)
             if policy_mask is not None:
                 policy_mask = policy_mask.to(device)
@@ -614,7 +641,8 @@ def train():
     train_loader, val_loader = create_data_loaders(args, distributed=distributed, rank=rank, world_size=world_size, is_main=is_main, device=device)
 
     # optimizer and scheduler
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01)
+    # Use stronger weight decay to prevent parameter drift
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-4)
     total_steps = len(train_loader) * args.epochs
     warmup_steps = len(train_loader) * args.warmup_epochs
     try:

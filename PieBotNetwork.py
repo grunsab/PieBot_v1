@@ -195,6 +195,7 @@ class TransformerEncoderBlock(nn.Module):
 class ImprovedValueHead(nn.Module):
     """
     Enhanced value head with additional capacity and regularization.
+    Now uses Tanh activation (like AlphaZero) for better gradient flow.
     """
     def __init__(self, input_channels, hidden_dim=512):
         super().__init__()
@@ -207,7 +208,16 @@ class ImprovedValueHead(nn.Module):
         self.fc2 = nn.Linear(hidden_dim, hidden_dim // 2)
         self.relu3 = nn.ReLU(inplace=True)
         self.fc3 = nn.Linear(hidden_dim // 2, 1)
-        self.sigmoid = nn.Sigmoid()  # Changed to Sigmoid to match [0, 1] training targets
+        self.tanh = nn.Tanh()  # Changed from Sigmoid to Tanh for [-1, 1] range
+        
+        # Initialize with Xavier (optimal for Tanh)
+        nn.init.xavier_normal_(self.fc1.weight)
+        nn.init.zeros_(self.fc1.bias)
+        nn.init.xavier_normal_(self.fc2.weight)
+        nn.init.zeros_(self.fc2.bias)
+        # Smaller initialization for final layer to prevent saturation
+        nn.init.xavier_normal_(self.fc3.weight, gain=0.1)
+        nn.init.zeros_(self.fc3.bias)  # Critical: start with 0 bias
         
     def forward(self, x):
         x = self.conv(x)
@@ -220,7 +230,7 @@ class ImprovedValueHead(nn.Module):
         x = self.fc2(x)
         x = self.relu3(x)
         x = self.fc3(x)
-        x = self.sigmoid(x)
+        x = self.tanh(x)
         return x
 
 class ImprovedPolicyHead(nn.Module):

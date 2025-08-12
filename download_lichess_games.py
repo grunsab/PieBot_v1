@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Download and filter grandmaster-level chess games from Lichess database.
-Filters games where both players have ratings >= 3000 (super-grandmaster level).
+Download and filter chess games from Lichess database.
+Filters games where both players have ratings >= 750 (beginner level).
 """
 
 import requests
@@ -15,7 +15,6 @@ import re
 import argparse
 from tqdm import tqdm
 import time
-from extract_zst import extract_zst
 import chess.pgn 
 import sys
 import argparse
@@ -30,7 +29,9 @@ try:
 except ImportError:
     TQDM_AVAILABLE = False
 
-MIN_RATING = 3000
+MIN_RATING = 750
+MAX_GAMES_TO_COLLECT = 2000000
+
 
 import uuid
 import zstandard as zstd
@@ -134,11 +135,16 @@ def extract_and_verify_time_controls(pgn_headers, min_seconds=180):
     return int(initial_time) >= 180
 
 
-def filter_games_by_rating_and_time_control(input_file, output_file, min_rating=3000, min_seconds=180):
-    """Filter games where both players have rating >= min_rating."""
+
+
+def filter_games_by_rating_and_time_control(input_file, output_dir, min_rating=750, min_seconds=180):
+    """Filter games where both players have rating >= min_rating and save each to individual files."""
     
     games_processed = 0
     games_kept = 0
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
     
     # Open compressed input file
     with open(input_file, 'rb') as fh:
@@ -150,56 +156,71 @@ def filter_games_by_rating_and_time_control(input_file, output_file, min_rating=
             in_game = False
             
             print(f"Filtering games with both players rated >= {min_rating}...")
+            print(f"Saving individual games to: {output_dir}")
             
-            with open(output_file, 'w', encoding='utf-8') as out_f:
-                while True:
-                    if not text_stream:
-                        # Try to read more data
-                        chunk = reader.read(16384)
-                        if not chunk:
-                            break
-                        text_stream = chunk
-                    
-                    # Process text stream
-                    try:
-                        decoded = text_stream.decode('utf-8', errors='ignore')
-                        buffer += decoded
-                        text_stream = b""
-                    except:
-                        text_stream = text_stream[1:]  # Skip problematic byte
-                        continue
-                    
-                    lines = buffer.split('\n')
-                    buffer = lines[-1]  # Keep incomplete line
-                    
-                    for line in lines[:-1]:
-                        if line.startswith('[Event'):
-                            # Start of new game
-                            if current_game and in_game:
-                                # Process previous game
-                                rating_check = extract_and_verify_rating(current_game)
-                                time_control_check = extract_and_verify_time_controls(current_game)
-                                if rating_check and time_control_check:
-                                    out_f.write(current_game + '\n\n')
-                                    games_kept += 1
-                                games_processed += 1
-                                
-                                if games_processed % 10000 == 0:
-                                    print(f"Processed: {games_processed:,} games, Kept: {games_kept:,} games ({games_kept/games_processed*100:.1f}%)")
-                            
-                            current_game = line + '\n'
-                            in_game = True
-                        elif in_game:
-                            current_game += line + '\n'
+            while True:
+                if not text_stream:
+                    # Try to read more data
+                    chunk = reader.read(16384)
+                    if not chunk:
+                        break
+                    text_stream = chunk
                 
-                # Process last game
-                if current_game and in_game:
-                    rating_check = extract_and_verify_rating(current_game)
-                    time_control_check = extract_and_verify_time_controls(current_game)
-                    if rating_check and time_control_check:
-                        out_f.write(current_game + '\n\n')
-                        games_kept += 1
-                    games_processed += 1
+                # Process text stream
+                try:
+                    decoded = text_stream.decode('utf-8', errors='ignore')
+                    buffer += decoded
+                    text_stream = b""
+                except:
+                    text_stream = text_stream[1:]  # Skip problematic byte
+                    continue
+                
+                lines = buffer.split('\n')
+                buffer = lines[-1]  # Keep incomplete line
+                
+                for line in lines[:-1]:
+                    if line.startswith('[Event'):
+                        # Start of new game
+                        if current_game and in_game:
+                            # Process previous game
+                            rating_check = extract_and_verify_rating(current_game)
+                            time_control_check = extract_and_verify_time_controls(current_game)
+                            if rating_check and time_control_check:
+                                # Save each game to its own file with lichess prefix
+                                game_filename = f"lichess_{games_kept:06d}.pgn"
+                                game_filepath = os.path.join(output_dir, game_filename)
+                                with open(game_filepath, 'w', encoding='utf-8') as game_file:
+                                    game_file.write(current_game + '\n\n')
+                                games_kept += 1
+                            games_processed += 1
+                            
+                            if games_processed % 10000 == 0:
+                                print(f"Processed: {games_processed:,} games, Kept: {games_kept:,} games ({games_kept/games_processed*100:.1f}%)")
+                        
+                        current_game = line + '\n'
+                        in_game = True
+                    elif in_game:
+                        current_game += line + '\n'
+            
+                # Only keep up to a maximum number of games
+                if games_kept > MAX_GAMES_TO_COLLECT:
+                    break
+            
+            # Process last game
+            if current_game and in_game:
+                rating_check = extract_and_verify_rating(current_game)
+                time_control_check = extract_and_verify_time_controls(current_game)
+                if rating_check and time_control_check:
+                    # Save each game to its own file with lichess prefix
+                    game_filename = f"lichess_{games_kept:06d}.pgn"
+                    game_filepath = os.path.join(output_dir, game_filename)
+                    with open(game_filepath, 'w', encoding='utf-8') as game_file:
+                        game_file.write(current_game + '\n\n')
+                    games_kept += 1
+                games_processed += 1
+
+
+
     
     print(f"\nFiltering complete!")
     print(f"Total games processed: {games_processed:,}")
@@ -210,17 +231,18 @@ def filter_games_by_rating_and_time_control(input_file, output_file, min_rating=
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Download and filter grandmaster-level games from Lichess")
+    parser = argparse.ArgumentParser(description="Download and filter games from Lichess")
     parser.add_argument('--months', type=int, default=1, help='Number of months to download (default: 1)')
-    parser.add_argument('--min-rating', type=int, default=3000, help='Minimum rating for both players (default: 3000)')
-    parser.add_argument('--output-dir', default='games_training_data/reformatted', help='Output directory (default: games_training_data/reformatted)')
+    parser.add_argument('--min-rating', type=int, default=750, help='Minimum rating for both players (default: 750)')
+    parser.add_argument('--output-dir', default='games_training_data/reformatted_lichess', help='Output directory (default: games_training_data/reformatted_lichess)')
     parser.add_argument('--skip-download', action='store_true', help='Skip download and only filter existing files')
     parser.add_argument('--output-dir-downloads', default='games_training_data/LiChessData/', help='Output directory to store LiChess Databases (default: games_training_data)')
 
     args = parser.parse_args()
     
-    # Create output directory downloads 
+    # Create output directories
     os.makedirs(args.output_dir_downloads, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
     
     if not args.skip_download:
         # Get available databases
@@ -259,7 +281,7 @@ def main():
     total_kept = 0
     total_processed = 0
     
-    MIN_RATING = args.min_rating or 3000
+    MIN_RATING = args.min_rating or 750
 
     # Process all .pgn.zst files in the output directory
 
@@ -268,10 +290,10 @@ def main():
         if filename.endswith('.pgn.zst'):
             input_path_for_extraction = os.path.join(args.output_dir_downloads, filename)
             input_path_for_parsing = input_path_for_extraction
-            output_directory = os.path.join(args.output_dir)
-            output_path = os.path.join(args.output_dir, f"filtered_{args.min_rating}+_{fName_count}.pgn")
+            # Use output_dir directly as the directory for individual game files
+            output_directory = args.output_dir
             print(f"\nProcessing {filename}...")
-            kept, processed = filter_games_by_rating_and_time_control(input_path_for_parsing, output_path)
+            kept, processed = filter_games_by_rating_and_time_control(input_path_for_parsing, output_directory)
             
             total_kept += kept
             total_processed += processed
