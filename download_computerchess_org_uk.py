@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Download and filter super-grandmaster-level chess games from ComputerChess.org.uk.
-Filters games where both players have ratings >= 3450 (significantly beyond human level).
+Filters games where both players have ratings >= 3000 (significantly beyond human level).
 """
 
 import requests
@@ -121,10 +121,10 @@ def process_game_chunk(args):
                 pass
             
             # Update shared counters periodically
-            if local_processed % 100 == 0:
+            if local_processed % 1000 == 0:
                 with lock:
-                    processed_counter.value += 100
-                    if processed_counter.value % 10000 == 0:
+                    processed_counter.value += 1000
+                    if processed_counter.value % 20000 == 0:
                         print(f"Processed {processed_counter.value:,} games across all processes")
                 local_processed = 0
     
@@ -190,7 +190,7 @@ def filter_games_by_rating_and_time_control_parallel(input_file, output_director
     return total_kept, total_processed
 
 
-def filter_games_by_rating_and_time_control(input_file, output_directory, min_rating=3450, offset=0):
+def filter_games_by_rating_and_time_control(input_file, output_directory, min_rating=3000, offset=0):
     """Filter games where both players have rating >= min_rating."""
     
     games_processed = 0
