@@ -9,7 +9,6 @@ echo ""
 # Configuration
 MONTHS_TO_DOWNLOAD=2  # Download 2 months for more data (Titan Mini benefits from more data)
 MIN_RATING=750
-MAX_GAMES=8000000
 
 # Step 1: Download Lichess games (human players)
 echo "Step 1: Downloading Lichess games (human players)..."
