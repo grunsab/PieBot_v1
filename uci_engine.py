@@ -19,7 +19,7 @@ import time
 import threading
 from queue import Queue
 import multiprocessing as mp
-from model_utils import load_model, detect_model_type, clean_state_dict
+from model_utils import load_model, detect_model_type, clean_state_dict, create_pienano_from_weights
 from device_utils import get_optimal_device
 
 import sys
@@ -32,7 +32,7 @@ import MCTS_profiling_speedups_v2 as MCTS
 class TimeManager:
     """Manages time allocation for moves based on game time constraints."""
     
-    def __init__(self, base_rollouts=10000, base_time=1.0, threads=64):
+    def __init__(self, base_rollouts=1000, base_time=1.0, threads=64):
         """
         Initialize time manager.
         
@@ -45,13 +45,12 @@ class TimeManager:
         self.base_rollouts = base_rollouts
         self.base_time = base_time
         self.threads = threads
-        # Adjust for the fact that parallelRollouts does 'threads' rollouts per call
-        # So actual time per rollout is different
-        # My Macbook Mini M4 Runs around 600 rollouts per second, and my RTX 4080 does about 4000-5000 using MCTS_root_parallel.
         if device.type == "mps":
             self.rollouts_per_second = 600
-        else:
-            self.rollouts_per_second = 4000  # Average for RTX 4080
+        elif device.type == "cuda":
+            self.rollouts_per_second = 1200  # Average for RTX 4080
+        elif device.type == "cpu":
+            self.rollouts_per_second = 80
         
         # Track actual performance
         self.measured_rollouts_per_second = None
@@ -173,114 +172,6 @@ class UCIEngine:
         self.move_overhead = 30  # Default move overhead in milliseconds
         self.use_multiprocess = use_multiprocess
         
-    
-    def _create_pienano_from_weights(self, weights):
-        """Create PieNano model with correct architecture from weights."""
-        # Try to detect architecture from weights
-        if isinstance(weights, dict):
-            # Check if it has args from training
-            if 'args' in weights:
-                args = weights['args']
-                num_blocks = getattr(args, 'num_blocks', 8)
-                num_filters = getattr(args, 'num_filters', 128)
-                num_input_planes = 112 if getattr(args, 'use_enhanced_encoder', False) else 16
-                policy_hidden_dim = getattr(args, 'policy_hidden_dim', None)
-            else:
-                # Try to infer from state dict
-                state_dict = weights.get('model_state_dict', weights)
-                
-                # Count residual blocks
-                residual_keys = [k for k in state_dict.keys() if 'residual_tower' in k and 'conv1' in k]
-                num_blocks = len(set(k.split('.')[1] for k in residual_keys if len(k.split('.')) > 1))
-                
-                # Get number of filters and input planes from conv_block
-                if 'conv_block.0.weight' in state_dict:
-                    num_filters = state_dict['conv_block.0.weight'].shape[0]
-                    num_input_planes = state_dict['conv_block.0.weight'].shape[1]
-                else:
-                    # Default values
-                    num_filters = 128
-                    num_input_planes = 16
-                
-                # Detect if it's V2 by checking for policy_head.fc1
-                policy_hidden_dim = None
-                if 'policy_head.fc1.weight' in state_dict:
-                    policy_hidden_dim = state_dict['policy_head.fc1.weight'].shape[0]
-                
-                # Default to 8 blocks if detection failed
-                if num_blocks == 0:
-                    num_blocks = 8
-        else:
-            # Default PieNano configuration
-            num_blocks = 8
-            num_filters = 128
-            num_input_planes = 16
-            policy_hidden_dim = None
-        
-        # Create V2 if policy_hidden_dim is detected, otherwise V1
-        if policy_hidden_dim is not None:
-            return PieNanoNetwork_v2.PieNanoV2(
-                num_blocks=num_blocks,
-                num_filters=num_filters,
-                num_input_planes=num_input_planes,
-                policy_hidden_dim=policy_hidden_dim
-            )
-        else:
-            # Fallback to V1 for older models
-            return PieNanoNetwork.PieNano(
-                num_blocks=num_blocks,
-                num_filters=num_filters,
-                num_input_planes=num_input_planes
-            )
-    
-    def detect_model_type(self, weights, model_path=None):
-        """Detect whether this is an AlphaZeroNet, PieBotNet, PieNano, PieNanoV2, or TitanMini model."""
-        # Check if it's a quantized model by filename
-        if model_path and ('quantized' in model_path.lower() or 'quant' in model_path.lower()):
-            # Try to determine the base model type from filename
-            if 'titan' in model_path.lower() or 'titanmini' in model_path.lower():
-                return 'TitanMini_Quantized'
-            elif 'pienano' in model_path.lower() or 'pie_nano' in model_path.lower():
-                return 'PieNano_Quantized'
-            elif 'alphazero' in model_path.lower() or 'alpha_zero' in model_path.lower():
-                return 'AlphaZeroNet_Quantized'
-            # If can't determine from filename, assume AlphaZeroNet
-            return 'AlphaZeroNet_Quantized'
-        
-        if isinstance(weights, dict):
-            # Check state dict keys to determine model type
-            state_dict = weights.get('model_state_dict', weights)
-            
-            # TitanMini has specific modules like chess_positional_encoding and relative_position_bias
-            has_chess_pos_encoding = any('chess_positional_encoding' in key for key in state_dict.keys())
-            has_relative_pos_bias = any('relative_position_bias' in key for key in state_dict.keys())
-            has_geglu = any('geglu' in key.lower() for key in state_dict.keys())
-            has_cls_token = any('cls_token' in key for key in state_dict.keys())
-            
-            # PieBotNet has specific modules like positional_encoding and transformer_blocks
-            has_positional_encoding = any('positional_encoding' in key for key in state_dict.keys())
-            has_transformer = any('transformer_blocks' in key for key in state_dict.keys())
-            
-            # PieNano models have SE (Squeeze-Excitation) modules and depthwise convolutions
-            has_se = any('se.' in key or 'squeeze' in key or 'excitation' in key for key in state_dict.keys())
-            has_depthwise = any('depthwise' in key for key in state_dict.keys())
-            has_wdl_value = any('value_head.fc2' in key for key in state_dict.keys())
-            
-            # PieNanoV2 has the improved policy head with fc1 and fc2 in policy_head
-            has_improved_policy = any('policy_head.fc1' in key or 'policy_head.fc2' in key for key in state_dict.keys())
-            
-            if has_chess_pos_encoding or has_relative_pos_bias or has_geglu or has_cls_token:
-                return 'TitanMini'
-            elif has_positional_encoding or has_transformer:
-                return 'PieBotNet'
-            elif has_improved_policy and (has_se or has_depthwise):
-                return 'PieNanoV2'
-            elif (has_se or has_depthwise) and has_wdl_value:
-                # Check the shape of value head output to distinguish PieNano
-                value_fc2_weight = state_dict.get('value_head.fc2.weight')
-                if value_fc2_weight is not None and value_fc2_weight.shape[0] == 3:
-                    return 'PieNano'
-        return 'AlphaZeroNet'
     
     def load_model(self):
         """Load the neural network model."""
