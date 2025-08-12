@@ -8,8 +8,9 @@ echo "=========================================="
 echo ""
 
 # Configuration
-MONTHS_TO_DOWNLOAD=2  # Download 2 months for adequate training data
-MIN_RATING=750
+MONTHS_TO_DOWNLOAD=1  # Download 1 month (30GB compressed, ~90M games)
+MIN_RATING=800  # Minimum rating for quality games
+MAX_GAMES=10000000  # Collect up to 10M games (reasonable for curriculum)
 
 # Step 1: Download Lichess games (human players)
 echo "Step 1: Downloading Lichess games (human players)..."
@@ -17,6 +18,8 @@ echo "This will download ${MONTHS_TO_DOWNLOAD} months of games with ratings >= $
 python download_lichess_games.py \
     --months ${MONTHS_TO_DOWNLOAD} \
     --min-rating ${MIN_RATING} \
+    --max-games ${MAX_GAMES} \
+    --delete-after-processing \
     --output-dir games_training_data/reformatted_lichess \
     --output-dir-downloads games_training_data/LiChessData/
 

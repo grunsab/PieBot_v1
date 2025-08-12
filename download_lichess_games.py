@@ -31,7 +31,7 @@ except ImportError:
     TQDM_AVAILABLE = False
 
 MIN_RATING = 750
-MAX_GAMES_TO_COLLECT = 10000000
+MAX_GAMES_TO_COLLECT = 10000000  # 10M games maximum
 
 
 import uuid
@@ -138,7 +138,7 @@ def extract_and_verify_time_controls(pgn_headers, min_seconds=180):
 
 
 
-def filter_games_by_rating_and_time_control(input_file, output_dir, min_rating=750, min_seconds=180):
+def filter_games_by_rating_and_time_control(input_file, output_dir, min_rating=750, min_seconds=180, max_games=MAX_GAMES_TO_COLLECT):
     """Filter games where both players have rating >= min_rating and save each to individual files."""
     
     games_processed = 0
@@ -182,7 +182,7 @@ def filter_games_by_rating_and_time_control(input_file, output_dir, min_rating=7
                             print(f"Processed: {games_processed:,} games, Kept: {games_kept:,} games ({games_kept/games_processed*100:.1f}%)")
                         
                         # Check if we've collected enough games
-                        if games_kept >= MAX_GAMES_TO_COLLECT:
+                        if games_kept >= max_games:
                             break
                     
                     current_game = line + '\n'
@@ -221,6 +221,8 @@ def main():
     parser.add_argument('--output-dir', default='games_training_data/reformatted_lichess', help='Output directory (default: games_training_data/reformatted_lichess)')
     parser.add_argument('--skip-download', action='store_true', help='Skip download and only filter existing files')
     parser.add_argument('--output-dir-downloads', default='games_training_data/LiChessData/', help='Output directory to store LiChess Databases (default: games_training_data)')
+    parser.add_argument('--delete-after-processing', action='store_true', help='Delete compressed files after processing to save space')
+    parser.add_argument('--max-games', type=int, default=MAX_GAMES_TO_COLLECT, help=f'Maximum games to collect (default: {MAX_GAMES_TO_COLLECT})')
 
     args = parser.parse_args()
     
@@ -282,11 +284,24 @@ def main():
         print(f"\nProcessing {filename}...")
         print(f"  Input: {input_path_for_parsing}")
         print(f"  Output directory: {output_directory}")
-        kept, processed = filter_games_by_rating_and_time_control(input_path_for_parsing, output_directory, min_rating=MIN_RATING)
+        kept, processed = filter_games_by_rating_and_time_control(
+            input_path_for_parsing, output_directory, 
+            min_rating=MIN_RATING, max_games=args.max_games
+        )
         
         total_kept += kept
         total_processed += processed
         fName_count += 1
+        
+        # Delete compressed file after processing if requested
+        if args.delete_after_processing and kept > 0:
+            print(f"  Deleting compressed file to save space: {filename}")
+            os.remove(input_path_for_extraction)
+        
+        # Stop if we've collected enough games globally
+        if total_kept >= args.max_games:
+            print(f"\nReached maximum games limit ({args.max_games}). Stopping.")
+            break
     
     print("\n" + "="*50)
     print("FINAL SUMMARY")
@@ -295,6 +310,22 @@ def main():
     print(f"Total games kept: {total_kept:,}")
     if total_processed > 0:
         print(f"Overall percentage: {total_kept/total_processed*100:.1f}%")
+    
+    # Storage estimate
+    if total_kept > 0:
+        avg_game_size_kb = 2.5  # Average PGN game size in KB
+        storage_gb = (total_kept * avg_game_size_kb) / (1024 * 1024)
+        print(f"\nEstimated storage for filtered games: {storage_gb:.1f} GB")
+        print(f"(Based on ~{avg_game_size_kb:.1f}KB per game)")
+        
+        if args.delete_after_processing:
+            print("Compressed files deleted to save space.")
+        else:
+            # Estimate compressed file size based on number of files processed
+            compressed_gb = fName_count * 30  # Rough estimate of 30GB per monthly file
+            print(f"Compressed files retained: ~{compressed_gb} GB")
+            print(f"Total storage used: ~{storage_gb + compressed_gb:.1f} GB")
+    
     print(f"\nFiltered games saved in: {args.output_dir}/")
 
 if __name__ == "__main__":
