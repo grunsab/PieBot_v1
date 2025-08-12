@@ -264,7 +264,7 @@ def main():
         print("Fetching CCRL dataset...")
         
         url_path = "https://computerchess.org.uk/ccrl/4040/CCRL-4040.[2145878].pgn.7z"
-        fileName = "CCRL-4040.[2140066].pgn.7z"
+        fileName = "CCRL-4040.[2145878].pgn.7z"
         url_paths_and_fnames = (url_path, fileName)
         download_file(url_paths_and_fnames)
 
