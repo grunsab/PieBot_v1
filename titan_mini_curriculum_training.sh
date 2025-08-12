@@ -60,7 +60,7 @@ python train_titan_mini.py \
     --d-ff 1920 \
     --dropout 0.1 \
     --input-planes 112 \
-    --batch-size 128 \
+    --batch-size 368 \
     --lr 0.0001 \
     --warmup-epochs 5 \
     --gradient-accumulation 2 \
