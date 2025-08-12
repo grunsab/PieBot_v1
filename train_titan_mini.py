@@ -25,10 +25,10 @@ import signal
 
 # Training params (defaults)
 default_epochs = 500
-default_num_layers = 10
-default_d_model = 384
-default_num_heads = 6
-default_d_ff = 1536
+default_num_layers = 13
+default_d_model = 512
+default_num_heads = 8
+default_d_ff = 1920
 default_lr = 0.0001  # Lower learning rate for more stable training
 default_warmup_epochs = 5  # Shorter warmup with lower initial LR
 default_policy_weight = 1.0
