@@ -207,7 +207,7 @@ def create_scheduler(optimizer, args, steps_per_epoch):
     else:
         return {'main': None, 'warmup': None, 'warmup_steps': 0}
 
-def train_epoch(model, dataloader, optimizer, scheduler, args, device, epoch, step_count, scaler=None):
+def train_epoch(model, dataloader, optimizer, scheduler, args, device, epoch, step_count, scaler=None, total_epochs=None):
     """Train for one epoch with gradient accumulation and optional mixed precision."""
     model.train()
     
@@ -216,7 +216,9 @@ def train_epoch(model, dataloader, optimizer, scheduler, args, device, epoch, st
     total_policy_loss = 0
     num_batches = 0
     
-    progress_bar = tqdm(dataloader, desc=f'Epoch {epoch+1}/{args.epochs}')
+    # Use provided total_epochs or fall back to args.epochs
+    epochs_display = total_epochs if total_epochs is not None else args.epochs
+    progress_bar = tqdm(dataloader, desc=f'Epoch {epoch+1}/{epochs_display}')
     
     for batch_idx, batch in enumerate(progress_bar):
         # Extract data from batch dictionary
@@ -323,6 +325,9 @@ def train_curriculum(args, device):
         enhanced_encoder=args.use_enhanced_encoder
     )
     
+    # Calculate total epochs across all curriculum stages
+    total_curriculum_epochs = sum(stage.epochs for stage in curriculum_dataset.stages)
+    
     # Load saved state if resuming
     if args.curriculum_state and os.path.exists(args.curriculum_state):
         curriculum_dataset.load_state(args.curriculum_state)
@@ -428,7 +433,7 @@ def train_curriculum(args, device):
             # Train for one epoch
             train_loss, train_value_loss, train_policy_loss = train_epoch(
                 model, train_loader, base_optimizer, scheduler, args, device, 
-                global_epoch-1, step_count, scaler
+                global_epoch-1, step_count, scaler, total_curriculum_epochs
             )
             
             # Validate

@@ -66,7 +66,7 @@ echo "  - Computer: 0.7"
 echo ""
 
 python3 train_titan_mini.py \
-    --mode mixed \
+    --mode mixed-curriculum \
     --num-layers 13 \
     --d-model 512 \
     --num-heads 8 \
