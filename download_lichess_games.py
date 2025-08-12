@@ -31,7 +31,7 @@ except ImportError:
     TQDM_AVAILABLE = False
 
 MIN_RATING = 750
-MAX_GAMES_TO_COLLECT = 70000000
+MAX_GAMES_TO_COLLECT = 10000000
 
 
 import uuid
