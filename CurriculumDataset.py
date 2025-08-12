@@ -91,7 +91,7 @@ class CurriculumDataset(Dataset):
             name='beginner',
             data_dir=os.path.join(base_dir, 'beginner'),
             elo_range=(750, 1500),
-            epochs=10,
+            epochs=20,
             value_weight=2.0,  # Higher weight on value loss to learn piece values
             soft_targets=True,
             temperature=0.15
@@ -113,7 +113,7 @@ class CurriculumDataset(Dataset):
             name='expert',
             data_dir=os.path.join(base_dir, 'expert'),
             elo_range=(2400, 3000),
-            epochs=30,
+            epochs=150,
             value_weight=1.0,
             soft_targets=True,
             temperature=0.1
@@ -124,7 +124,7 @@ class CurriculumDataset(Dataset):
             name='computer',
             data_dir=os.path.join(base_dir, 'computer'),
             elo_range=(3000, 4000),
-            epochs=50,
+            epochs=300,
             value_weight=0.8,  # Lower value weight for sophisticated play
             soft_targets=True,
             temperature=0.08
