@@ -239,6 +239,9 @@ def process_single_game(args):
         # Copy file to appropriate category
         shutil.copy2(input_path, output_path)
         
+        # Delete the original file after successful copy
+        os.remove(input_path)
+        
         return (pgn_file, category, avg_rating, False)
     
     return (pgn_file, None, 'out_of_range', False)
