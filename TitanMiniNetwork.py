@@ -364,10 +364,10 @@ class TitanMini(nn.Module):
     """
     def __init__(
         self,
-        num_layers=10,
-        d_model=384,
-        num_heads=6,
-        d_ff=1536, # Standard practice: 4 * d_model
+        num_layers=13,  # Updated default for 200MB model
+        d_model=512,    # Updated default for 200MB model
+        num_heads=8,    # Updated default for 200MB model
+        d_ff=1920,      # Updated default for 200MB model (3.75x d_model)
         dropout=0.1,
         policy_weight=1.0,
         input_planes=112,

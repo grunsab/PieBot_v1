@@ -506,7 +506,10 @@ def validate(model, val_loader, args, epoch, writer, *, device=None, distributed
 
 
 def save_checkpoint(model, optimizer, scheduler, epoch, args, best_val_loss, checkpoint_path):
-    """Save model checkpoint."""
+    """Save model checkpoint with full configuration metadata."""
+    # Get the actual model config from the model itself
+    model_instance = model if not isinstance(model, DDP) else model.module
+    
     checkpoint = {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
@@ -520,7 +523,10 @@ def save_checkpoint(model, optimizer, scheduler, epoch, args, best_val_loss, che
             'num_heads': args.num_heads,
             'd_ff': args.d_ff,
             'dropout': args.dropout,
-            'policy_weight': args.policy_weight
+            'policy_weight': args.policy_weight,
+            'input_planes': args.input_planes,
+            'use_wdl': getattr(model_instance, 'use_wdl', True),
+            'legacy_value_head': False  # Always False for new training
         }
     }
     torch.save(checkpoint, checkpoint_path)
@@ -734,9 +740,27 @@ def train():
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         if ema:
             ema.apply_shadow()
-        to_save = (model if not isinstance(model, DDP) else model.module).state_dict()
-        torch.save(to_save, output_path)
-        print(f'\nTraining complete! Model saved to {output_path}')
+        
+        model_instance = model if not isinstance(model, DDP) else model.module
+        
+        # Save with full configuration metadata
+        final_checkpoint = {
+            'model_state_dict': model_instance.state_dict(),
+            'model_config': {
+                'num_layers': args.num_layers,
+                'd_model': args.d_model,
+                'num_heads': args.num_heads,
+                'd_ff': args.d_ff,
+                'dropout': args.dropout,
+                'policy_weight': args.policy_weight,
+                'input_planes': args.input_planes,
+                'use_wdl': getattr(model_instance, 'use_wdl', True),
+                'legacy_value_head': False
+            },
+            'args': vars(args)
+        }
+        torch.save(final_checkpoint, output_path)
+        print(f'\nTraining complete! Model saved to {output_path} with config metadata')
         if writer is not None:
             writer.close()
 

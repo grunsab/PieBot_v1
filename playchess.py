@@ -39,53 +39,6 @@ def tolist( move_generator ):
         moves.append( move )
     return moves
 
-def load_quantized_titanmini(model_path, device):
-    """
-    Load a quantized TitanMini model from a state dict file.
-    """
-    import torch.nn.quantized.dynamic as nnqd
-    
-    # Load the quantized state dict
-    state_dict = torch.load(model_path, map_location='cpu', weights_only=False)
-    
-    # Create a TitanMini model with the same architecture
-    model = TitanMiniNetwork.TitanMini(
-        num_layers=10,
-        d_model=384,
-        num_heads=6,
-        d_ff=1536,
-        dropout=0.1,
-        policy_weight=1.0,
-        input_planes=112
-    )
-    
-    # Move to CPU (quantized models must run on CPU)
-    model = model.cpu()
-    model.eval()
-    
-    # The saved model has quantized Linear layers
-    # We need to replace the Linear layers with quantized versions and load the state
-    # This is complex, so we'll use a simpler approach: load as regular model
-    # and apply dynamic quantization again
-    
-    # Filter out quantization-specific keys and load regular weights
-    regular_state_dict = {}
-    for k, v in state_dict.items():
-        if not any(x in k for x in ['scale', 'zero_point', '_packed_params']):
-            regular_state_dict[k] = v
-    
-    # Try to load what we can
-    model.load_state_dict(regular_state_dict, strict=False)
-    
-    # Apply dynamic quantization to recreate the quantized model
-    torch.backends.quantized.engine = 'qnnpack'
-    quantized_model = torch.quantization.quantize_dynamic(
-        model,
-        qconfig_spec={torch.nn.Linear},
-        dtype=torch.qint8
-    )
-    
-    return quantized_model
 
 def detect_model_type(weights, model_path=None):
     """Detect whether this is an AlphaZeroNet, PieBotNet, PieNano, PieNanoV2, or TitanMini model."""
@@ -181,43 +134,23 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
         if model_type == 'TitanMini_Quantized':
             # Handle quantized TitanMini
             try:
-                model = load_quantized_titanmini(model_file, device)
+                # Use model_utils function for loading quantized TitanMini
+                from model_utils import load_quantized_titanmini
+                model = load_quantized_titanmini(model_file)
                 is_quantized = True
                 print(f"Loaded quantized TitanMini model on CPU")
                 device = torch.device('cpu')  # Quantized models run on CPU
             except Exception as e:
                 print(f"Warning: Failed to load as quantized TitanMini: {e}")
-                # Fallback: create regular TitanMini and load state dict
-                model = TitanMiniNetwork.TitanMini()
+                # Fallback: create regular TitanMini using model_utils
+                from model_utils import create_titanmini_from_weights
+                model = create_titanmini_from_weights(weights)
                 print(f"Loading TitanMini model (dequantized fallback) on {device_str}")
         elif model_type == 'TitanMini':
-            # Check if this is a legacy model (with 2-layer value head)
-            state_dict = weights if isinstance(weights, dict) and 'model_state_dict' not in weights else weights.get('model_state_dict', weights)
-            
-            # Check for the old value head structure
-            has_legacy_value_head = False
-            for k in state_dict.keys():
-                if 'value_head.value_proj.3' in k or '_orig_mod.value_head.value_proj.3' in k:
-                    # Check if layer 3 is the final layer (shape [1, x] indicates it's the output layer)
-                    weight_key = k if 'weight' in k else None
-                    if weight_key and state_dict[weight_key].shape[0] == 1:
-                        has_legacy_value_head = True
-                        break
-            
-            # Determine if this model uses WDL based on the weights
-            use_wdl = False
-            for k in state_dict.keys():
-                if 'value_head.value_proj' in k or '_orig_mod.value_head.value_proj' in k:
-                    # Check if the final layer outputs 3 values (WDL)
-                    if 'weight' in k:
-                        output_dim = state_dict[k].shape[0]
-                        if output_dim == 3:
-                            use_wdl = True
-                            break
-            
-            # Create model with appropriate configuration
-            model = TitanMiniNetwork.TitanMini(use_wdl=use_wdl, legacy_value_head=has_legacy_value_head and not use_wdl)
-            print(f"Loading TitanMini model on {device_str} (legacy_value_head={has_legacy_value_head and not use_wdl}, use_wdl={use_wdl})")
+            # Use model_utils to create TitanMini with detected configuration
+            from model_utils import create_titanmini_from_weights
+            model = create_titanmini_from_weights(weights)
+            print(f"Loading TitanMini model on {device_str}")
         elif model_type == 'PieNano_Quantized':
             # Handle quantized PieNano saved as state dict
             try:
@@ -299,8 +232,9 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
         # Detect and create the appropriate model type
         model_type = detect_model_type(weights, model_file)
         if model_type == 'TitanMini':
-            # Use default TitanMini configuration
-            model = TitanMiniNetwork.TitanMini()
+            # Use model_utils to create TitanMini with detected configuration
+            from model_utils import create_titanmini_from_weights
+            model = create_titanmini_from_weights(weights)
             print(f"Loading TitanMini model on GPU {gpu_id}")
         elif model_type == 'PieBotNet':
             # Use default PieBotNet configuration

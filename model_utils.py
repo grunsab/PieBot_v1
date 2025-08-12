@@ -95,79 +95,146 @@ def clean_state_dict(state_dict):
 def create_titanmini_from_weights(weights):
     """
     Create TitanMini model with correct architecture from weights.
+    Supports dynamic detection of any TitanMini configuration.
     
     Args:
-        weights: Model checkpoint dictionary
+        weights: Model checkpoint dictionary or state dict
     
     Returns:
         TitanMini model instance
     """
-    # Try to detect architecture from weights
+    # New default configuration (200MB model)
+    DEFAULT_NUM_LAYERS = 13
+    DEFAULT_D_MODEL = 512
+    DEFAULT_NUM_HEADS = 8
+    DEFAULT_D_FF = 1920
+    
+    # Initialize with defaults
+    num_layers = DEFAULT_NUM_LAYERS
+    d_model = DEFAULT_D_MODEL
+    num_heads = DEFAULT_NUM_HEADS
+    d_ff = DEFAULT_D_FF
+    dropout = 0.1
+    policy_weight = 1.0
+    input_planes = 112
+    use_wdl = True
+    legacy_value_head = False
+    
     if isinstance(weights, dict):
-        # Check if it has args from training
-        if 'args' in weights:
+        # First priority: Check for saved model_config
+        if 'model_config' in weights:
+            config = weights['model_config']
+            num_layers = config.get('num_layers', DEFAULT_NUM_LAYERS)
+            d_model = config.get('d_model', DEFAULT_D_MODEL)
+            num_heads = config.get('num_heads', DEFAULT_NUM_HEADS)
+            d_ff = config.get('d_ff', DEFAULT_D_FF)
+            dropout = config.get('dropout', 0.1)
+            policy_weight = config.get('policy_weight', 1.0)
+            input_planes = config.get('input_planes', 112)
+            use_wdl = config.get('use_wdl', True)
+            legacy_value_head = config.get('legacy_value_head', False)
+        
+        # Second priority: Check for args from training
+        elif 'args' in weights:
             args = weights['args']
-            num_layers = getattr(args, 'num_layers', 10)
-            d_model = getattr(args, 'd_model', 384)
-            num_heads = getattr(args, 'num_heads', 6)
-            d_ff = getattr(args, 'd_ff', 1536)
-            dropout = getattr(args, 'dropout', 0.1)
-            policy_weight = getattr(args, 'policy_weight', 1.0)
-            input_planes = getattr(args, 'input_planes', 112)
+            if hasattr(args, 'num_layers'):
+                num_layers = args.num_layers
+            if hasattr(args, 'd_model'):
+                d_model = args.d_model
+            if hasattr(args, 'num_heads'):
+                num_heads = args.num_heads
+            if hasattr(args, 'd_ff'):
+                d_ff = args.d_ff
+            if hasattr(args, 'dropout'):
+                dropout = args.dropout
+            if hasattr(args, 'policy_weight'):
+                policy_weight = args.policy_weight
+            if hasattr(args, 'input_planes'):
+                input_planes = args.input_planes
+        
+        # Third priority: Infer from state dict shapes
         else:
-            # Try to infer from state dict
             state_dict = weights.get('model_state_dict', weights)
             
-            # Default TitanMini configuration
-            num_layers = 10
-            d_model = 384
-            num_heads = 6
-            d_ff = 1536
-            dropout = 0.1
-            policy_weight = 1.0
-            input_planes = 112
-            
-            # Try to infer d_model from input_projection weight
+            # Clean keys by removing _orig_mod prefix
+            clean_dict = {}
             for k, v in state_dict.items():
                 clean_k = k.replace('_orig_mod.', '')
-                if clean_k == 'input_projection.weight':
-                    d_model = v.shape[0]
-                    d_ff = d_model * 4  # Usually 4x d_model
-                    break
+                clean_dict[clean_k] = v
             
-            # Try to infer num_layers from transformer blocks
-            transformer_keys = []
-            for k in state_dict.keys():
-                clean_k = k.replace('_orig_mod.', '')
-                if 'transformer_blocks' in clean_k and 'norm1' in clean_k:
-                    transformer_keys.append(clean_k)
+            # 1. Infer d_model from input_projection
+            if 'input_projection.weight' in clean_dict:
+                d_model = clean_dict['input_projection.weight'].shape[0]
+                input_planes = clean_dict['input_projection.weight'].shape[1]
             
-            if transformer_keys:
-                layer_nums = set()
-                for k in transformer_keys:
+            # 2. Infer num_layers by counting transformer blocks
+            layer_indices = set()
+            for k in clean_dict.keys():
+                if 'transformer_blocks.' in k:
                     parts = k.split('.')
                     if len(parts) >= 2 and parts[1].isdigit():
-                        layer_nums.add(int(parts[1]))
-                num_layers = len(layer_nums) if layer_nums else 10
-    else:
-        # Default TitanMini configuration
-        num_layers = 10
-        d_model = 384
-        num_heads = 6
-        d_ff = 1536
-        dropout = 0.1
-        policy_weight = 1.0
-        input_planes = 112
+                        layer_indices.add(int(parts[1]))
+            if layer_indices:
+                num_layers = max(layer_indices) + 1  # 0-indexed
+            
+            # 3. Infer num_heads from relative_position_bias
+            for k, v in clean_dict.items():
+                if 'relative_bias_table' in k:
+                    # Shape is (15, 15, num_heads)
+                    if len(v.shape) == 3:
+                        num_heads = v.shape[2]
+                        break
+            
+            # 4. Infer d_ff from GEGLU layer
+            for k, v in clean_dict.items():
+                if 'ffn.proj.weight' in k:
+                    # GEGLU proj maps d_model -> 2*d_ff
+                    # v.shape is (2*d_ff, d_model)
+                    d_ff = v.shape[0] // 2
+                    break
+            
+            # 5. Detect WDL mode
+            use_wdl = False
+            for k, v in clean_dict.items():
+                if 'value_head.value_proj' in k and 'weight' in k:
+                    # Check final layer output dimension
+                    if '6.weight' in k:  # Final layer in WDL head
+                        use_wdl = (v.shape[0] == 3)
+                        break
+            
+            # 6. Detect legacy value head
+            legacy_value_head = False
+            if not use_wdl:
+                # Check if value head has only 2 layers (legacy) or 3 layers (modern)
+                has_fc3 = any('value_head.fc3' in k for k in clean_dict.keys())
+                legacy_value_head = not has_fc3
     
-    return TitanMiniNetwork.TitanMini(
+    # Validate num_heads divides d_model evenly
+    if d_model % num_heads != 0:
+        # Adjust num_heads to nearest valid value
+        valid_heads = [h for h in [4, 6, 8, 12, 16] if d_model % h == 0]
+        if valid_heads:
+            num_heads = min(valid_heads, key=lambda x: abs(x - num_heads))
+        else:
+            num_heads = 8  # Fallback
+    
+    # Create model with detected/configured parameters
+    model = TitanMiniNetwork.TitanMini(
         num_layers=num_layers,
         d_model=d_model,
         num_heads=num_heads,
         d_ff=d_ff,
         dropout=dropout,
         policy_weight=policy_weight,
-        input_planes=input_planes
+        input_planes=input_planes,
+        use_wdl=use_wdl,
+        legacy_value_head=legacy_value_head
     )
+    
+    print(f"Created TitanMini: layers={num_layers}, d_model={d_model}, "
+          f"heads={num_heads}, d_ff={d_ff}, WDL={use_wdl}")
+    
+    return model
 
 
 def create_pienano_from_weights(weights):
@@ -241,6 +308,7 @@ def create_pienano_from_weights(weights):
 def load_quantized_titanmini(model_path):
     """
     Load a quantized TitanMini model from a state dict file.
+    Automatically detects the model architecture from the weights.
     
     Args:
         model_path: Path to the quantized model file
@@ -248,29 +316,31 @@ def load_quantized_titanmini(model_path):
     Returns:
         Quantized TitanMini model (runs on CPU)
     """
-    # Load the quantized state dict
-    state_dict = torch.load(model_path, map_location='cpu', weights_only=False)
+    # Load the full checkpoint (may contain metadata)
+    checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
     
-    # Create a TitanMini model with the same architecture
-    model = TitanMiniNetwork.TitanMini(
-        num_layers=10,
-        d_model=384,
-        num_heads=6,
-        d_ff=1536,
-        dropout=0.1,
-        policy_weight=1.0,
-        input_planes=112
-    )
+    # Create a TitanMini model with detected architecture
+    # The create_titanmini_from_weights function will handle detection
+    model = create_titanmini_from_weights(checkpoint)
     
     # Move to CPU (quantized models must run on CPU)
     model = model.cpu()
     model.eval()
+    
+    # Get the state dict from checkpoint
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+    else:
+        state_dict = checkpoint
     
     # Filter out quantization-specific keys and load regular weights
     regular_state_dict = {}
     for k, v in state_dict.items():
         if not any(x in k for x in ['scale', 'zero_point', '_packed_params']):
             regular_state_dict[k] = v
+    
+    # Clean state dict
+    regular_state_dict = clean_state_dict(regular_state_dict)
     
     # Try to load what we can
     model.load_state_dict(regular_state_dict, strict=False)
@@ -287,6 +357,81 @@ def load_quantized_titanmini(model_path):
         param.requires_grad = False
     
     return quantized_model
+
+
+def get_titanmini_config_from_model(model_path):
+    """
+    Extract TitanMini configuration from a saved model.
+    Useful for quantization scripts that need to know the architecture.
+    
+    Args:
+        model_path: Path to model file
+    
+    Returns:
+        dict: Configuration dictionary with architecture parameters
+    """
+    # Load checkpoint
+    checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
+    
+    # Use create_titanmini_from_weights logic but return config instead of model
+    config = {
+        'num_layers': 13,  # Default
+        'd_model': 512,
+        'num_heads': 8,
+        'd_ff': 1920,
+        'dropout': 0.1,
+        'policy_weight': 1.0,
+        'input_planes': 112,
+        'use_wdl': True,
+        'legacy_value_head': False
+    }
+    
+    if isinstance(checkpoint, dict):
+        # Check for saved model_config
+        if 'model_config' in checkpoint:
+            config.update(checkpoint['model_config'])
+        # Check for args
+        elif 'args' in checkpoint:
+            args = checkpoint['args']
+            for key in config.keys():
+                if hasattr(args, key):
+                    config[key] = getattr(args, key)
+        # Infer from state dict
+        else:
+            state_dict = checkpoint.get('model_state_dict', checkpoint)
+            clean_dict = {}
+            for k, v in state_dict.items():
+                clean_k = k.replace('_orig_mod.', '')
+                clean_dict[clean_k] = v
+            
+            # Infer parameters as in create_titanmini_from_weights
+            if 'input_projection.weight' in clean_dict:
+                config['d_model'] = clean_dict['input_projection.weight'].shape[0]
+                config['input_planes'] = clean_dict['input_projection.weight'].shape[1]
+            
+            # Count layers
+            layer_indices = set()
+            for k in clean_dict.keys():
+                if 'transformer_blocks.' in k:
+                    parts = k.split('.')
+                    if len(parts) >= 2 and parts[1].isdigit():
+                        layer_indices.add(int(parts[1]))
+            if layer_indices:
+                config['num_layers'] = max(layer_indices) + 1
+            
+            # Get num_heads
+            for k, v in clean_dict.items():
+                if 'relative_bias_table' in k and len(v.shape) == 3:
+                    config['num_heads'] = v.shape[2]
+                    break
+            
+            # Get d_ff
+            for k, v in clean_dict.items():
+                if 'ffn.proj.weight' in k:
+                    config['d_ff'] = v.shape[0] // 2
+                    break
+    
+    return config
 
 
 def load_model(model_path, device=None):
@@ -332,6 +477,23 @@ def load_model(model_path, device=None):
     if model_type == 'TitanMini_Quantized':
         # Handle quantized TitanMini
         try:
+            # Check if it's a TorchScript quantized model
+            if model_path.endswith('.jit') or model_path.endswith('.pt'):
+                try:
+                    # Try loading as TorchScript first
+                    model = torch.jit.load(model_path, map_location='cpu')
+                    is_quantized = True
+                    model.eval()
+                    print(f"Loaded quantized TitanMini model (TorchScript) on CPU")
+                    device = torch.device('cpu')
+                    for param in model.parameters():
+                        param.requires_grad = False
+                    return model, device, is_quantized
+                except:
+                    # Not TorchScript, try dynamic quantization approach
+                    pass
+            
+            # Use dynamic quantization approach
             model = load_quantized_titanmini(model_path)
             is_quantized = True
             print(f"Loaded quantized TitanMini model on CPU")

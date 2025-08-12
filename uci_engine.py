@@ -173,63 +173,6 @@ class UCIEngine:
         self.move_overhead = 30  # Default move overhead in milliseconds
         self.use_multiprocess = use_multiprocess
         
-    def _create_titanmini_from_weights(self, weights):
-        """Create TitanMini model with correct architecture from weights."""
-        # Try to detect architecture from weights
-        if isinstance(weights, dict):
-            # Check if it has args from training
-            if 'args' in weights:
-                args = weights['args']
-                num_layers = getattr(args, 'num_layers', 10)
-                d_model = getattr(args, 'd_model', 384)
-                num_heads = getattr(args, 'num_heads', 6)
-                d_ff = getattr(args, 'd_ff', 1536)
-                dropout = getattr(args, 'dropout', 0.1)
-                policy_weight = getattr(args, 'policy_weight', 1.0)
-                input_planes = getattr(args, 'input_planes', 112)
-            else:
-                # Try to infer from state dict
-                state_dict = weights.get('model_state_dict', weights)
-                
-                # Default TitanMini configuration
-                num_layers = 10
-                d_model = 384
-                num_heads = 6
-                d_ff = 1536
-                dropout = 0.1
-                policy_weight = 1.0
-                input_planes = 112
-                
-                # Try to infer d_model from input_projection weight
-                if 'input_projection.weight' in state_dict:
-                    d_model = state_dict['input_projection.weight'].shape[0]
-                    d_ff = d_model * 4  # Usually 4x d_model
-                
-                # Try to infer num_layers from transformer blocks
-                transformer_keys = [k for k in state_dict.keys() if 'transformer_blocks' in k and 'norm1' in k]
-                if transformer_keys:
-                    num_layers = len(set(k.split('.')[1] for k in transformer_keys if len(k.split('.')) > 1))
-                    if num_layers == 0:
-                        num_layers = 10  # Default fallback
-        else:
-            # Default TitanMini configuration
-            num_layers = 10
-            d_model = 384
-            num_heads = 6
-            d_ff = 1536
-            dropout = 0.1
-            policy_weight = 1.0
-            input_planes = 112
-        
-        return TitanMiniNetwork.TitanMini(
-            num_layers=num_layers,
-            d_model=d_model,
-            num_heads=num_heads,
-            d_ff=d_ff,
-            dropout=dropout,
-            policy_weight=policy_weight,
-            input_planes=input_planes
-        )
     
     def _create_pienano_from_weights(self, weights):
         """Create PieNano model with correct architecture from weights."""
