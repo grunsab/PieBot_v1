@@ -130,8 +130,6 @@ class WDLValueHead(nn.Module):
 class ConvolutionalPolicyHead(nn.Module):
     """
     A truly lightweight convolutional policy head for PieNano.
-    Directly outputs 73 planes × 8×8 = 4672 logits without a large FC layer.
-    The MCTS/UCI engine will handle mapping to the 4608 legal moves.
     """
     def __init__(self, input_channels, num_moves=4608):
         super().__init__()
@@ -159,12 +157,11 @@ class PieNano(nn.Module):
     Key Architectural Features:
     - Depthwise Separable Convolutions for speed.
     - Squeeze-and-Excitation blocks for channel attention.
-    - A small residual tower (8 blocks, 128 filters) for a good speed/strength balance.
     - Modern WDL Value and Convolutional Policy heads for high-quality search guidance.
     """
     def __init__(self, 
-                 num_blocks=8, 
-                 num_filters=128, 
+                 num_blocks=20, 
+                 num_filters=256, 
                  num_input_planes=16,
                  num_moves=4608,
                  use_se=True,

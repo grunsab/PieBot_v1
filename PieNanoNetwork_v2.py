@@ -15,7 +15,7 @@ class ImprovedPolicyHead(nn.Module):
     Balanced policy head with small FC layer for better move correlation learning.
     Uses dimensionality reduction to keep parameters manageable.
     """
-    def __init__(self, input_channels, num_moves=4608, hidden_dim=256):
+    def __init__(self, input_channels, num_moves=4608, hidden_dim=768):
         super().__init__()
         # First reduce channels significantly
         self.conv1 = nn.Conv2d(input_channels, 32, kernel_size=1, bias=False)
@@ -23,9 +23,9 @@ class ImprovedPolicyHead(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         
         # Small FC layers for move correlation
-        self.fc1 = nn.Linear(32 * 64, hidden_dim)  # 2048 -> 256
+        self.fc1 = nn.Linear(32 * 64, hidden_dim)  # 2048 -> 768
         self.dropout = nn.Dropout(0.1)
-        self.fc2 = nn.Linear(hidden_dim, num_moves)  # 256 -> 4608
+        self.fc2 = nn.Linear(hidden_dim, num_moves)  # 768 -> 4608
         
     def forward(self, x):
         # Reduce dimensions with conv
