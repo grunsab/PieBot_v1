@@ -73,7 +73,7 @@ def parse_args():
                         help='Output filename for saved model')
     parser.add_argument('--policy-weight', type=float, default=default_policy_weight,
                         help=f'Weight for policy loss relative to value loss (default: {default_policy_weight})')
-    parser.add_argument('--input-planes', type=int, default=112,
+    parser.add_argument('--input-planes', type=int, default=16,
                         help='Number of input planes (16 for classic, 112 for enhanced encoder)')
     parser.add_argument('--dry-run', action='store_true',
                         help='Use a tiny synthetic dataset for a fast training dry-run')
