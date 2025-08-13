@@ -6,6 +6,7 @@ Optimized for fast extraction without filtering.
 """
 
 import requests
+import re
 import os
 import sys
 import time
@@ -34,6 +35,28 @@ def download_file(url_filename_pairs, chunk_size=8192):
                 f.write(data)
 
 
+def extract_and_verify_rating(pgn_content, min_rating=3000):
+    """Extract white and black ratings from PGN headers."""
+    white_rating = None
+    black_rating = None
+    
+    for line in pgn_content:
+        if line.startswith('[WhiteElo'):
+            match = re.search(r'"(\d+)"', line)
+            if match:
+                white_rating = int(match.group(1))
+        elif line.startswith('[BlackElo'):
+            match = re.search(r'"(\d+)"', line)
+            if match:
+                black_rating = int(match.group(1))
+        if white_rating and black_rating:
+            break
+    
+    if white_rating is None or black_rating is None:
+        return False
+    return white_rating >= min_rating and black_rating >= min_rating
+
+
 def extract_games_ultra_fast(input_file, output_directory, offset=0):
     """Extract all games with batch writing for maximum speed."""
     
@@ -42,6 +65,7 @@ def extract_games_ultra_fast(input_file, output_directory, offset=0):
     print(f"Extracting games from {os.path.basename(input_file)}...")
     
     games_processed = 0
+    games_kept = 0
     start_time = time.time()
     last_report_time = start_time
     
@@ -59,9 +83,11 @@ def extract_games_ultra_fast(input_file, output_directory, offset=0):
                 # Start of new game
                 if current_game and in_game:
                     # Add to batch
-                    games_batch.append((''.join(current_game) + '\n', game_idx))
+                    if extract_and_verify_rating(current_game):
+                        games_batch.append((''.join(current_game) + '\n', game_idx))
+                        game_idx += 1
+                        games_kept += 1
                     games_processed += 1
-                    game_idx += 1
                     
                     # Write batch when full
                     if len(games_batch) >= batch_size:
@@ -74,7 +100,7 @@ def extract_games_ultra_fast(input_file, output_directory, offset=0):
                         current_time = time.time()
                         elapsed = current_time - start_time
                         speed = games_processed / elapsed if elapsed > 0 else 0
-                        print(f"  Processed: {games_processed:,} games, Speed: {speed:.0f} games/sec")
+                        print(f"  Processed: {games_processed:,} games, Kept: {games_kept,} games, Speed: {speed:.0f} games/sec")
                         
                         games_batch = []
                         last_report_time = current_time
@@ -102,10 +128,11 @@ def extract_games_ultra_fast(input_file, output_directory, offset=0):
     
     print(f"  Extraction complete!")
     print(f"  Total games extracted: {games_processed:,}")
+    print(f" Total games kept: {games_kept:,}")
     print(f"  Processing time: {elapsed_time:.2f} seconds")
     print(f"  Processing speed: {games_processed/elapsed_time:.0f} games/second")
     
-    return games_processed
+    return games_kept
 
 
 def count_existing_games_in_directory(directory):
@@ -138,6 +165,10 @@ def main():
                        help='Skip download and only process existing files')
     parser.add_argument('--output-dir-downloads', default='games_training_data/CCRL_computerchess_org/', 
                        help='Output directory to store downloaded PGN files (default: games_training_data/CCRL_computerchess_org/)')
+
+    parser.add_argument("--min-rating", default=1500,
+                        help="Minimum rating of each player required to store the game." )
+
 
     args = parser.parse_args()
     

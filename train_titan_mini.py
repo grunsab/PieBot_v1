@@ -765,23 +765,31 @@ def train():
         if is_main:
             print(f'Train - Loss: {train_loss:.4f}, Value: {train_value_loss:.4f}, Policy: {train_policy_loss:.4f}')
 
-        val_loss, val_value_loss, val_policy_loss = validate(
-            model, val_loader, args, epoch, writer, device=device, distributed=distributed
-        )
-        if is_main:
-            print(f'Val - Loss: {val_loss:.4f}, Value: {val_value_loss:.4f}, Policy: {val_policy_loss:.4f}')
+        if val_loader is not None:
+            val_loss, val_value_loss, val_policy_loss = validate(
+                model, val_loader, args, epoch, writer, device=device, distributed=distributed
+            )
+            if is_main:
+                print(f'Val - Loss: {val_loss:.4f}, Value: {val_value_loss:.4f}, Policy: {val_policy_loss:.4f}')
+        else:
+            # No validation in curriculum mode
+            val_loss = float('inf')
+            val_value_loss = float('inf')
+            val_policy_loss = float('inf')
+            if is_main:
+                print('Validation skipped (curriculum mode)')
 
         if is_main and (epoch + 1) % args.save_every == 0:
             checkpoint_path = os.path.join(args.checkpoint_dir, f'titan_mini_epoch_{epoch + 1}.pt')
             save_checkpoint(model if not isinstance(model, DDP) else model.module, optimizer, scheduler, epoch, args, best_val_loss, checkpoint_path)
 
-        if is_main and val_loss < best_val_loss:
+        if is_main and val_loader is not None and val_loss < best_val_loss:
             best_val_loss = val_loss
             best_path = os.path.join(args.checkpoint_dir, 'titan_mini_best.pt')
             save_checkpoint(model if not isinstance(model, DDP) else model.module, optimizer, scheduler, epoch, args, best_val_loss, best_path)
             print(f'New best validation loss: {best_val_loss:.4f}')
 
-        if args.swa and epoch >= args.swa_start and ema and is_main:
+        if args.swa and epoch >= args.swa_start and ema and is_main and val_loader is not None:
             ema.apply_shadow()
             swa_val_loss, _, _ = validate(model, val_loader, args, epoch, writer, device=device, distributed=distributed)
             print(f'SWA Val Loss: {swa_val_loss:.4f}')

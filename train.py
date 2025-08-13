@@ -785,6 +785,10 @@ def train():
             alphaZeroNet, val_loader, args, epoch, writer, device
         )
         
+
+        piece_monitor = PieceValueMonitor(alphaZeroNet, device)
+        piece_monitor.print_piece_value_report()
+
         # Step schedulers that need validation loss
         if args.scheduler == 'plateau' and scheduler:
             scheduler.step(val_loss)
