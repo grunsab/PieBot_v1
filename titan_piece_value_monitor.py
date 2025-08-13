@@ -135,19 +135,29 @@ class TitanPieceValueMonitor:
             for board_with, board_without, piece_type in test_positions:
                 # Encode positions based on encoder type
                 if self.enhanced_encoder and encoder_enhanced:
+                    # Enhanced encoder doesn't have encodePositionForInference, need to handle separately
                     pos_with = encoder_enhanced.encode(board_with)
                     pos_without = encoder_enhanced.encode(board_without)
+                    # Get masks using standard encoder
+                    _, mask_with = encoder.encodePositionForInference(board_with)
+                    _, mask_without = encoder.encodePositionForInference(board_without)
                 else:
-                    pos_with = encoder.encodePosition(board_with)
-                    pos_without = encoder.encodePosition(board_without)
+                    pos_with, mask_with = encoder.encodePositionForInference(board_with)
+                    pos_without, mask_without = encoder.encodePositionForInference(board_without)
                 
                 # Convert to tensors
-                pos_with_tensor = torch.tensor(pos_with, dtype=torch.float32).unsqueeze(0).to(self.device)
-                pos_without_tensor = torch.tensor(pos_without, dtype=torch.float32).unsqueeze(0).to(self.device)
+                pos_with_tensor = torch.from_numpy(pos_with if isinstance(pos_with, np.ndarray) else np.array(pos_with)).unsqueeze(0).to(self.device)
+                pos_without_tensor = torch.from_numpy(pos_without if isinstance(pos_without, np.ndarray) else np.array(pos_without)).unsqueeze(0).to(self.device)
+                mask_with_tensor = torch.from_numpy(mask_with).unsqueeze(0).to(self.device)
+                mask_without_tensor = torch.from_numpy(mask_without).unsqueeze(0).to(self.device)
+                
+                # Flatten masks to match expected shape
+                mask_with_flat = mask_with_tensor.view(mask_with_tensor.shape[0], -1)
+                mask_without_flat = mask_without_tensor.view(mask_without_tensor.shape[0], -1)
                 
                 # Get network evaluations - transformer outputs
-                value_with, _ = self.model(pos_with_tensor)
-                value_without, _ = self.model(pos_without_tensor)
+                value_with, _ = self.model(pos_with_tensor, policyMask=mask_with_flat)
+                value_without, _ = self.model(pos_without_tensor, policyMask=mask_without_flat)
                 
                 # Calculate difference (piece's contribution)
                 value_diff = (value_with - value_without).item()
