@@ -9,6 +9,7 @@ from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, OneCycleLR
 from CCRLDataset import CCRLDataset
 from RLDataset import RLDataset, WeightedRLSampler
 from TitanCurriculumDataset import TitanCurriculumDataset, TitanMixedCurriculumDataset
+from titan_piece_value_monitor import TitanPieceValueMonitor
 from TitanMiniNetwork import TitanMini, count_parameters
 from device_utils import get_optimal_device, optimize_for_device, get_batch_size_for_device, get_num_workers_for_device
 import argparse
@@ -778,6 +779,11 @@ def train():
             val_policy_loss = float('inf')
             if is_main:
                 print('Validation skipped (curriculum mode)')
+
+        if args.monitor_piece_values:
+            enhanced = args.input_planes > 16
+            monitor = TitanPieceValueMonitor(model, device='cuda', enhanced_encoder=enhanced)
+            monitor.print_detailed_report()
 
         if is_main and (epoch + 1) % args.save_every == 0:
             checkpoint_path = os.path.join(args.checkpoint_dir, f'titan_mini_epoch_{epoch + 1}.pt')
