@@ -38,6 +38,11 @@ class TitanPieceValueMonitor:
         self.model = model
         self.device = device
         self.enhanced_encoder = enhanced_encoder
+        # Create encoder instance if using enhanced encoder
+        if enhanced_encoder and encoder_enhanced:
+            self.encoder_instance = encoder_enhanced.EnhancedEncoder(use_enhanced=True)
+        else:
+            self.encoder_instance = None
         self.piece_names = {
             chess.PAWN: 'Pawn',
             chess.KNIGHT: 'Knight',
@@ -78,7 +83,7 @@ class TitanPieceValueMonitor:
         middle_game_tests = [
             # Italian game position
             ("r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/3P1N2/PPP2PPP/RNBQK2R w KQkq - 0 6",
-             "r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/3P1N2/PPP2PPP/RNBQK21R w KQkq - 0 6", chess.ROOK),
+             "r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/3P1N2/PPP2PPP/RNBQK3 w KQkq - 0 6", chess.ROOK),
             ("r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/3P1N2/PPP2PPP/RNBQK2R w KQkq - 0 6",
              "r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/3P1N2/PPP2PPP/RNB1K2R w KQkq - 0 6", chess.QUEEN),
             ("r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/3P1N2/PPP2PPP/RNBQK2R w KQkq - 0 6",
@@ -134,10 +139,15 @@ class TitanPieceValueMonitor:
         with torch.no_grad():
             for board_with, board_without, piece_type in test_positions:
                 # Encode positions based on encoder type
-                if self.enhanced_encoder and encoder_enhanced:
-                    # Enhanced encoder doesn't have encodePositionForInference, need to handle separately
-                    pos_with = encoder_enhanced.encode(board_with)
-                    pos_without = encoder_enhanced.encode(board_without)
+                if self.enhanced_encoder and self.encoder_instance:
+                    # Reset history for clean encoding
+                    self.encoder_instance.reset_history()
+                    pos_with_tensor_raw = self.encoder_instance.encode(board_with)
+                    self.encoder_instance.reset_history()
+                    pos_without_tensor_raw = self.encoder_instance.encode(board_without)
+                    # Convert to numpy arrays
+                    pos_with = pos_with_tensor_raw.cpu().numpy()
+                    pos_without = pos_without_tensor_raw.cpu().numpy()
                     # Get masks using standard encoder
                     _, mask_with = encoder.encodePositionForInference(board_with)
                     _, mask_without = encoder.encodePositionForInference(board_without)
