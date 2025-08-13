@@ -349,17 +349,8 @@ def callNeuralNetwork( board, neuralNetwork, history=None ):
         model_name = neuralNetwork.__class__.__name__
         is_titan_mini = 'TitanMini' in model_name
     
-    if is_titan_mini:
-        # Use enhanced encoder for TitanMini (112 planes)
-        try:
-            import encoder_enhanced
-            position = encoder_enhanced.encode_enhanced_position(board, history)
-        except ImportError:
-            print("Warning: encoder_enhanced not found, falling back to standard encoder")
-            position, _ = encodePositionForInference( board )
-    else:
-        # Use standard encoder for other models (16 planes)
-        position, _ = encodePositionForInference( board )
+    # Always use standard encoder for all models including TitanMini
+    position, _ = encodePositionForInference( board )
     
     # Get mask (same for all models)
     _, mask = encodePositionForInference( board )
@@ -425,27 +416,14 @@ def callNeuralNetworkBatched( boards, neuralNetwork, histories=None ):
         model_name = neuralNetwork.__class__.__name__
         is_titan_mini = 'TitanMini' in model_name
     
-    if is_titan_mini:
-        # Use enhanced encoder for TitanMini (112 planes)
-        inputs = torch.zeros( (num_inputs, 112, 8, 8), dtype=torch.float32 )
-    else:
-        # Use standard encoder for other models (16 planes)
-        inputs = torch.zeros( (num_inputs, 16, 8, 8), dtype=torch.float32 )
+    # Always use standard encoder with 16 planes for all models including TitanMini
+    inputs = torch.zeros( (num_inputs, 16, 8, 8), dtype=torch.float32 )
     
     masks = torch.zeros( (num_inputs, 72, 8, 8), dtype=torch.float32 )
 
     for i in range( num_inputs ):
-        if is_titan_mini:
-            # Use enhanced encoder for TitanMini
-            try:
-                import encoder_enhanced
-                history = histories[i] if histories else None
-                position = encoder_enhanced.encode_enhanced_position(boards[i], history)
-            except ImportError:
-                print("Warning: encoder_enhanced not found, falling back to standard encoder")
-                position, _ = encodePositionForInference( boards[ i ] )
-        else:
-            position, _ = encodePositionForInference( boards[ i ] )
+        # Always use standard encoder for all models including TitanMini
+        position, _ = encodePositionForInference( boards[ i ] )
         
         _, mask = encodePositionForInference( boards[ i ] )
 
