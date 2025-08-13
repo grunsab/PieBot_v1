@@ -1,6 +1,5 @@
 """
 PieNano V2: A balanced lightweight architecture with better policy head.
-Targets ~2-3M parameters for good performance on VPS.
 """
 
 import torch
