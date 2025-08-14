@@ -172,16 +172,23 @@ class TransformerBlock(nn.Module):
 # ==============================================================================
 
 class PolicyHead(nn.Module):
+    """
+    Outputs logits in PLANE-MAJOR layout to match encoder/mask/targets:
+      index = plane * 64 + square
+    Given board_features [B, 64, D], we first project to [B, 64, 72] (per-square, per-plane),
+    then permute to [B, 72, 64] and flatten -> [B, 4608].
+    """
     def __init__(self, d_model, num_move_actions_per_square=72, logit_scale=1.0):
         super().__init__()
-        self.num_move_actions_per_square = num_move_actions_per_square
+        self.num_move_actions_per_square = num_move_actions_per_square  # 72
         self.proj = nn.Linear(d_model, num_move_actions_per_square)
-        # Optional learnable/global scale to keep logits in a sane range
         self.logit_scale = nn.Parameter(torch.tensor(float(logit_scale)))
 
     def forward(self, x):
-        logits = self.proj(x) * self.logit_scale  # [B,64,72]
-        logits = logits.view(x.shape[0], -1)      # [B,4608]
+        # x: [B, 64, D]
+        logits_sq_plane = self.proj(x) * self.logit_scale      # [B, 64, 72]
+        logits_plane_sq = logits_sq_plane.permute(0, 2, 1).contiguous()  # [B, 72, 64]
+        logits = logits_plane_sq.view(x.shape[0], -1)          # [B, 4608] PLANE-MAJOR
         return logits
 
 class ValueHead(nn.Module):

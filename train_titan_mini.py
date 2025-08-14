@@ -323,30 +323,8 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, args, epoch, 
     """Train for one epoch."""
     model.train()
 
-    # ---- Early-phase anchors to stabilize piece values ----
+    # Model module for potential future use
     model_module = model.module if hasattr(model, 'module') else model
-
-    # Fractional progress through training (0..1)
-    progress = (epoch) / max(1, args.epochs)
-
-    # Stronger anchors in the first ~10% of training, then relax
-    if progress < 0.10:
-        model_module.material_weight = 0.15   # default was 0.05
-        model_module.material_scale_cp = 800.0  # softer tanh; less saturation
-        model_module.wdl_weight = 0.55        # keep WDL primary
-        model_module.calibration_weight = 0.15
-    elif progress < 0.30:
-        model_module.material_weight = 0.08
-        model_module.material_scale_cp = 700.0
-        model_module.wdl_weight = 0.58
-        model_module.calibration_weight = 0.20
-    else:
-        # back to the defaults for full flexibility later
-        model_module.material_weight = 0.05
-        model_module.material_scale_cp = 600.0
-        model_module.wdl_weight = 0.60
-        model_module.calibration_weight = 0.25
-    # -------------------------------------------------------
 
 
     
