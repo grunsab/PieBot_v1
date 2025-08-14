@@ -381,122 +381,118 @@ class TitanMini(nn.Module):
         trunc_((self.value_head.wdl_out.weight), std_head)
 
     # ---------- Forward ----------
-    def forward(
-        self, x,
-        value_target=None, policy_target=None, policy_mask=None,
-        valueTarget=None, policyTarget=None, policyMask=None
-    ):
-        # aliasing for backwards compatibility
-        if valueTarget is not None: value_target = valueTarget
-        if policyTarget is not None: policy_target = policyTarget
-        if policyMask  is not None: policy_mask  = policyMask
+def forward(
+    self, x,
+    value_target=None, policy_target=None, policy_mask=None,
+    valueTarget=None, policyTarget=None, policyMask=None
+):
+    # Back-compat aliases
+    if valueTarget is not None: value_target = valueTarget
+    if policyTarget is not None: policy_target = policyTarget
+    if policyMask  is not None: policy_mask  = policyMask
 
-        B = x.shape[0]
+    B = x.shape[0]
 
-        # Input path
-        if self.use_sparse:
-            board_tokens, cls, material_proxy = self._process_sparse_input(x)  # [B,64,D], [B,1,D], [B,1]
+    # ===== 1) Encode inputs =====
+    if self.use_sparse:
+        board_tokens, cls, material_proxy = self._process_sparse_input(x)  # [B,64,D], [B,1,D], [B,1]
+    else:
+        feat = self.input_projection(x)                        # [B,D,8,8]
+        board_tokens = feat.flatten(2).transpose(1, 2)         # [B,64,D]
+        cls = self.cls_token.expand(B, -1, -1)                 # [B,1,D]
+        material_proxy = None
+
+    board_tokens = board_tokens + self.positional_encoding(board_tokens)  # [B,64,D]
+    seq = torch.cat([cls, board_tokens], dim=1)                            # [B,65,D]
+
+    for blk in self.blocks:
+        seq = blk(seq)
+
+    seq = self.out_norm(seq)
+    cls_feat = seq[:, :1, :]   # [B,1,D]
+    board_feat = seq[:, 1:, :] # [B,64,D]
+
+    # ===== 2) Heads =====
+    value_scalar, wdl_logits = self.value_head(cls_feat)   # scalar in [-1,1], logits [B,3]
+    policy_logits = self.policy_head(board_feat)           # [B,4608]
+    # Optional safety check during bring-up (comment out once stable)
+    # assert policy_logits.shape[1] == 4608, f"Policy logits shape {policy_logits.shape} != [B,4608]"
+
+    # ===== 3) Training path =====
+    if self.training:
+        assert value_target is not None and policy_target is not None, \
+            "value_target and policy_target must be provided in training mode"
+
+        # -- Value losses --
+        if self.use_wdl:
+            vt = value_target.view(-1)            # [B]
+            W = torch.clamp(vt, min=0.0)          # relu(v)
+            L = torch.clamp(-vt, min=0.0)         # relu(-v)
+            D = torch.clamp(1.0 - W - L, min=0.0)
+            wdl_targets = torch.stack([W, D, L], dim=1)                       # [B,3]
+            wdl_targets = wdl_targets / (wdl_targets.sum(dim=1, keepdim=True).clamp_min(1e-8))
+            logp = F.log_softmax(wdl_logits, dim=1)
+            wdl_loss = -(wdl_targets * logp).sum(dim=1).mean()
         else:
-            feat = self.input_projection(x)                        # [B,D,8,8]
-            board_tokens = feat.flatten(2).transpose(1, 2)         # [B,64,D]
-            cls = self.cls_token.expand(B, -1, -1)
-            material_proxy = None
+            wdl_loss = 0.0 * value_scalar.mean()
 
-        # Add positional encodings to board tokens
-        board_tokens = board_tokens + self.positional_encoding(board_tokens)  # [B,64,D]
+        scalar_loss = self.mse_loss(value_scalar, value_target.view(B, 1))
 
-        # Sequence with CLS first
-        seq = torch.cat([cls, board_tokens], dim=1)  # [B,65,D]
+        wdl_probs = F.softmax(wdl_logits, dim=1)
+        w_minus_l = (wdl_probs[:, 0:1] - wdl_probs[:, 2:3])  # [B,1]
+        # keep this mild by stopping grads on scalar (or vice versa)
+        calibration_loss = self.mse_loss(w_minus_l, value_scalar.detach())
 
-        for blk in self.blocks:
-            seq = blk(seq)
-
-        seq = self.out_norm(seq)
-        cls_feat = seq[:, :1, :]       # [B,1,D]
-        board_feat = seq[:, 1:, :]     # [B,64,D]
-
-        # Heads
-        value_scalar, wdl_logits = self.value_head(cls_feat)        # scalar in [-1,1], logits [B,3]
-        policy_logits = self.policy_head(board_feat)                 # [B,4608]
-
-        # ----------------- Training path -----------------
-        if self.training:
-            assert value_target is not None and policy_target is not None
-
-            # ----- Value losses -----
-            # 1) WDL (piecewise linear mapping from scalar target)
-            if self.use_wdl:
-                vt = value_target.view(-1)  # [B]
-                W = torch.clamp(vt, min=0.0)              # relu(v)
-                L = torch.clamp(-vt, min=0.0)             # relu(-v)
-                D = torch.clamp(1.0 - W - L, min=0.0)
-                wdl_targets = torch.stack([W, D, L], dim=1)  # [B,3]
-                wdl_targets = wdl_targets / (wdl_targets.sum(dim=1, keepdim=True) + 1e-8)
-
-                logp = F.log_softmax(wdl_logits, dim=1)
-                wdl_loss = -(wdl_targets * logp).sum(dim=1).mean()
-            else:
-                wdl_loss = 0.0 * value_scalar.mean()  # no-op
-
-            # 2) Scalar MSE to target in [-1,1]
-            scalar_loss = self.mse_loss(value_scalar, value_target.view(B, 1))
-
-            # 3) Consistency: (W-L) ≈ scalar
-            wdl_probs = F.softmax(wdl_logits, dim=1)
-            w_minus_l = (wdl_probs[:, 0:1] - wdl_probs[:, 2:3])  # [B,1]
-            calib_loss = self.mse_loss(w_minus_l, value_scalar.detach())  # keep consistency mild
-
-            # 4) Material proxy anchor (tiny)
-            if material_proxy is not None:
-                material_loss = self.mse_loss(value_scalar, material_proxy)
-            else:
-                material_loss = 0.0 * value_scalar.mean()
-
-            value_loss = (
-                self.wdl_weight * wdl_loss
-                + self.scalar_weight * scalar_loss
-                + self.calibration_weight * calib_loss
-                + self.material_weight * material_loss
-            )
-
-            # ----- Policy loss -----
-            if policy_target.dim() == 1 or (policy_target.dim() == 2 and policy_target.size(1) == 1):
-                # target is a move index (already legal)
-                policy_loss = self.cross_entropy_loss(policy_logits, policy_target.view(B))
-            else:
-                # soft distribution over 4608; mask illegal logits and renormalize targets over legal moves
-                logits = policy_logits
-                pm = None
-                if self.mask_illegal_in_training and policy_mask is not None:
-                    pm = policy_mask.view(B, -1).to(dtype=torch.bool)
-                    mask_val = -1e4 if logits.dtype == torch.float16 else -1e9
-                    logits = logits.masked_fill(~pm, mask_val)
-
-                log_policy = F.log_softmax(logits, dim=1)
-
-                tgt = policy_target
-                if pm is not None:
-                    # remove any target mass on illegal moves, then renormalize
-                    tgt = tgt * pm.to(tgt.dtype)
-                    denom = tgt.sum(dim=1, keepdim=True).clamp_min(1e-12)
-                    tgt = tgt / denom
-                else:
-                    # if no mask is provided, just renormalize
-                    tgt = tgt / tgt.sum(dim=1, keepdim=True).clamp_min(1e-12)
-
-                policy_loss = -(tgt * log_policy).sum(dim=1).mean()
-
-        # ----------------- Inference path -----------------
+        if material_proxy is not None:
+            material_loss = self.mse_loss(value_scalar, material_proxy)
         else:
-            # Apply legal mask and softmax for policy
-            if policy_mask is not None:
-                pm = policy_mask.view(B, -1).to(dtype=torch.bool)
-                mask_val = -1e4 if policy_logits.dtype == torch.float16 else -1e9
-                policy_logits = policy_logits.masked_fill(~pm, mask_val)
-            policy_softmax = F.softmax(policy_logits, dim=1)
+            material_loss = 0.0 * value_scalar.mean()
 
-            # Return scalar value in [-1,1]
-            return value_scalar, policy_softmax
+        value_loss = (
+            self.wdl_weight * wdl_loss
+            + (1.0 - self.wdl_weight) * scalar_loss
+            + self.calibration_weight * calibration_loss
+            + self.material_weight * material_loss
+        )
+
+        # -- Policy loss --
+        if policy_target.dim() == 1 or (policy_target.dim() == 2 and policy_target.size(1) == 1):
+            # hard index target
+            policy_loss = self.cross_entropy_loss(policy_logits, policy_target.view(B))
+        else:
+            # soft distribution over 4608
+            logits = policy_logits
+            pm_bool = None
+            if self.mask_illegal_in_training and policy_mask is not None:
+                pm_bool = policy_mask.view(B, -1).to(dtype=torch.bool)  # [B,4608]
+                mask_val = -1e4 if logits.dtype == torch.float16 else -1e9
+                logits = logits.masked_fill(~pm_bool, mask_val)
+
+            log_policy = F.log_softmax(logits, dim=1)
+
+            tgt = policy_target
+            if pm_bool is not None:
+                # zero out illegal entries, then renormalize over legal moves only
+                tgt = tgt * pm_bool.to(tgt.dtype)
+                denom = tgt.sum(dim=1, keepdim=True).clamp_min(1e-12)
+                tgt = tgt / denom
+            else:
+                # if no mask given, just renormalize
+                tgt = tgt / tgt.sum(dim=1, keepdim=True).clamp_min(1e-12)
+
+            policy_loss = -(tgt * log_policy).sum(dim=1).mean()
+
+        total_loss = value_loss + self.policy_weight * policy_loss
+        return total_loss, value_loss, policy_loss
+
+    # ===== 4) Inference path =====
+    else:
+        if policy_mask is not None:
+            pm = policy_mask.view(B, -1).to(dtype=torch.bool)
+            mask_val = -1e4 if policy_logits.dtype == torch.float16 else -1e9
+            policy_logits = policy_logits.masked_fill(~pm, mask_val)
+        policy_softmax = F.softmax(policy_logits, dim=1)
+        return value_scalar, policy_softmax
 
 
 def count_parameters(model):
