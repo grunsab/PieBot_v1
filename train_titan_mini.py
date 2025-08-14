@@ -90,8 +90,8 @@ def parse_args():
                         help='Directory containing self-play training data (HDF5 files)')
     parser.add_argument('--mixed-ratio', type=float, default=0.7,
                         help='For mixed mode: ratio of RL data (0.0-1.0, default: 0.7)')
-    parser.add_argument('--label-smoothing-temp', type=float, default=0.15,
-                        help='Temperature for label smoothing (default: 0.15)')
+    parser.add_argument('--label-smoothing-temp', type=float, default=0.10,
+                        help='Temperature for label smoothing (default: 0.10)')
     parser.add_argument('--validation-split', type=float, default=0.1,
                         help='Validation split ratio (default: 0.1)')
     
@@ -322,6 +322,33 @@ def create_data_loaders(args, *, distributed=False, rank=0, world_size=1, is_mai
 def train_epoch(model, train_loader, optimizer, scheduler, scaler, args, epoch, writer, ema=None, *, is_main=True, distributed=False):
     """Train for one epoch."""
     model.train()
+
+    # ---- Early-phase anchors to stabilize piece values ----
+    model_module = model.module if hasattr(model, 'module') else model
+
+    # Fractional progress through training (0..1)
+    progress = (epoch) / max(1, args.epochs)
+
+    # Stronger anchors in the first ~10% of training, then relax
+    if progress < 0.10:
+        model_module.material_weight = 0.15   # default was 0.05
+        model_module.material_scale_cp = 800.0  # softer tanh; less saturation
+        model_module.wdl_weight = 0.55        # keep WDL primary
+        model_module.calibration_weight = 0.15
+    elif progress < 0.30:
+        model_module.material_weight = 0.08
+        model_module.material_scale_cp = 700.0
+        model_module.wdl_weight = 0.58
+        model_module.calibration_weight = 0.20
+    else:
+        # back to the defaults for full flexibility later
+        model_module.material_weight = 0.05
+        model_module.material_scale_cp = 600.0
+        model_module.wdl_weight = 0.60
+        model_module.calibration_weight = 0.25
+    # -------------------------------------------------------
+
+
     
     total_loss = 0
     total_value_loss = 0
