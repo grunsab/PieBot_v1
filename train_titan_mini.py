@@ -122,8 +122,191 @@ def parse_args():
     
     return parser.parse_args()
 
-# (EMA, SyntheticTitanDataset, create_data_loaders implementations are assumed to be present 
-# from the user's provided context and remain unchanged. Omitted for brevity.)
+
+class EMA:
+    """Exponential Moving Average for model parameters."""
+    
+    def __init__(self, model, decay=0.9999):
+        self.model = model
+        self.decay = decay
+        self.shadow = {}
+        self.backup = {}
+        
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+    
+    def update(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = self.decay * self.shadow[name] + (1 - self.decay) * param.data
+    
+    def apply_shadow(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                self.backup[name] = param.data
+                param.data = self.shadow[name]
+    
+    def restore(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                param.data = self.backup[name]
+        self.backup = {}
+
+
+class SyntheticTitanDataset(Dataset):
+    """Tiny synthetic dataset for quick dry-runs."""
+    def __init__(self, num_samples: int, input_planes: int):
+        self.n = max(1, int(num_samples))
+        self.c = int(input_planes)
+
+    def __len__(self):
+        return self.n
+
+    def __getitem__(self, idx):
+        position = torch.randn(self.c, 8, 8)
+        # Now using Tanh activation, so values should be in [-1, 1] range
+        # -1 = loss, 0 = draw, 1 = win (from current player's perspective)
+        value = torch.rand(1).item() * 2 - 1  # [-1, 1] range for Tanh
+        policy = torch.randint(0, 72 * 64, (1,), dtype=torch.long).squeeze(0)
+        mask = torch.ones(72, 8, 8, dtype=torch.int64)  # allow all moves for simplicity
+        return position, torch.tensor(value, dtype=torch.float32), policy, mask
+
+
+def create_data_loaders(args, *, distributed=False, rank=0, world_size=1, is_main=True, device=None):
+    """Create training and validation data loaders."""
+    # Detect device for DataLoader tuning (pin_memory and default batch size)
+    if device is None:
+        device, _ = get_optimal_device()
+    elif isinstance(device, str):
+        device = torch.device(device)
+
+    # Dry-run synthetic dataset path
+    if args.dry_run:
+        print('Dry-run mode: using synthetic random dataset')
+        n_train = args.dry_samples
+        n_val = max(1, n_train // 4)
+        train_dataset = SyntheticTitanDataset(n_train, args.input_planes)
+        val_dataset = SyntheticTitanDataset(n_val, args.input_planes)
+
+        batch_size = args.batch_size if args.batch_size else (2 if device.type == 'mps' else 4)
+        num_workers = 0
+
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=False,
+            persistent_workers=False,
+        )
+
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=False,
+            persistent_workers=False,
+        )
+
+        print(f'Training samples (dry): {len(train_dataset)}, Validation samples (dry): {len(val_dataset)}')
+        return train_loader, val_loader
+
+    # Create dataset based on training mode
+    if args.mode == 'curriculum':
+        if is_main:
+            print(f'Training mode: Titan Mini Curriculum learning (progressive difficulty)')
+            print(f'Curriculum directory: {args.curriculum_dir}')
+        enhanced = args.input_planes > 16
+        dataset = TitanCurriculumDataset(args.curriculum_config, enhanced_encoder=enhanced)
+        
+        # Load saved state if resuming
+        if args.curriculum_state and os.path.exists(args.curriculum_state):
+            dataset.load_state(args.curriculum_state)
+            if is_main:
+                print(f'Loaded curriculum state from {args.curriculum_state}')
+        
+        # Return curriculum dataset directly for special handling
+        return dataset, None
+    elif args.mode == 'mixed-curriculum':
+        if is_main:
+            print(f'Training mode: Titan Mini Mixed curriculum learning')
+            print(f'Curriculum directory: {args.curriculum_dir}')
+        enhanced = args.input_planes > 16
+        dataset = TitanMixedCurriculumDataset(args.curriculum_config, enhanced_encoder=enhanced)
+    elif args.mode == 'supervised':
+        print(f'Training mode: Supervised learning on CCRL dataset')
+        enhanced = args.input_planes > 16
+        dataset = CCRLDataset(args.ccrl_dir, soft_targets=True, temperature=args.label_smoothing_temp, enhanced_encoder=enhanced)
+    elif args.mode == 'rl':
+        print('Training mode: Reinforcement learning on self-play data')
+        dataset = RLDataset(args.rl_dir)
+    else:  # mixed mode
+        print(f'Training mode: Mixed (RL ratio: {args.mixed_ratio})')
+        enhanced = args.input_planes > 16
+        ccrl_ds = CCRLDataset(args.ccrl_dir, soft_targets=True, temperature=args.label_smoothing_temp, enhanced_encoder=enhanced)
+        rl_ds = RLDataset(args.rl_dir)
+
+        # Calculate sizes for balanced sampling
+        total_size = max(len(ccrl_ds), len(rl_ds))
+        rl_size = int(total_size * args.mixed_ratio)
+        ccrl_size = total_size - rl_size
+
+        # Create subsets with replacement if necessary
+        ccrl_indices = np.random.choice(len(ccrl_ds), ccrl_size, replace=True)
+        rl_indices = np.random.choice(len(rl_ds), rl_size, replace=True)
+
+        ccrl_subset = Subset(ccrl_ds, ccrl_indices)
+        rl_subset = Subset(rl_ds, rl_indices)
+
+        dataset = ConcatDataset([ccrl_subset, rl_subset])
+        print(f'Dataset sizes - CCRL: {len(ccrl_subset)}, RL: {len(rl_subset)}')
+
+    # Split into train and validation
+    val_size = int(len(dataset) * args.validation_split)
+    train_size = len(dataset) - val_size
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+
+    if is_main:
+        print(f'Training samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}')
+
+    # Get optimal batch size and workers
+    if args.batch_size_total is not None and distributed and world_size > 1:
+        batch_size = max(1, args.batch_size_total // world_size)
+    elif args.batch_size is not None:
+        batch_size = args.batch_size
+    else:
+        # Titan-Mini is smaller, so we can use larger batch sizes
+        batch_size = 128 if device.type == 'mps' else (get_batch_size_for_device() // 4)
+    num_workers = get_num_workers_for_device()
+
+    # Distributed samplers
+    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True) if distributed and world_size > 1 else None
+    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False) if distributed and world_size > 1 else None
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        num_workers=num_workers,
+        pin_memory=(device.type == 'cuda'),
+        persistent_workers=True if num_workers > 0 else False
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=max(1, batch_size * 2),
+        shuffle=False,
+        sampler=val_sampler,
+        num_workers=num_workers,
+        pin_memory=(device.type == 'cuda'),
+        persistent_workers=True if num_workers > 0 else False
+    )
+
+    return train_loader, val_loader
+
 
 def train_epoch(model, train_loader, optimizer, scheduler, scaler, args, epoch, writer, ema=None, *, is_main=True, distributed=False):
     """Train for one epoch."""

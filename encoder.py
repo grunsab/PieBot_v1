@@ -394,6 +394,25 @@ def callNeuralNetwork( board, neuralNetwork, history=None ):
     return value, move_probabilities
 
 
+def parseMoveToIndex(move, board):
+    """
+    Convert a chess.Move to policy index (0-4607).
+    
+    Args:
+        move: chess.Move object
+        board: chess.Board object
+        
+    Returns:
+        Index in policy vector, or -1 if invalid
+    """
+    try:
+        plane_idx, rank_idx, file_idx = moveToIdx(move)
+        # Convert to flat index: plane * 64 + rank * 8 + file
+        index = plane_idx * 64 + rank_idx * 8 + file_idx
+        return index
+    except:
+        return -1
+
 def callNeuralNetworkBatched( boards, neuralNetwork, histories=None ):
     """
     Run neural network on each board given. Return outputs.
