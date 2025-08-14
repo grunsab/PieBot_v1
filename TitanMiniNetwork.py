@@ -1,4 +1,4 @@
-# TitanMiniNetwork.py (stabilized)
+# TitanMiniNetwork.py (Revised with Fixes and Auxiliary Losses)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,13 +12,13 @@ class RelativePositionBias(nn.Module):
     """
     2D (rank,file) relative bias with bounding to avoid runaway scores.
     """
+    # (Implementation remains as provided by user)
     def __init__(self, num_heads, max_relative_position=7, bias_scale=2.0):
         super().__init__()
         self.num_heads = num_heads
         self.max_relative_position = max_relative_position
-        self.bias_scale = float(bias_scale)  # scale after tanh bound
+        self.bias_scale = float(bias_scale)
         num_buckets = 2 * max_relative_position + 1
-        # [rank_bucket, file_bucket, heads]
         self.relative_bias_table = nn.Parameter(
             torch.zeros(num_buckets, num_buckets, num_heads)
         )
@@ -34,14 +34,13 @@ class RelativePositionBias(nn.Module):
         df = files.unsqueeze(1) - files.unsqueeze(0)
         r_idx = dr.clamp(-self.max_relative_position, self.max_relative_position) + self.max_relative_position
         f_idx = df.clamp(-self.max_relative_position, self.max_relative_position) + self.max_relative_position
-        # Bound via tanh to keep within [-bias_scale, bias_scale]
-        bias = torch.tanh(self.relative_bias_table[r_idx, f_idx]) * self.bias_scale  # [64,64,heads]
-        bias_64 = bias.permute(2, 0, 1).unsqueeze(0)  # [1,H,64,64]
+        
+        bias = torch.tanh(self.relative_bias_table[r_idx, f_idx]) * self.bias_scale
+        bias_64 = bias.permute(2, 0, 1).unsqueeze(0)
 
         if seq_len == 64:
             return bias_64
 
-        # For [CLS]+64: pad the [0,0] position with 0 and place bias in 1:,1:
         out = torch.zeros(1, self.num_heads, 65, 65, device=device, dtype=bias_64.dtype)
         out[:, :, 1:, 1:] = bias_64
         return out
@@ -51,6 +50,7 @@ class ChessPositionalEncoding(nn.Module):
     """
     Rich positional encoding: absolute + file/rank/diag/anti-diag.
     """
+    # (Implementation remains as provided by user)
     def __init__(self, d_model, max_seq_len=64):
         super().__init__()
         self.absolute_pos_embedding = nn.Parameter(torch.zeros(1, max_seq_len, d_model))
@@ -83,54 +83,46 @@ class MultiHeadSelfAttention(nn.Module):
     """
     MHA with fp32 attention math (under AMP) for numerical stability.
     """
+    # (Implementation remains as provided by user, updated autocast call for compatibility)
     def __init__(self, d_model, num_heads, dropout=0.1, attn_clamp: float = 50.0):
         super().__init__()
         assert d_model % num_heads == 0
         self.d_model = d_model
         self.num_heads = num_heads
         self.d_k = d_model // num_heads
-        self.W_q = nn.Linear(d_model, d_model)
-        self.W_k = nn.Linear(d_model, d_model)
-        self.W_v = nn.Linear(d_model, d_model)
-        self.W_o = nn.Linear(d_model, d_model)
+        self.W_q = nn.Linear(d_model, d_model); self.W_k = nn.Linear(d_model, d_model)
+        self.W_v = nn.Linear(d_model, d_model); self.W_o = nn.Linear(d_model, d_model)
         self.dropout = nn.Dropout(dropout)
         self.relative_position_bias = RelativePositionBias(num_heads)
-        self.attn_clamp = float(attn_clamp)  # optional pre-softmax clamp
+        self.attn_clamp = float(attn_clamp)
 
     def forward(self, x, mask=None):
-        """
-        x: [B, T, D]
-        mask: optional boolean or 0/1 mask broadcastable to [B, 1, T, T]
-        """
         B, T, _ = x.shape
         orig_dtype = x.dtype
+        device_type = x.device.type
 
         # Disable autocast for attention math; do it in fp32
-        with torch.cuda.amp.autocast(enabled=False):
+        # Use torch.autocast(device_type=...) for broader compatibility
+        with torch.autocast(device_type=device_type, enabled=False):
             xf = x.float()
-            Q = self.W_q(xf).view(B, T, self.num_heads, self.d_k).transpose(1, 2)  # [B,H,T,d]
+            Q = self.W_q(xf).view(B, T, self.num_heads, self.d_k).transpose(1, 2)
             K = self.W_k(xf).view(B, T, self.num_heads, self.d_k).transpose(1, 2)
             V = self.W_v(xf).view(B, T, self.num_heads, self.d_k).transpose(1, 2)
 
-            scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)  # [B,H,T,T]
+            scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
 
-            # Relative bias (fp32)
             if T in (64, 65):
                 scores = scores + self.relative_position_bias(T)
 
             if mask is not None:
-                # Expect mask broadcastable to [B,1,T,T] with 1=keep, 0=mask
-                # Use -1e4 (fp32-safe, fp16-safe) to avoid -inf underflow
                 scores = scores.masked_fill(mask == 0, -1e4)
 
-            # Optional clamp to prevent extreme logits
             if self.attn_clamp is not None and self.attn_clamp > 0:
                 scores = scores.clamp(min=-self.attn_clamp, max=self.attn_clamp)
 
-            # Softmax in fp32
             attn = F.softmax(scores, dim=-1)
             attn = self.dropout(attn)
-            context = torch.matmul(attn, V)  # [B,H,T,d]
+            context = torch.matmul(attn, V)
             context = context.transpose(1, 2).contiguous().view(B, T, self.d_model)
 
             out = self.W_o(context).to(orig_dtype)
@@ -138,6 +130,7 @@ class MultiHeadSelfAttention(nn.Module):
         return out
 
 class GEGLU(nn.Module):
+    # (Implementation remains as provided by user)
     def __init__(self, d_model, d_ff):
         super().__init__()
         self.proj = nn.Linear(d_model, d_ff * 2)
@@ -151,6 +144,7 @@ class TransformerBlock(nn.Module):
     """
     Pre-LN block; attention fp32; FFN GEGLU.
     """
+    # (Implementation remains as provided by user)
     def __init__(self, d_model, num_heads, d_ff, dropout=0.1):
         super().__init__()
         self.norm1 = nn.LayerNorm(d_model, eps=1e-5)
@@ -161,6 +155,7 @@ class TransformerBlock(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
 
     def forward(self, x, mask=None):
+        # Stabilization occurs here via Pre-LN
         attn_out = self.attention(self.norm1(x), mask)
         x = x + self.dropout1(attn_out)
         ffn_out = self.ffn(self.norm2(x))
@@ -168,19 +163,14 @@ class TransformerBlock(nn.Module):
         return x
 
 # ==============================================================================
-# 3) Output Heads
+# 3) Output Heads (Modified for Auxiliary Losses)
 # ==============================================================================
 
 class PolicyHead(nn.Module):
-    """
-    Outputs logits in PLANE-MAJOR layout to match encoder/mask/targets:
-      index = plane * 64 + square
-    Given board_features [B, 64, D], we first project to [B, 64, 72] (per-square, per-plane),
-    then permute to [B, 72, 64] and flatten -> [B, 4608].
-    """
+    # (Implementation remains as provided by user)
     def __init__(self, d_model, num_move_actions_per_square=72, logit_scale=1.0):
         super().__init__()
-        self.num_move_actions_per_square = num_move_actions_per_square  # 72
+        self.num_move_actions_per_square = num_move_actions_per_square
         self.proj = nn.Linear(d_model, num_move_actions_per_square)
         self.logit_scale = nn.Parameter(torch.tensor(float(logit_scale)))
 
@@ -191,43 +181,92 @@ class PolicyHead(nn.Module):
         logits = logits_plane_sq.view(x.shape[0], -1)          # [B, 4608] PLANE-MAJOR
         return logits
 
+# NEW: Auxiliary Calibration Head
+class CalibrationHead(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.proj = nn.Linear(input_dim, 1)
+        self.output_activation = nn.Tanh()
+    
+    def forward(self, x):
+        return self.output_activation(self.proj(x))
+
 class ValueHead(nn.Module):
-    def __init__(self, d_model, legacy_mode=False):
+    # Modified to support Calibration Loss
+    def __init__(self, d_model, legacy_mode=False, use_calibration=True):
         super().__init__()
         self.legacy_mode = legacy_mode
-        self.d_model = d_model
+        self.use_calibration = use_calibration
+        self.calibration_head = None
+
         if legacy_mode:
             self.fc1 = nn.Linear(d_model, d_model // 2); self.activation1 = nn.GELU(); self.dropout1 = nn.Dropout(0.1)
             self.fc2 = nn.Linear(d_model // 2, 1); self.output_activation = nn.Tanh()
+            if self.use_calibration:
+                self.calibration_head = CalibrationHead(d_model // 2)
         else:
             self.fc1 = nn.Linear(d_model, d_model // 2); self.activation1 = nn.GELU(); self.dropout1 = nn.Dropout(0.1)
             self.fc2 = nn.Linear(d_model // 2, 128); self.activation2 = nn.GELU(); self.dropout2 = nn.Dropout(0.1)
             self.fc3 = nn.Linear(128, 1); self.output_activation = nn.Tanh()
+            if self.use_calibration:
+                self.calibration_head = CalibrationHead(128)
+
     def forward(self, x):
         x = x.squeeze(1)
+        intermediate_features = None
+
         if self.legacy_mode:
             x = self.fc1(x); x = self.activation1(x); x = self.dropout1(x)
+            if self.use_calibration: intermediate_features = x
             x = self.fc2(x); x = self.output_activation(x)
         else:
             x = self.fc1(x); x = self.activation1(x); x = self.dropout1(x)
             x = self.fc2(x); x = self.activation2(x); x = self.dropout2(x)
+            if self.use_calibration: intermediate_features = x
             x = self.fc3(x); x = self.output_activation(x)
+        
+        if self.training and self.use_calibration and intermediate_features is not None:
+            calibration_output = self.calibration_head(intermediate_features)
+            return x, calibration_output
+        
         return x
 
 class WDLValueHead(nn.Module):
-    def __init__(self, d_model):
+    # Modified to support Calibration Loss (Rewritten from Sequential)
+    def __init__(self, d_model, use_calibration=True):
         super().__init__()
-        self.value_proj = nn.Sequential(
-            nn.Linear(d_model, d_model // 2), nn.GELU(), nn.Dropout(0.1),
-            nn.Linear(d_model // 2, 128), nn.GELU(), nn.Dropout(0.1),
-            nn.Linear(128, 3),
-        )
+        self.use_calibration = use_calibration
+        self.calibration_head = None
+
+        # Define layers explicitly
+        self.fc1 = nn.Linear(d_model, d_model // 2); self.act1 = nn.GELU(); self.drop1 = nn.Dropout(0.1)
+        self.fc2 = nn.Linear(d_model // 2, 128); self.act2 = nn.GELU(); self.drop2 = nn.Dropout(0.1)
+        self.fc3 = nn.Linear(128, 3)
+
+        if self.use_calibration:
+             self.calibration_head = CalibrationHead(128)
+
     def forward(self, x):
-        return self.value_proj(x.squeeze(1))
+        x = x.squeeze(1)
+        x = self.fc1(x); x = self.act1(x); x = self.drop1(x)
+        x = self.fc2(x); x = self.act2(x); x = self.drop2(x)
+        
+        intermediate_features = x
+        x = self.fc3(x)
+
+        if self.training and self.use_calibration:
+            calibration_output = self.calibration_head(intermediate_features)
+            return x, calibration_output
+
+        return x
 
 # ==============================================================================
-# 4) Titan-Mini (stabilized)
+# 4) Titan-Mini (Revised with Fixes and Auxiliary Losses)
 # ==============================================================================
+
+# Standard Centipawn Values (Order: Empty, P, R, B, N, Q, K)
+# Matches the order derived from encoder.py (P, R, B, N, Q, K)
+CP_VALUES = torch.tensor([0., 100., 500., 320., 300., 900., 20000.], dtype=torch.float32)
 
 class TitanMini(nn.Module):
     def __init__(
@@ -241,11 +280,23 @@ class TitanMini(nn.Module):
         self.use_wdl = use_wdl
         self.input_planes = input_planes
 
+        # NEW: Configuration for Auxiliary Losses (Tuned by train_titan_mini.py)
+        # These are default weights; they will be dynamically adjusted during training.
+        self.material_weight = 0.05
+        self.calibration_weight = 0.25
+        self.wdl_weight = 0.60 # Weight for the main WDL/Value loss
+
         # Sparse input path (16 planes)
         if input_planes < 12:
             raise ValueError(f"Input planes must be >=12, got {input_planes}")
-        self.piece_type_embedding = nn.Embedding(7, d_model)  # Empty=0 + 6
-        self.color_embedding = nn.Embedding(2, d_model)       # 0=friendly/empty, 1=enemy
+        self.piece_type_embedding = nn.Embedding(7, d_model)
+        self.color_embedding = nn.Embedding(2, d_model)
+
+        # NEW: Material Projection (for Anchor Loss)
+        self.material_proj = nn.Linear(d_model, 1)
+        # Register CP_VALUES as a buffer so it moves with the model
+        self.register_buffer('cp_values_target', CP_VALUES)
+
         num_global_features = max(0, input_planes - 12)
         self.global_feature_proj = nn.Linear(num_global_features or 1, d_model) if num_global_features > 0 else None
 
@@ -254,11 +305,19 @@ class TitanMini(nn.Module):
             TransformerBlock(d_model, num_heads, d_ff, dropout)
             for _ in range(num_layers)
         ])
-        # NEW: input norm to stabilize first pass
-        self.input_norm = nn.LayerNorm(d_model, eps=1e-5)
+        
+        # FIX 1: Removed self.input_norm. Stabilization relies on Pre-LN in TransformerBlock.
+        # self.input_norm = nn.LayerNorm(d_model, eps=1e-5) 
+        
         self.output_norm = nn.LayerNorm(d_model, eps=1e-5)
 
-        self.value_head = WDLValueHead(d_model) if use_wdl else ValueHead(d_model, legacy_mode=legacy_value_head)
+        # Value Head (initialized with support for Calibration Loss)
+        use_calibration = True
+        if use_wdl:
+            self.value_head = WDLValueHead(d_model, use_calibration=use_calibration)
+        else:
+            self.value_head = ValueHead(d_model, legacy_mode=legacy_value_head, use_calibration=use_calibration)
+        
         self.policy_head = PolicyHead(d_model, num_move_actions_per_square=72, logit_scale=1.0)
 
         self.mse_loss = nn.MSELoss()
@@ -269,6 +328,7 @@ class TitanMini(nn.Module):
 
     # ---- sparse input helpers ----
     def _process_sparse_input(self, x):
+        # (Implementation remains the same)
         B, C, H, W = x.shape
         x_flat = x.view(B, C, H*W)
         friendly_planes = x_flat[:, 0:12:2]
@@ -283,18 +343,20 @@ class TitanMini(nn.Module):
         is_occupied = (is_friendly + is_enemy) > 0.5
         piece_type_indices = (type_indices_0_5 + 1) * is_occupied.long()
 
-        type_embs = self.piece_type_embedding(piece_type_indices)  # [B,64,D]
-        color_embs = self.color_embedding(color_indices)           # [B,64,D]
-        board_tokens = type_embs + color_embs  # [B,64,D]
+        type_embs = self.piece_type_embedding(piece_type_indices)
+        color_embs = self.color_embedding(color_indices)
+        board_tokens = type_embs + color_embs
 
         return board_tokens, type_embs, is_friendly.float(), is_enemy.float()
 
     # ---- init ----
     def _init_parameters(self):
+        # (Implementation remains the same, ensuring robust initialization)
         std = 0.02
         def trunc_normal_(t, s):
             if t is None: return
             if hasattr(nn.init, "trunc_normal_"):
+                # Ensure tensor is float32 before in-place init if using AMP
                 if t.dtype in (torch.float16, torch.bfloat16):
                     t.data = t.data.to(torch.float32)
                 nn.init.trunc_normal_(t, std=s, a=-2*s, b=2*s)
@@ -316,10 +378,12 @@ class TitanMini(nn.Module):
             trunc_normal_(self.positional_encoding.absolute_pos_embedding, std)
 
     def _init_head_specific_weights(self):
+        # (Updated to initialize auxiliary heads)
         std_head = 0.01
         def trunc_normal_(t, s):
             if t is None: return
             if hasattr(nn.init, "trunc_normal_"):
+                # Ensure tensor is float32 before in-place init if using AMP
                 if t.dtype in (torch.float16, torch.bfloat16):
                     t.data = t.data.to(torch.float32)
                 nn.init.trunc_normal_(t, std=s, a=-2*s, b=2*s)
@@ -328,19 +392,30 @@ class TitanMini(nn.Module):
 
         if hasattr(self.policy_head, 'proj'):
             trunc_normal_(self.policy_head.proj.weight, std_head)
-        # Final value layers
+        
+        # Initialize auxiliary heads
+        if hasattr(self, 'material_proj'):
+            trunc_normal_(self.material_proj.weight, std_head)
+
+        # Final value layers and calibration heads
         if self.use_wdl:
-            final_layer = self.value_head.value_proj[-1]
-            if isinstance(final_layer, nn.Linear):
-                trunc_normal_(final_layer.weight, std_head)
+            # WDLValueHead now uses explicit fc3
+            if hasattr(self.value_head, 'fc3'):
+                 trunc_normal_(self.value_head.fc3.weight, std_head)
+            if hasattr(self.value_head, 'calibration_head') and self.value_head.calibration_head:
+                 trunc_normal_(self.value_head.calibration_head.proj.weight, std_head)
         else:
-            final_layer = self.value_head.fc2 if self.value_head.legacy_mode else self.value_head.fc3
-            trunc_normal_(final_layer.weight, std_head)
+            if hasattr(self.value_head, 'legacy_mode'):
+                final_layer = self.value_head.fc2 if self.value_head.legacy_mode else self.value_head.fc3
+                if final_layer:
+                    trunc_normal_(final_layer.weight, std_head)
+            if hasattr(self.value_head, 'calibration_head') and self.value_head.calibration_head:
+                 trunc_normal_(self.value_head.calibration_head.proj.weight, std_head)
 
     # ---- forward ----
     def forward(self, x, value_target=None, policy_target=None, policy_mask=None,
                 valueTarget=None, policyTarget=None, policyMask=None):
-        # Backward-compat kwargs
+        # (Backward-compat kwargs remain the same)
         if valueTarget is not None: value_target = valueTarget
         if policyTarget is not None: policy_target = policyTarget
         if policyMask is not None: policy_mask = policyMask
@@ -349,29 +424,30 @@ class TitanMini(nn.Module):
         # Sparse input path
         tokens_symmetric, type_embs, is_friendly, is_enemy = self._process_sparse_input(x)
 
-        # Global context (castling rights etc.)
+        # Global context
         global_proj = torch.zeros(B, self.d_model, device=x.device, dtype=x.dtype)
         if self.global_feature_proj is not None:
-            global_features = x[:, 12:, 0, 0]  # [B, num_global]
-            # ensure non-empty last dim
+            global_features = x[:, 12:, 0, 0]
             global_proj = self.global_feature_proj(global_features)
 
         # Signed material sum for CLS (compute in fp32 for stability)
         calc_dtype = torch.float32 if x.dtype == torch.float16 else x.dtype
-        sign_mask = (is_friendly.to(calc_dtype) - is_enemy.to(calc_dtype)).unsqueeze(-1)  # [B,64,1]
-        signed_material_sum = torch.sum(type_embs.to(calc_dtype) * sign_mask, dim=1)      # [B,D]
-        cls = (signed_material_sum.to(x.dtype) + global_proj).unsqueeze(1)                 # [B,1,D]
+        sign_mask = (is_friendly.to(calc_dtype) - is_enemy.to(calc_dtype)).unsqueeze(-1)
+        signed_material_sum = torch.sum(type_embs.to(calc_dtype) * sign_mask, dim=1)
+        cls = (signed_material_sum.to(x.dtype) + global_proj).unsqueeze(1)
 
         # Enhance board tokens with global context
-        board_tokens = tokens_symmetric + global_proj.unsqueeze(1)  # [B,64,D]
+        board_tokens = tokens_symmetric + global_proj.unsqueeze(1)
 
-        # Positional encodings (+ small scale multiplier helps)
+        # Positional encodings
         pos = self.positional_encoding(board_tokens)
         board_tokens = board_tokens + pos
 
-        # Combine, then input LayerNorm for extra stability
-        x_combined = torch.cat([cls, board_tokens], dim=1)  # [B,65,D]
-        x_combined = self.input_norm(x_combined)
+        # Combine
+        x_combined = torch.cat([cls, board_tokens], dim=1)
+        
+        # FIX 1: Removed input_norm application.
+        # x_combined = self.input_norm(x_combined)
 
         # Transformer stack
         for block in self.transformer_blocks:
@@ -381,63 +457,104 @@ class TitanMini(nn.Module):
         cls_features = x_combined[:, 0:1, :]
         board_features = x_combined[:, 1:, :]
 
-        value = self.value_head(cls_features)        # [B,1] or [B,3]
-        policy = self.policy_head(board_features)    # [B,4608]
+        # Heads
+        # Value head might return (value, calibration_output) during training
+        value_output = self.value_head(cls_features)
+        calibration_output = None
+        if self.training and isinstance(value_output, tuple):
+            value, calibration_output = value_output
+        else:
+            value = value_output
+        
+        policy = self.policy_head(board_features)
 
         # ---- TRAINING PATH ----
         if self.training:
             assert value_target is not None and policy_target is not None
 
-            # Apply legal move mask to policy logits (fp16-safe constant)
+            # (Policy masking and finite checks remain the same)
             if policy_mask is not None:
                 pm = policy_mask.view(B, -1)
                 policy = policy.masked_fill(pm == 0, -1e4)
 
-            # Guard against non-finite logits
             if not torch.isfinite(policy).all():
-                policy = torch.nan_to_num(policy, nan=0.0, posinf=1e4, neginf=-1e4)
+                # Use slightly smaller constants for posinf/neginf for safety
+                policy = torch.nan_to_num(policy, nan=0.0, posinf=5e3, neginf=-5e3)
 
-            # ----- Value loss -----
+            # ----- Main Value loss -----
+            # (WDL/Value loss calculation remains the same - computed in FP32)
             if self.use_wdl:
-                # value_target can be [B,3] (WDL) or [B,1] scalar in [-1,1]
                 if value_target.dim() == 2 and value_target.size(1) == 3:
                     wdl_targets = value_target
                 else:
                     v = value_target.view(-1)
-                    W = torch.relu(v)
-                    L = torch.relu(-v)
-                    D = torch.clamp(1.0 - W - L, min=0.0)
+                    W = torch.relu(v); L = torch.relu(-v); D = torch.clamp(1.0 - W - L, min=0.0)
                     wdl_targets = torch.stack([W, D, L], dim=1)
+                
+                # Calculate loss in FP32
                 log_probs = F.log_softmax(value.float(), dim=1)
                 wdl_targets = wdl_targets / (wdl_targets.sum(dim=1, keepdim=True) + 1e-8)
                 value_loss = -(wdl_targets * log_probs).sum(dim=1).mean()
             else:
-                value_loss = self.mse_loss(value, value_target)
+                value_loss = self.mse_loss(value.float(), value_target.float())
 
             # ----- Policy loss -----
+            # (Policy loss calculation remains the same - computed in FP32)
             if policy_target.dim() == 1 or (policy_target.dim() == 2 and policy_target.size(1) == 1):
-                # hard targets (indices)
                 policy_loss = self.cross_entropy_loss(policy, policy_target.view(B))
             else:
-                # soft targets (distributions)
                 pt = policy_target.view(B, -1).float()
                 pt = pt + 1e-8
                 pt = pt / pt.sum(dim=1, keepdim=True)
-                logp = F.log_softmax(policy.float(), dim=1)  # compute in fp32
+                logp = F.log_softmax(policy.float(), dim=1)
                 policy_loss = -(pt * logp).sum(dim=1).mean()
 
-            total_loss = value_loss + self.policy_weight * policy_loss
-            # Final finite guard
+            # ----- Auxiliary Losses (NEW) -----
+            
+            # 1. Material Anchor Loss
+            material_loss = torch.tensor(0.0, device=x.device, dtype=value_loss.dtype)
+            if self.material_weight > 0:
+                # Project embeddings to scalars
+                projected_embeddings = self.material_proj(self.piece_type_embedding.weight).squeeze(1)
+                # Calculate MSE loss against target CP values (ensure FP32)
+                material_loss = F.mse_loss(projected_embeddings.float(), self.cp_values_target)
+
+            # 2. Calibration Loss
+            calibration_loss = torch.tensor(0.0, device=x.device, dtype=value_loss.dtype)
+            if self.calibration_weight > 0 and calibration_output is not None:
+                 # Determine the scalar target
+                if self.use_wdl:
+                    if value_target.dim() == 2 and value_target.size(1) == 3:
+                        # Convert WDL targets back to scalar: E = W - L
+                        scalar_target = value_target[:, 0] - value_target[:, 2]
+                    else:
+                        scalar_target = value_target.view(-1)
+                else:
+                    scalar_target = value_target.view(-1)
+                
+                # Calibration loss uses MSE against the scalar target (ensure FP32)
+                calibration_loss = F.mse_loss(calibration_output.view(-1).float(), scalar_target.float())
+
+            # Total Loss Combination
+            total_loss = (self.wdl_weight * value_loss + 
+                          self.policy_weight * policy_loss + 
+                          self.material_weight * material_loss +
+                          self.calibration_weight * calibration_loss)
+
+
+            # Final finite guard (remains the same)
             if not torch.isfinite(total_loss):
-                # zero out bad batch to avoid poisoning optimizer
-                total_loss = torch.zeros((), device=x.device, dtype=value.dtype, requires_grad=True)
+                # Ensure the zero tensor requires grad and matches loss dtype (FP32)
+                total_loss = torch.zeros((), device=x.device, dtype=value_loss.dtype, requires_grad=True)
                 value_loss = total_loss
                 policy_loss = total_loss
 
+            # Return the primary losses (value_loss, policy_loss) for monitoring consistency
             return total_loss, value_loss, policy_loss
 
         # ---- INFERENCE PATH ----
         else:
+            # (Implementation remains the same)
             if policy_mask is not None:
                 pm = policy_mask.view(B, -1)
                 policy = policy.masked_fill(pm == 0, -1e4)
