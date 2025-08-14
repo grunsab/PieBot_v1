@@ -405,8 +405,11 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, args, epoch, 
         
         # Mixed precision training (supports CUDA and MPS)
         if args.mixed_precision:
-            use_amp = hasattr(torch, 'autocast') and device.type in ('cuda', 'mps')
-            amp_ctx = torch.autocast(device_type=device.type, dtype=torch.float16) if use_amp else contextlib.nullcontext()
+            
+            use_amp = args.mixed_precision and device.type in ('cuda', 'mps')
+            amp_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else torch.float16
+            amp_ctx = torch.autocast(device_type=device.type, dtype=amp_dtype) if use_amp else contextlib.nullcontext()
+
             with amp_ctx:
                 loss, value_loss, policy_loss = model(position, value_target, policy_target, policy_mask)
                 loss = loss / args.gradient_accumulation
