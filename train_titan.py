@@ -64,7 +64,7 @@ def parse_args():
     p.add_argument('--rl-dir', type=str, default=rl_dir)
     p.add_argument('--mixed-ratio', type=float, default=0.7)
     p.add_argument('--label-smoothing-temp', type=float, default=0.15)
-    p.add_argument('--validation-split', type=float, default=0.1)
+    p.add_argument('--validation-split', type=float, default=0.05)
 
     # Dry run
     p.add_argument('--dry-run', action='store_true')
