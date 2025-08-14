@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import math
 
 # ==============================================================================
-# 1. Positional Encoding Modules (ChessPositionalEncoding Simplified)
+# 1. Positional Encoding Modules (ChessPositionalEncoding Restored)
 # ==============================================================================
 
 class RelativePositionBias(nn.Module):
@@ -44,21 +44,38 @@ class RelativePositionBias(nn.Module):
 
 class ChessPositionalEncoding(nn.Module):
     """
-    REFINEMENT B: Simplified Positional Encoding.
-    Uses only a basic learned absolute embedding. Relies on RPB for geometry.
+    Restored Rich Positional Encoding (Rank, File, Diagonal, Absolute).
+    Provides explicit spatial information to bootstrap learning.
     """
     def __init__(self, d_model, max_seq_len=64):
         super().__init__()
         self.absolute_pos_embedding = nn.Parameter(torch.zeros(1, max_seq_len, d_model))
         
-        # Removed: file_embedding, rank_embedding, diag_embedding, anti_diag_embedding
+        self.file_embedding = nn.Embedding(8, d_model)
+        self.rank_embedding = nn.Embedding(8, d_model)
+        self.diag_embedding = nn.Embedding(15, d_model)
+        self.anti_diag_embedding = nn.Embedding(15, d_model)
 
     def forward(self, x):
-        # x is passed only for shape context.
+        # x is passed to determine device and sequence length
         seq_len = x.shape[1]
         assert seq_len == 64, "This positional encoding is designed for an 8x8 board."
 
-        total_pos_embedding = self.absolute_pos_embedding[:, :seq_len, :]
+        positions = torch.arange(seq_len, device=x.device)
+        files = positions % 8
+        ranks = positions // 8
+        diagonals = ranks + files
+        anti_diagonals = ranks - files + 7
+
+        file_emb = self.file_embedding(files)
+        rank_emb = self.rank_embedding(ranks)
+        diag_emb = self.diag_embedding(diagonals)
+        anti_diag_emb = self.anti_diag_embedding(anti_diagonals)
+
+        total_pos_embedding = (
+            self.absolute_pos_embedding[:, :seq_len, :] + 
+            file_emb + rank_emb + diag_emb + anti_diag_emb
+        )
         
         # Return the encoding itself; addition happens in the main forward pass.
         return total_pos_embedding
@@ -113,7 +130,7 @@ class GEGLU(nn.Module):
         return self.out(F.gelu(x1) * x2)
 
 class TransformerBlock(nn.Module):
-    # (Implementation remains the same)
+    # (Implementation remains the same - Pre-LN architecture)
     def __init__(self, d_model, num_heads, d_ff, dropout=0.1):
         super().__init__()
         self.norm1 = nn.LayerNorm(d_model)
@@ -123,6 +140,7 @@ class TransformerBlock(nn.Module):
         self.ffn = GEGLU(d_model, d_ff)
         self.dropout2 = nn.Dropout(dropout)
     def forward(self, x, mask=None):
+        # Stabilization occurs here via Pre-LN
         attn_out = self.attention(self.norm1(x), mask)
         x = x + self.dropout1(attn_out)
         ffn_out = self.ffn(self.norm2(x))
@@ -181,7 +199,7 @@ class WDLValueHead(nn.Module):
         return self.value_proj(x.squeeze(1))
 
 # ==============================================================================
-# 4. Main Model: Titan-Mini (Updated with MDF and Simplified PE)
+# 4. Main Model: Titan-Mini (Corrected Architecture)
 # ==============================================================================
 
 class TitanMini(nn.Module):
@@ -203,7 +221,8 @@ class TitanMini(nn.Module):
         # Initialize placeholders
         self.input_projection = None; self.piece_type_embedding = None
         self.color_embedding = None; self.cls_token = None
-        self.global_feature_proj = None; self.input_norm = None
+        self.global_feature_proj = None
+        # FIX 1: Removed self.input_norm
 
         if self.use_piece_embeddings:
             # --- Strategy for Sparse Inputs ---
@@ -219,16 +238,13 @@ class TitanMini(nn.Module):
             if num_global_features > 0:
                 self.global_feature_proj = nn.Linear(num_global_features, d_model)
 
-            # 3. Input Stabilization
-            self.input_norm = nn.LayerNorm(d_model)
-
         else:
             # Strategy for Dense Inputs
             self.input_projection = nn.Conv2d(input_planes, d_model, kernel_size=1)
             self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
         
         # Shared components
-        # Uses the simplified ChessPositionalEncoding (REFINEMENT B)
+        # FIX 3: Uses the restored Rich ChessPositionalEncoding
         self.positional_encoding = ChessPositionalEncoding(d_model)
         
         self.transformer_blocks = nn.ModuleList([
@@ -291,15 +307,18 @@ class TitanMini(nn.Module):
         # (Standardized Truncated Normal initialization remains the same)
         std_dev = 0.02
         def trunc_normal_(tensor, std):
+            if tensor is None: return
             if hasattr(nn.init, 'trunc_normal_'):
+                # Ensure tensor is float before in-place operation if using AMP
+                if tensor.dtype in (torch.float16, torch.bfloat16):
+                     tensor.data = tensor.data.to(torch.float32)
                 nn.init.trunc_normal_(tensor, std=std, a=-2*std, b=2*std)
             else:
                 nn.init.normal_(tensor, std=std)
 
         for m in self.modules():
             if isinstance(m, (nn.Linear, nn.Conv2d, nn.Embedding)):
-                if hasattr(m, 'weight') and m.weight is not None:
-                   trunc_normal_(m.weight, std_dev)
+                trunc_normal_(getattr(m, 'weight', None), std_dev)
                 if hasattr(m, 'bias') and m.bias is not None:
                     nn.init.zeros_(m.bias)
             elif isinstance(m, nn.LayerNorm):
@@ -316,10 +335,15 @@ class TitanMini(nn.Module):
         
 
     def _init_head_specific_weights(self):
-        # (Initialization of heads with smaller std_dev=0.002 remains the same)
-        std_dev_head = 0.002 
+        # FIX 2: Increased std_dev_head from 0.002 to 0.01 to prevent attenuation.
+        std_dev_head = 0.01 
+        
         def trunc_normal_(tensor, std):
+            if tensor is None: return
             if hasattr(nn.init, 'trunc_normal_'):
+                # Ensure tensor is float before in-place operation if using AMP
+                if tensor.dtype in (torch.float16, torch.bfloat16):
+                     tensor.data = tensor.data.to(torch.float32)
                 nn.init.trunc_normal_(tensor, std=std, a=-2*std, b=2*std)
             else:
                 nn.init.normal_(tensor, std=std)
@@ -365,7 +389,7 @@ class TitanMini(nn.Module):
                 global_features = x[:, 12:, 0, 0]
                 global_proj = self.global_feature_proj(global_features) # [B, d_model]
 
-            # 1c. REFINEMENT A: Signed Material Injection into CLS
+            # 1c. Signed Material Injection into CLS
             
             # Calculate Sign Mask: +1 for Friendly, -1 for Enemy
             # Ensure calculation is robust for AMP (Mixed Precision)
@@ -392,26 +416,24 @@ class TitanMini(nn.Module):
             cls = self.cls_token.expand(B, -1, -1)
 
         
-        # 2. Add positional encodings (Simplified version used).
+        # 2. Add positional encodings (Rich version used).
         pos_encoding = self.positional_encoding(board_tokens)
         board_tokens = board_tokens + pos_encoding
 
-        # 3. REFINEMENT C: Input Stabilization (LayerNorm AFTER all additions)
-        if self.input_norm is not None: # Only active in sparse mode
-             cls = self.input_norm(cls)
-             board_tokens = self.input_norm(board_tokens)
+        # FIX 1: Removed Input Stabilization (LayerNorm) here. 
+        # Stabilization is handled by Pre-LN in the Transformer Blocks.
         
-        # 4. Combine CLS token and board tokens.
+        # 3. Combine CLS token and board tokens.
         x_combined = torch.cat([cls, board_tokens], dim=1)
         
-        # 5. Transformer blocks.
+        # 4. Transformer blocks.
         for block in self.transformer_blocks:
             x_combined = block(x_combined)
         
-        # 6. Final normalization.
+        # 5. Final normalization.
         x_combined = self.output_norm(x_combined)
 
-        # 7. Split features and compute outputs.
+        # 6. Split features and compute outputs.
         cls_features = x_combined[:, 0:1, :]
         board_features = x_combined[:, 1:, :]
 
