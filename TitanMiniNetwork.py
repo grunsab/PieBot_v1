@@ -464,19 +464,27 @@ class TitanMini(nn.Module):
                 # target is a move index (already legal)
                 policy_loss = self.cross_entropy_loss(policy_logits, policy_target.view(B))
             else:
-                # soft distribution over 4608; optionally mask illegals
+                # soft distribution over 4608; mask illegal logits and renormalize targets over legal moves
                 logits = policy_logits
+                pm = None
                 if self.mask_illegal_in_training and policy_mask is not None:
                     pm = policy_mask.view(B, -1).to(dtype=torch.bool)
                     mask_val = -1e4 if logits.dtype == torch.float16 else -1e9
                     logits = logits.masked_fill(~pm, mask_val)
-                log_policy = F.log_softmax(logits, dim=1)
-                tgt = policy_target + 1e-8
-                tgt = tgt / tgt.sum(dim=1, keepdim=True)
-                policy_loss = -(tgt * log_policy).sum(dim=1).mean()
 
-            total_loss = value_loss + self.policy_weight * policy_loss
-            return total_loss, value_loss, policy_loss
+                log_policy = F.log_softmax(logits, dim=1)
+
+                tgt = policy_target
+                if pm is not None:
+                    # remove any target mass on illegal moves, then renormalize
+                    tgt = tgt * pm.to(tgt.dtype)
+                    denom = tgt.sum(dim=1, keepdim=True).clamp_min(1e-12)
+                    tgt = tgt / denom
+                else:
+                    # if no mask is provided, just renormalize
+                    tgt = tgt / tgt.sum(dim=1, keepdim=True).clamp_min(1e-12)
+
+                policy_loss = -(tgt * log_policy).sum(dim=1).mean()
 
         # ----------------- Inference path -----------------
         else:
