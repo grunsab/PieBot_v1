@@ -412,6 +412,11 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, args, epoch, 
 
             with amp_ctx:
                 loss, value_loss, policy_loss = model(position, value_target, policy_target, policy_mask)
+                # right after computing loss/value_loss/policy_loss (either AMP or FP32 path)
+                if not torch.isfinite(loss):
+                    optimizer.zero_grad(set_to_none=True)
+                    continue  # skip this batch
+
                 loss = loss / args.gradient_accumulation
 
             if scaler is not None:  # CUDA path with GradScaler
