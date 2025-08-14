@@ -399,7 +399,7 @@ class Edge:
    
 class Root( Node ):
 
-    def __init__( self, board, neuralNetwork, position_history=None ):
+    def __init__( self, board, neuralNetwork, position_history=None, use_enhanced_encoder=False ):
         """
         Create the root of the search tree.
 
@@ -407,10 +407,12 @@ class Root( Node ):
             board (chess.Board) the chess position
             neuralNetwork (torch.nn.Module) the neural network
             position_history (PositionHistory or None) optional position history for enhanced encoding
+            use_enhanced_encoder (bool) whether to use enhanced encoder with position history
 
         """
-        # Store position history for enhanced encoding
-        self.position_history = position_history
+        # Store position history only if we're using enhanced encoder
+        self.use_enhanced_encoder = use_enhanced_encoder
+        self.position_history = position_history if use_enhanced_encoder else None
         
         # Use optimized neural network call that keeps data on device
         value, move_probabilities = callNeuralNetworkOptimized( board, neuralNetwork, self.position_history )
@@ -562,8 +564,8 @@ class Root( Node ):
             boards.append( board.copy() )
             node_paths.append( [] )
             edge_paths.append( [] )
-            # Create a copy of the position history for each path
-            if self.position_history and HISTORY_AVAILABLE:
+            # Create a copy of the position history for each path only if using enhanced encoder
+            if self.use_enhanced_encoder and self.position_history and HISTORY_AVAILABLE:
                 # Create a new PositionHistory with the same history as root
                 history_copy = PositionHistory(self.position_history.history_length)
                 history_copy.history = self.position_history.history.copy()
@@ -583,8 +585,8 @@ class Root( Node ):
         for future in futures:
             future.result()
         
-        # Update histories with the positions from each path
-        if HISTORY_AVAILABLE and self.position_history:
+        # Update histories with the positions from each path only if using enhanced encoder
+        if self.use_enhanced_encoder and HISTORY_AVAILABLE and self.position_history:
             for i in range(num_parallel_rollouts):
                 if histories[i]:
                     # Add the current board position to this path's history

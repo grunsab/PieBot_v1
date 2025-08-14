@@ -177,8 +177,26 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
             model = PieNanoNetwork.PieNano(num_blocks=8, num_filters=128)
             print(f"Loading PieNano model on {device_str}")
         else:
-            model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
-            print(f"Loading AlphaZeroNet model on {device_str}")
+            # Get state dict for AlphaZeroNet configuration detection
+            if isinstance(weights, dict) and 'model_state_dict' in weights:
+                check_dict = weights['model_state_dict']
+            else:
+                check_dict = weights
+            
+            # Try to detect AlphaZeroNet configuration from state dict size
+            if 'residualBlocks.19.conv1.weight' in check_dict:
+                model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
+                print(f"Loading AlphaZeroNet 20x256 model on {device_str}")
+            elif 'residualBlocks.9.conv1.weight' in check_dict:
+                # Check filter size to distinguish 10x128 from 10x256
+                conv_shape = check_dict['convBlock1.conv1.weight'].shape
+                num_filters = conv_shape[0]
+                model = AlphaZeroNetwork.AlphaZeroNet(10, num_filters)
+                print(f"Loading AlphaZeroNet 10x{num_filters} model on {device_str}")
+            else:
+                # Default to 20x256
+                model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
+                print(f"Loading AlphaZeroNet model on {device_str}")
         
         # Only load state dict if not quantized
         if not is_quantized:
@@ -286,7 +304,7 @@ def load_model_multi_gpu(model_file, gpu_ids=None):
     
     return models, devices
 
-def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_ids=None, num_processes=1 ):
+def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_ids=None, num_processes=1, use_enhanced_encoder=False ):
     
     # Load models (supports multi-GPU)
     models, devices = load_model_multi_gpu(modelFile, gpu_ids)
@@ -312,14 +330,17 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
     else:
         board = chess.Board()
     
-    # Create position history for enhanced encoding (if available and using TitanMini)
+    # Create position history for enhanced encoding (only if requested and available)
     position_history = None
-    if HISTORY_AVAILABLE and isinstance(alphaZeroNet, TitanMiniNetwork.TitanMini):
+    if use_enhanced_encoder and HISTORY_AVAILABLE and isinstance(alphaZeroNet, TitanMiniNetwork.TitanMini):
         position_history = PositionHistory(history_length=8)
         # Add the initial position to history
         position_history.add_position(board)
         if verbose:
-            print("DEBUG: Position history tracking enabled for TitanMini")
+            print("DEBUG: Position history tracking enabled for TitanMini with enhanced encoder")
+    elif use_enhanced_encoder and not HISTORY_AVAILABLE:
+        if verbose:
+            print("DEBUG: Enhanced encoder requested but encoder_enhanced module not available")
 
     #play chess moves
     while True:
@@ -329,8 +350,8 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
             print( 'Game over. Winner: {}'.format( board.result(claim_draw=True) ) )
             board.reset_board()
             
-            # Reset position history for new game
-            if position_history:
+            # Reset position history for new game (only if using enhanced encoder)
+            if use_enhanced_encoder and position_history:
                 position_history.history = []
                 position_history.add_position(board)
             
@@ -360,8 +381,8 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
             
             board.push( move_list[ idx ] )
             
-            # Update position history after human move
-            if position_history:
+            # Update position history after human move (only if using enhanced encoder)
+            if use_enhanced_encoder and position_history:
                 position_history.add_position(board)
 
         else:
@@ -377,7 +398,7 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
 
             with torch.no_grad():
                 total_simulations = num_threads * num_rollouts
-                root = MCTS.Root(board, alphaZeroNet, position_history)
+                root = MCTS.Root(board, alphaZeroNet, position_history, use_enhanced_encoder)
                 root.parallelRolloutsTotal(board.copy(), alphaZeroNet, total_simulations, num_threads)
                 if verbose:
                     print(f"DEBUG: Starting {num_rollouts} rollouts with {num_threads} threads")
@@ -404,8 +425,8 @@ def main( modelFile, mode, color, num_rollouts, num_threads, fen, verbose, gpu_i
         
             board.push( best_move )
             
-            # Update position history after AI move
-            if position_history:
+            # Update position history after AI move (only if using enhanced encoder)
+            if use_enhanced_encoder and position_history:
                 position_history.add_position(board)
 
         if mode == 'p':
@@ -440,7 +461,8 @@ if __name__=='__main__':
     parser.add_argument( '--fen', help='Starting fen' )
     parser.add_argument( '--gpus', help='Comma-separated list of GPU IDs to use (e.g., "0,1,2")')
     parser.add_argument( '--processes', type=int, help='Number of processes for multiprocessing (default: 1)' )
-    parser.set_defaults( verbose=False, mode='p', color='w', rollouts=100, threads=100, processes=1 )
+    parser.add_argument( '--enhanced-encoder', action='store_true', help='Use enhanced encoder with position history (requires encoder_enhanced module)' )
+    parser.set_defaults( verbose=False, mode='p', color='w', rollouts=100, threads=100, processes=1, enhanced_encoder=False )
     parser = parser.parse_args()
     
     # Parse GPU IDs if provided
@@ -449,7 +471,7 @@ if __name__=='__main__':
         gpu_ids = [int(gpu_id.strip()) for gpu_id in parser.gpus.split(',')]
 
     try:
-        main( parser.model, parser.mode, parseColor( parser.color ), parser.rollouts, parser.threads, parser.fen, parser.verbose, gpu_ids, parser.processes )
+        main( parser.model, parser.mode, parseColor( parser.color ), parser.rollouts, parser.threads, parser.fen, parser.verbose, gpu_ids, parser.processes, parser.enhanced_encoder )
     except Exception as e:
         print(f"Error occurred: {e}")
         import traceback

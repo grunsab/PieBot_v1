@@ -143,7 +143,7 @@ class TimeManager:
 class UCIEngine:
     """UCI Protocol handler for AlphaZero chess engine."""
     
-    def __init__(self, model_path=None, threads=64, verbose=False, use_multiprocess=False):
+    def __init__(self, model_path=None, threads=64, verbose=False, use_multiprocess=False, use_enhanced_encoder=False):
         """
         Initialize UCI engine.
         
@@ -152,6 +152,7 @@ class UCIEngine:
             threads: Number of threads to use for MCTS
             verbose: Whether to output debug information
             use_multiprocess: Whether to use multi-process MCTS
+            use_enhanced_encoder: Whether to use enhanced encoder with position history
         """
         self.model_path = model_path
         self.device, self.device_str = get_optimal_device() 
@@ -171,6 +172,8 @@ class UCIEngine:
         self.best_move = None
         self.move_overhead = 30  # Default move overhead in milliseconds
         self.use_multiprocess = use_multiprocess
+        self.use_enhanced_encoder = use_enhanced_encoder
+        self.position_history = None
         
     
     def load_model(self):
@@ -210,10 +213,25 @@ class UCIEngine:
                 print("info string Model loaded successfully")
                 sys.stdout.flush()
 
+            # Initialize position history if using enhanced encoder
+            if self.use_enhanced_encoder:
+                try:
+                    from encoder_enhanced import PositionHistory
+                    self.position_history = PositionHistory(history_length=8)
+                    self.position_history.add_position(self.board)
+                    if self.verbose:
+                        print("info string Enhanced encoder with position history enabled")
+                        sys.stdout.flush()
+                except ImportError:
+                    self.position_history = None
+                    if self.verbose:
+                        print("info string Warning: Enhanced encoder requested but encoder_enhanced module not available")
+                        sys.stdout.flush()
+            
             if self.verbose:
                 print("info string Initializing persistent multi-process MCTS engine...")
                 sys.stdout.flush()
-            self.mcts_engine = MCTS.Root(self.board, self.model)
+            self.mcts_engine = MCTS.Root(self.board, self.model, self.position_history, self.use_enhanced_encoder)
 
             return True
             
@@ -233,6 +251,7 @@ class UCIEngine:
         print("option name Verbose type check default false")
         print("option name Move Overhead type spin default 30 min 0 max 5000")
         print("option name UseMultiprocess type check default true")
+        print("option name UseEnhancedEncoder type check default false")
         print("uciok")
         sys.stdout.flush()
         
@@ -274,6 +293,9 @@ class UCIEngine:
                     move = chess.Move.from_uci(move_str)
                     if move in self.board.legal_moves:
                         self.board.push(move)
+                        # Update position history if using enhanced encoder
+                        if self.use_enhanced_encoder and self.position_history:
+                            self.position_history.add_position(self.board)
                 except ValueError:
                     if self.verbose:
                         print(f"info string Invalid move: {move_str}")
@@ -303,7 +325,7 @@ class UCIEngine:
                 
                 # Create a new MCTS engine with the current board position
                 # This ensures no stale tree state from previous positions
-                self.mcts_engine = MCTS.Root(self.board.copy(), self.model)
+                self.mcts_engine = MCTS.Root(self.board.copy(), self.model, self.position_history, self.use_enhanced_encoder)
 
                 self.mcts_engine.parallelRolloutsTotal(self.board.copy(), self.model, rollouts, self.threads)
                 actual_rollouts = rollouts
@@ -461,6 +483,16 @@ class UCIEngine:
                 pass
         elif name == "usemultiprocess":
             self.use_multiprocess = value.lower() in ["true", "yes", "1"]
+        elif name == "useenhancedencoder":
+            self.use_enhanced_encoder = value.lower() in ["true", "yes", "1"]
+            # Re-initialize position history if needed
+            if self.use_enhanced_encoder and self.model:
+                try:
+                    from encoder_enhanced import PositionHistory
+                    self.position_history = PositionHistory(history_length=8)
+                    self.position_history.add_position(self.board)
+                except ImportError:
+                    self.position_history = None
             
     def run(self):
         """Main UCI protocol loop."""
@@ -490,6 +522,10 @@ class UCIEngine:
                 elif command == "ucinewgame":
                     # Reset board for new game
                     self.board = chess.Board()
+                    # Reset position history if using enhanced encoder
+                    if self.use_enhanced_encoder and self.position_history:
+                        self.position_history.history = []
+                        self.position_history.add_position(self.board)
                     # Clean up MCTS engine for new game
                     if self.mcts_engine:
                         if self.verbose:
@@ -532,6 +568,8 @@ def main():
                        help="Enable verbose output")
     parser.add_argument("--multiprocess", action="store_true",
                        help="Use persistent multi-process MCTS")
+    parser.add_argument("--enhanced-encoder", action="store_true",
+                       help="Use enhanced encoder with position history (requires encoder_enhanced module)")
     
     args = parser.parse_args()
     
@@ -539,7 +577,8 @@ def main():
         model_path=args.model,
         threads=args.threads,
         verbose=args.verbose,
-        use_multiprocess=args.multiprocess
+        use_multiprocess=args.multiprocess,
+        use_enhanced_encoder=args.enhanced_encoder
     )
     
     # Ensure cleanup is called on exit
