@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
+
 # ==============================================================================
 # 1) Positional / Relative Bias (bounded)
 # ==============================================================================
@@ -266,7 +267,8 @@ class WDLValueHead(nn.Module):
 
 # Standard Centipawn Values (Order: Empty, P, R, B, N, Q, K)
 # Matches the order derived from encoder.py (P, R, B, N, Q, K)
-CP_VALUES = torch.tensor([0., 100., 500., 320., 300., 900., 20000.], dtype=torch.float32)
+# CP_VALUES = torch.tensor([0., 100., 500., 320., 300., 900., 20000.], dtype=torch.float32)
+PAWN_UNITS = torch.tensor([0., 1., 5., 3., 3., 9., 0.], dtype=torch.float32)
 
 class TitanMini(nn.Module):
     def __init__(
@@ -279,6 +281,9 @@ class TitanMini(nn.Module):
         self.d_model = d_model
         self.use_wdl = use_wdl
         self.input_planes = input_planes
+
+        self.input_norm = nn.LayerNorm(d_model, eps=1e-5)
+
 
         # NEW: Configuration for Auxiliary Losses (Tuned by train_titan_mini.py)
         # These are default weights; they will be dynamically adjusted during training.
@@ -294,8 +299,10 @@ class TitanMini(nn.Module):
 
         # NEW: Material Projection (for Anchor Loss)
         self.material_proj = nn.Linear(d_model, 1)
-        # Register CP_VALUES as a buffer so it moves with the model
-        self.register_buffer('cp_values_target', CP_VALUES)
+        # # Register CP_VALUES as a buffer so it moves with the model
+        # self.register_buffer('cp_values_target', CP_VALUES)
+        self.register_buffer('piece_value_anchor', PAWN_UNITS / 9.0)  # -> in [0,1]
+
 
         num_global_features = max(0, input_planes - 12)
         self.global_feature_proj = nn.Linear(num_global_features or 1, d_model) if num_global_features > 0 else None
@@ -414,7 +421,7 @@ class TitanMini(nn.Module):
 
     # ---- forward ----
     def forward(self, x, value_target=None, policy_target=None, policy_mask=None,
-                valueTarget=None, policyTarget=None, policyMask=None):
+                valueTarget=None, policyTarget=None, policyMask=None, return_logits: bool = False):
         # (Backward-compat kwargs remain the same)
         if valueTarget is not None: value_target = valueTarget
         if policyTarget is not None: policy_target = policyTarget
@@ -447,7 +454,7 @@ class TitanMini(nn.Module):
         x_combined = torch.cat([cls, board_tokens], dim=1)
         
         # FIX 1: Removed input_norm application.
-        # x_combined = self.input_norm(x_combined)
+        x_combined = self.input_norm(x_combined)
 
         # Transformer stack
         for block in self.transformer_blocks:
@@ -512,12 +519,22 @@ class TitanMini(nn.Module):
             # ----- Auxiliary Losses (NEW) -----
             
             # 1. Material Anchor Loss
+            # material_loss = torch.tensor(0.0, device=x.device, dtype=value_loss.dtype)
+            # if self.material_weight > 0:
+            #     # Project embeddings to scalars
+            #     projected_embeddings = self.material_proj(self.piece_type_embedding.weight).squeeze(1)
+            #     # Calculate MSE loss against target CP values (ensure FP32)
+            #     material_loss = F.mse_loss(projected_embeddings.float(), self.cp_values_target)
+
             material_loss = torch.tensor(0.0, device=x.device, dtype=value_loss.dtype)
             if self.material_weight > 0:
-                # Project embeddings to scalars
-                projected_embeddings = self.material_proj(self.piece_type_embedding.weight).squeeze(1)
-                # Calculate MSE loss against target CP values (ensure FP32)
-                material_loss = F.mse_loss(projected_embeddings.float(), self.cp_values_target)
+                # [7, D] -> [7, 1] -> [7]; bound to [0,1]
+                pred = torch.sigmoid(self.material_proj(self.piece_type_embedding.weight)).squeeze(1).float()
+                target = self.piece_value_anchor  # [7] in [0,1]
+                # Optionally ignore index 0 (Empty) and 6 (King)
+                idx = torch.tensor([1, 2, 3, 4, 5], device=pred.device)
+                material_loss = F.mse_loss(pred.index_select(0, idx), target.index_select(0, idx))
+
 
             # 2. Calibration Loss
             calibration_loss = torch.tensor(0.0, device=x.device, dtype=value_loss.dtype)
@@ -558,14 +575,29 @@ class TitanMini(nn.Module):
             if policy_mask is not None:
                 pm = policy_mask.view(B, -1)
                 policy = policy.masked_fill(pm == 0, -1e4)
+            if return_logits:
+                # return raw logits (value logits if WDL, else scalar; and policy logits)
+                return (value, policy)
+            # default: probabilities / scalar
             policy_softmax = F.softmax(policy, dim=1)
-
             if self.use_wdl:
                 wdl = F.softmax(value, dim=1)
                 value_scalar = wdl[:, 0:1] - wdl[:, 2:3]
                 return value_scalar, policy_softmax
             else:
                 return value, policy_softmax
+
+            # if policy_mask is not None:
+            #     pm = policy_mask.view(B, -1)
+            #     policy = policy.masked_fill(pm == 0, -1e4)
+            # policy_softmax = F.softmax(policy, dim=1)
+
+            # if self.use_wdl:
+            #     wdl = F.softmax(value, dim=1)
+            #     value_scalar = wdl[:, 0:1] - wdl[:, 2:3]
+            #     return value_scalar, policy_softmax
+            # else:
+            #     return value, policy_softmax
 
 
 def count_parameters(model):

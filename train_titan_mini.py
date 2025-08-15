@@ -119,6 +119,12 @@ def parse_args():
     parser.add_argument('--log-dir', type=str, default='logs/titan_mini')
     parser.add_argument('--checkpoint-dir', type=str, default='checkpoints/titan_mini')
     parser.add_argument('--save-every', type=int, default=10)
+
+
+    parser.add_argument('--policy-weight-start', type=float, default=0.25)
+    parser.add_argument('--policy-warmup-epochs', type=int, default=2)
+    parser.add_argument('--freeze-policy-epochs', type=int, default=0)
+
     
     return parser.parse_args()
 
@@ -171,6 +177,16 @@ class SyntheticTitanDataset(Dataset):
         policy = torch.randint(0, 72 * 64, (1,), dtype=torch.long).squeeze(0)
         mask = torch.ones(72, 8, 8, dtype=torch.int64)  # allow all moves for simplicity
         return position, torch.tensor(value, dtype=torch.float32), policy, mask
+
+
+def _set_policy_weight(model, w: float):
+    mm = model.module if hasattr(model, 'module') else model
+    mm.policy_weight = float(w)
+
+def _freeze_policy_head(model, freeze: bool):
+    mm = model.module if hasattr(model, 'module') else model
+    for p in mm.policy_head.parameters():
+        p.requires_grad = not freeze
 
 
 def create_data_loaders(args, *, distributed=False, rank=0, world_size=1, is_main=True, device=None):
@@ -320,25 +336,19 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, args, epoch, 
     if hasattr(model_module, 'material_weight'):
         # Fractional progress through training (0..1)
         progress = (epoch) / max(1, args.epochs)
-
-        # Schedule defined in the user's provided code
-        if progress < 0.10:
-            # Strong anchors early on
-            model_module.material_weight = 0.15
-            # model_module.material_scale_cp = 800.0 # (If used in network)
-            model_module.wdl_weight = 0.55
-            model_module.calibration_weight = 0.15
-        elif progress < 0.30:
-            model_module.material_weight = 0.08
-            # model_module.material_scale_cp = 700.0
-            model_module.wdl_weight = 0.58
-            model_module.calibration_weight = 0.20
-        else:
-            # Relax anchors later
-            model_module.material_weight = 0.05
-            # model_module.material_scale_cp = 600.0
+        # Make the anchor very gentle early on
+        if progress < 0.05:
+            model_module.material_weight = 0.0
+            model_module.calibration_weight = 0.10
             model_module.wdl_weight = 0.60
-            model_module.calibration_weight = 0.25
+        elif progress < 0.30:
+            model_module.material_weight = 0.02
+            model_module.calibration_weight = 0.15
+            model_module.wdl_weight = 0.60
+        else:
+            model_module.material_weight = 0.05
+            model_module.calibration_weight = 0.20
+            model_module.wdl_weight = 0.60
         
         if is_main and writer is not None:
             writer.add_scalar('Train/Aux_MaterialWeight', model_module.material_weight, epoch)
@@ -790,6 +800,17 @@ def train():
         # Check if train_loader has a sampler (i.e., it's a DataLoader, not a curriculum dataset)
         if hasattr(train_loader, 'sampler') and isinstance(train_loader.sampler, DistributedSampler):
             train_loader.sampler.set_epoch(epoch)
+
+        # linear ramp from start -> target across warmup epochs
+        if epoch < args.policy_warmup_epochs:
+            t = (epoch + 1) / max(1, args.policy_warmup_epochs)
+            w = args.policy_weight_start + t * (args.policy_weight - args.policy_weight_start)
+        else:
+            w = args.policy_weight
+        _set_policy_weight(model, w)
+        _freeze_policy_head(model, freeze=(epoch < args.freeze_policy_epochs))
+        if is_main:
+            print(f"[Epoch {epoch+1}] policy_weight={w:.3f}, freeze_policy={'yes' if epoch < args.freeze_policy_epochs else 'no'}")
 
         train_loss, train_value_loss, train_policy_loss = train_epoch(
             model, train_loader, optimizer, scheduler, scaler, args, epoch, writer, ema, is_main=is_main, distributed=distributed
