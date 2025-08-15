@@ -73,7 +73,7 @@ python3 train.py \
     --mode curriculum \
     --num-blocks 20 \
     --num-filters 256 \
-    --batch-size 256 \
+    --batch-size 4096 \
     --lr 0.001 \
     --scheduler plateau \
     --dynamic-value-weight \
