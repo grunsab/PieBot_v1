@@ -1,7 +1,9 @@
 
 import argparse
 import chess
-import MCTS_profiling_speedups_v2 as MCTS
+#import MCTS_profiling_speedups_v2 as MCTS
+#import mcts_batched as MCTS
+import mcts_gemini as MCTS
 # import searchless_policy as MCTS
 import torch
 import time
