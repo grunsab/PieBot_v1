@@ -574,9 +574,26 @@ def load_model(model_path, device=None):
         model = create_pienano_from_weights(weights)
         print(f"Loading PieNano model on {device_str}")
     else:
-        # Default to AlphaZeroNet
-        model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
-        print(f"Loading AlphaZeroNet model on {device_str}")
+        # Get state dict for AlphaZeroNet configuration detection
+        if isinstance(weights, dict) and 'model_state_dict' in weights:
+            check_dict = weights['model_state_dict']
+        else:
+            check_dict = weights
+        
+        # Try to detect AlphaZeroNet configuration from state dict size
+        if 'residualBlocks.19.conv1.weight' in check_dict:
+            model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
+            print(f"Loading AlphaZeroNet 20x256 model on {device_str}")
+        elif 'residualBlocks.9.conv1.weight' in check_dict:
+            # Check filter size to distinguish 10x128 from 10x256
+            conv_shape = check_dict['convBlock1.conv1.weight'].shape
+            num_filters = conv_shape[0]
+            model = AlphaZeroNetwork.AlphaZeroNet(10, num_filters)
+            print(f"Loading AlphaZeroNet 10x{num_filters} model on {device_str}")
+        else:
+            # Default to 20x256
+            model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
+            print(f"Loading AlphaZeroNet model on {device_str}")
     
     # Only load state dict if not quantized
     if not is_quantized:
@@ -589,7 +606,16 @@ def load_model(model_path, device=None):
         # Clean state dict (remove _orig_mod prefix etc.)
         state_dict = clean_state_dict(state_dict)
         
-        model.load_state_dict(state_dict)
+        # Try strict loading first, fall back to non-strict if needed
+        try:
+            model.load_state_dict(state_dict)
+        except RuntimeError as e:
+            if "Missing key(s)" in str(e) or "Unexpected key(s)" in str(e):
+                # Try non-strict loading for models with slight architecture differences
+                model.load_state_dict(state_dict, strict=False)
+                print(f"Warning: Loaded model with non-strict state dict (some keys were missing or unexpected)")
+            else:
+                raise
         
         # Handle FP16 models
         if isinstance(weights, dict) and weights.get('model_type') == 'fp16':
