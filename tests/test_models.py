@@ -56,7 +56,7 @@ def play_game(model1, device1, model2, device2, rollouts=100, threads=1, verbose
     move_count = 0
     opening_move_index = 0
     
-    while not board.is_game_over():
+    while not board.is_game_over(claim_draw=True):
         move_count += 1
         
         # Select the model based on whose turn it is
@@ -110,7 +110,7 @@ def play_game(model1, device1, model2, device2, rollouts=100, threads=1, verbose
         node = node.add_variation(best_move)
     
     # Get the result
-    result = board.result()
+    result = board.result(claim_draw=True)
     pgn_game.headers["Result"] = result
     
     if verbose:
@@ -123,9 +123,9 @@ def main():
     parser = argparse.ArgumentParser(description='Test two chess models against each other')
     parser.add_argument('--model1', required=True, help='Path to first model (.pt) file')
     parser.add_argument('--model2', required=True, help='Path to second model (.pt) file')
-    parser.add_argument('--games', type=int, default=10, help='Number of games to play (default: 10)')
-    parser.add_argument('--rollouts', type=int, default=50, help='Number of MCTS rollouts per thread (default: 50)')
-    parser.add_argument('--threads', type=int, default=60, help='Number of threads for MCTS (default: 60)')
+    parser.add_argument('--games', type=int, default=20, help='Number of games to play (default: 10)')
+    parser.add_argument('--rollouts', type=int, default=40, help='Number of MCTS rollouts per thread (default: 40)')
+    parser.add_argument('--threads', type=int, default=20, help='Number of threads for MCTS (default: 20)')
     parser.add_argument('--verbose', action='store_true', help='Print detailed move information')
     parser.add_argument('--pgn', help='Save games to PGN file')
     parser.add_argument('--alternate', action='store_true', help='Alternate which model plays white')

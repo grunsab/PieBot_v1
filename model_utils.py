@@ -545,12 +545,147 @@ def load_model(model_path, device=None):
         print(f"Loading TitanMini model on {device_str}")
     elif model_type == 'AlphaZeroNet_Quantized':
         # Handle quantized AlphaZeroNet
-        # AlphaZeroNet quantized models are saved as TorchScript, which should be loaded above
-        # If we reach here, it means the TorchScript loading failed
-        print(f"Note: AlphaZeroNet quantized model should be loaded as TorchScript")
-        # Fallback to regular AlphaZeroNet
-        model = AlphaZeroNetwork.AlphaZeroNet(20, 256)
-        print(f"Loading AlphaZeroNet model (dequantized fallback) on {device_str}")
+        print(f"Loading quantized AlphaZeroNet model")
+        
+        # First, try to import the quantization utilities
+        try:
+            import sys
+            import os
+            quantization_tools_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'quantization_tools')
+            if quantization_tools_path not in sys.path:
+                sys.path.append(quantization_tools_path)
+            from quantization_utils_alphazero import QuantizableAlphaZero, QuantizableResidualBlock
+            
+            # Detect model configuration from state dict
+            if isinstance(weights, dict) and 'model_state_dict' in weights:
+                state_dict = weights['model_state_dict']
+            else:
+                state_dict = weights
+                
+            # Clean state dict
+            state_dict = clean_state_dict(state_dict)
+            
+            # Detect configuration
+            num_blocks = 20
+            num_filters = 256
+            
+            if 'residualBlocks.19.conv1.weight' in state_dict:
+                num_blocks = 20
+            elif 'residualBlocks.9.conv1.weight' in state_dict:
+                num_blocks = 10
+                
+            # Check filter size
+            if 'convBlock1.conv1.weight' in state_dict:
+                conv_shape = state_dict['convBlock1.conv1.weight'].shape
+                if hasattr(conv_shape, '__len__') and len(conv_shape) >= 1:
+                    num_filters = conv_shape[0]
+            
+            # Create regular AlphaZeroNet first
+            base_model = AlphaZeroNetwork.AlphaZeroNet(num_blocks, num_filters)
+            
+            # Create quantizable version
+            quantizable_model = QuantizableAlphaZero(base_model)
+            
+            # Prepare for quantization
+            torch.backends.quantized.engine = 'qnnpack'  # Works on ARM
+            quantizable_model.eval()
+            
+            # Prepare the model for static quantization
+            quantizable_model.qconfig = torch.quantization.get_default_qconfig('qnnpack')
+            torch.quantization.prepare(quantizable_model, inplace=True)
+            
+            # Convert to quantized model
+            torch.quantization.convert(quantizable_model, inplace=True)
+            
+            # Load the quantized state dict
+            try:
+                quantizable_model.load_state_dict(state_dict, strict=False)
+                print(f"Loaded quantized AlphaZeroNet {num_blocks}x{num_filters} for CPU inference")
+                print(f"Using QNNPACK backend for ARM optimization")
+                model = quantizable_model
+                is_quantized = True
+                device = torch.device('cpu')  # Quantized models must run on CPU
+            except Exception as e:
+                print(f"Warning: Failed to load quantized weights: {e}")
+                print(f"Falling back to dequantized model")
+                # Fallback to dequantized version
+                model = AlphaZeroNetwork.AlphaZeroNet(num_blocks, num_filters)
+                
+                # Dequantize the state dict for loading into regular model
+                dequantized_state_dict = {}
+                for k, v in state_dict.items():
+                    # Skip quantization-specific keys
+                    if any(x in k for x in ['scale', 'zero_point', '_packed_params', 'skip_add', 'quant', 'dequant']):
+                        continue
+                    
+                    # Dequantize tensors if needed
+                    if hasattr(v, 'dequantize'):
+                        dequantized_state_dict[k] = v.dequantize()
+                    else:
+                        dequantized_state_dict[k] = v
+                
+                model.load_state_dict(dequantized_state_dict, strict=False)
+                print(f"Loaded dequantized AlphaZeroNet {num_blocks}x{num_filters}")
+                is_quantized = False
+                device, device_str = get_optimal_device()
+                model = optimize_for_device(model, device)
+                
+        except ImportError as e:
+            print(f"Warning: Could not import quantization utilities: {e}")
+            print(f"Falling back to dequantized model")
+            
+            # Fallback: Create regular model and dequantize weights
+            # Detect model configuration from state dict
+            if isinstance(weights, dict) and 'model_state_dict' in weights:
+                state_dict = weights['model_state_dict']
+            else:
+                state_dict = weights
+                
+            # Clean state dict
+            state_dict = clean_state_dict(state_dict)
+            
+            # Detect configuration
+            num_blocks = 20
+            num_filters = 256
+            
+            if 'residualBlocks.19.conv1.weight' in state_dict:
+                num_blocks = 20
+            elif 'residualBlocks.9.conv1.weight' in state_dict:
+                num_blocks = 10
+                
+            # Check filter size
+            if 'convBlock1.conv1.weight' in state_dict:
+                conv_shape = state_dict['convBlock1.conv1.weight'].shape
+                if hasattr(conv_shape, '__len__') and len(conv_shape) >= 1:
+                    num_filters = conv_shape[0]
+            
+            # Create model
+            model = AlphaZeroNetwork.AlphaZeroNet(num_blocks, num_filters)
+            
+            # Dequantize the state dict for loading into regular model
+            dequantized_state_dict = {}
+            for k, v in state_dict.items():
+                # Skip quantization-specific keys
+                if any(x in k for x in ['scale', 'zero_point', '_packed_params', 'skip_add', 'quant', 'dequant']):
+                    continue
+                
+                # Dequantize tensors if needed
+                if hasattr(v, 'dequantize'):
+                    dequantized_state_dict[k] = v.dequantize()
+                else:
+                    dequantized_state_dict[k] = v
+            
+            model.load_state_dict(dequantized_state_dict, strict=False)
+            print(f"Loaded dequantized AlphaZeroNet {num_blocks}x{num_filters}")
+            is_quantized = False
+            model = optimize_for_device(model, device)
+        
+        model.eval()
+        for param in model.parameters():
+            param.requires_grad = False
+        
+        # Return early to avoid the general state dict loading block
+        return model, device, is_quantized
     elif model_type == 'PieNano_Quantized':
         # Try to load quantized PieNano
         try:
