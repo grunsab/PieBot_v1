@@ -35,7 +35,7 @@ def download_file(url_filename_pairs, chunk_size=8192):
                 f.write(data)
 
 
-def extract_and_verify_rating(pgn_content, min_rating=3000):
+def extract_and_verify_rating(pgn_content, min_rating=1500):
     """Extract white and black ratings from PGN headers."""
     white_rating = None
     black_rating = None
