@@ -7,10 +7,10 @@ This is a pytorch implementation of Google Deep Mind's AlphaZero algorithm for c
 
 A LiChess Bot is available at the following link. The bot allows anyone to play with the current iteration of the chess engine.
 
-https://lichess.org/@/PieBot
+http://lichess.org/@/LunaNetEngine
 
 Watch it play live games against other bots here:
-https://lichess.org/@/PieBot/tv
+http://lichess.org/@/LunaNetEngine/tv
 
 ## Dependencies
 
